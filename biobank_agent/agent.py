@@ -96,6 +96,7 @@ class Agent:
 
         # Compute report_dir once per run() call for consistency
         _report_dir = self.settings.reports_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
+        _report_dir.mkdir(parents=True, exist_ok=True)
 
         for round_n in range(self.settings.max_tool_rounds):
             if self.state.interrupted:
@@ -132,6 +133,7 @@ class Agent:
             for tc in response.tool_calls:
                 logger.info("Tool call: %s(%s)", tc.name, tc.args)
                 t0 = time.time()
+                figs_before = len(self.state.figures)
                 ctx = self._build_ctx(_report_dir)
                 try:
                     result = self.registry.execute(tc.name, tc.args, ctx=ctx)
@@ -156,7 +158,7 @@ class Agent:
                     if suggestions:
                         error_info["known_fixes"] = suggestions[:3]
 
-                    # Auto-retry once for retryable errors
+                    # Auto-retry once for retryable errors (not ValueError/KeyError/etc.)
                     retried = False
                     try:
                         from .skills.retry import should_retry_on_error
@@ -171,10 +173,16 @@ class Agent:
                                 if key in retry_args and isinstance(retry_args[key], int):
                                     retry_args[key] = retry_args[key] // 2
                             result = self.registry.execute(tc.name, retry_args, ctx=ctx)
+                            # Mark result as retried so LLM knows params changed
+                            if isinstance(result, dict):
+                                result["_retried_with"] = {
+                                    k: v for k, v in retry_args.items()
+                                    if k in ("n_folds", "top_n", "sample_size") and retry_args[k] != tc.args.get(k)
+                                }
                             result_str = json.dumps(result, default=str, ensure_ascii=False)
                             retried = True
-                    except Exception:
-                        pass
+                    except Exception as retry_err:
+                        logger.warning("Retry of %s also failed: %s", tc.name, retry_err)
 
                     if not retried:
                         result_str = json.dumps(error_info, default=str)
@@ -182,18 +190,21 @@ class Agent:
 
                 elapsed = time.time() - t0
 
-                # Track field usage for data queries
-                for arg_val in tc.args.values():
-                    if isinstance(arg_val, str) and arg_val.replace("-", "").isdigit():
-                        self.memory.record_field_usage(arg_val)
+                # Track field usage only for successful data queries
+                is_error = isinstance(result, dict) and "error" in result
+                if not is_error:
+                    for arg_val in tc.args.values():
+                        if isinstance(arg_val, str) and arg_val.replace("-", "").isdigit():
+                            self.memory.record_field_usage(arg_val)
 
-                # Record
+                # Record — only figures produced by THIS tool call
+                new_figs = [str(p) for p in self.state.figures[figs_before:]]
                 self.state.add_record(AnalysisRecord(
                     timestamp=datetime.now().isoformat(),
                     skill=tc.name,
                     args={k: v for k, v in tc.args.items() if k != "ctx"},
                     key_results=result if isinstance(result, dict) else {"result": str(result)[:200]},
-                    figure_paths=[str(p) for p in self.state.figures[-5:]],
+                    figure_paths=new_figs,
                 ))
 
                 # Add tool result message
