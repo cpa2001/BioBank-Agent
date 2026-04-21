@@ -2,10 +2,11 @@
 
 import numpy as np
 import seaborn as sns
+import matplotlib.pyplot as plt
 
 from biobank_agent.data.features import BLOOD_BIOCHEMISTRY, BLOOD_COUNT, ALL_BIOMARKERS
 from biobank_agent.registry import skill
-from biobank_agent.utils.plotting import nature_figure, save_figure
+from biobank_agent.utils.plotting import apply_nature_style, save_figure
 
 
 @skill(
@@ -49,7 +50,6 @@ def correlation(group: str = "biochemistry", *, ctx=None) -> dict:
     corr = df.corr()
 
     # Plot clustered heatmap
-    from biobank_agent.utils.plotting import apply_nature_style
     apply_nature_style()
 
     g = sns.clustermap(
@@ -60,12 +60,17 @@ def correlation(group: str = "biochemistry", *, ctx=None) -> dict:
     g.ax_heatmap.tick_params(axis="both", which="major", labelsize=5)
     g.fig.suptitle(f"Biomarker Correlation ({group})", y=1.01, fontsize=8)
 
+    # Use standard save_figure function (returns list of paths for PNG and PDF)
     ctx.report_dir.mkdir(parents=True, exist_ok=True)
-    path = ctx.report_dir / f"correlation_{group}.png"
-    g.savefig(path, dpi=300, bbox_inches="tight")
-    import matplotlib.pyplot as plt
-    plt.close("all")
-    ctx.state.figures.append(path)
+    paths = save_figure(
+        g.fig,
+        f"correlation_{group}",
+        ctx.report_dir,
+        formats=("png", "pdf")
+    )
+
+    # Extend figures list with all generated paths
+    ctx.state.figures.extend(paths)
 
     # Top correlated pairs
     pairs = []
@@ -85,5 +90,5 @@ def correlation(group: str = "biochemistry", *, ctx=None) -> dict:
         "n_features": len(field_ids),
         "n_subjects_sampled": 50000,
         "top_correlations": pairs[:15],
-        "figure": str(path),
+        "figures": [str(p) for p in paths],  # Return both PNG and PDF paths
     }
