@@ -123,3 +123,86 @@ class LongTermMemory:
             top = self.most_used_fields(5)
             parts.append(f"top fields: {', '.join(f[0] for f in top)}")
         return "Long-term memory: " + "; ".join(parts)
+
+    # ── Tier 4: Error Catalog & Suggestions ───────────────
+    
+    def record_error(
+        self, 
+        error_type: str, 
+        error_message: str, 
+        skill_name: str,
+        suggested_fix: Optional[str] = None,
+        context: Optional[dict] = None,
+    ) -> None:
+        """Record an error with its context and suggested fix.
+        
+        Builds error catalog for pattern recognition and auto-suggestion.
+        """
+        if "errors" not in self._data:
+            self._data["errors"] = {}
+        
+        error_key = f"{error_type}:{skill_name}"
+        if error_key not in self._data["errors"]:
+            self._data["errors"][error_key] = {
+                "count": 0,
+                "last_seen": None,
+                "messages": [],
+                "suggested_fixes": [],
+                "contexts": [],
+            }
+        
+        entry = self._data["errors"][error_key]
+        entry["count"] += 1
+        entry["last_seen"] = datetime.now().isoformat()
+        
+        # Keep last 5 unique messages
+        if error_message not in entry["messages"]:
+            entry["messages"].append(error_message)
+            entry["messages"] = entry["messages"][-5:]
+        
+        # Keep last 5 unique suggestions
+        if suggested_fix and suggested_fix not in entry["suggested_fixes"]:
+            entry["suggested_fixes"].append(suggested_fix)
+            entry["suggested_fixes"] = entry["suggested_fixes"][-5:]
+        
+        # Keep last 5 contexts
+        if context:
+            entry["contexts"].append(context)
+            entry["contexts"] = entry["contexts"][-5:]
+        
+        # Save periodically
+        if entry["count"] % 3 == 0:
+            self._save()
+    
+    def get_error_suggestions(self, error_type: str, skill_name: str) -> list[str]:
+        """Get suggested fixes for a known error pattern.
+        
+        Returns list of previously successful fixes for this error+skill combo.
+        """
+        if "errors" not in self._data:
+            return []
+        
+        error_key = f"{error_type}:{skill_name}"
+        entry = self._data["errors"].get(error_key)
+        return entry["suggested_fixes"] if entry else []
+    
+    def most_common_errors(self, top_n: int = 10) -> list[dict]:
+        """Get most frequently occurring errors across all skills.
+        
+        Returns list of dicts with error info sorted by frequency.
+        """
+        if "errors" not in self._data:
+            return []
+        
+        errors = []
+        for key, entry in self._data["errors"].items():
+            error_type, skill_name = key.split(":", 1)
+            errors.append({
+                "error_type": error_type,
+                "skill": skill_name,
+                "count": entry["count"],
+                "last_seen": entry["last_seen"],
+                "suggested_fixes": entry["suggested_fixes"],
+            })
+        
+        return sorted(errors, key=lambda x: x["count"], reverse=True)[:top_n]
