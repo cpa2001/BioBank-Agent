@@ -6,6 +6,24 @@ from datetime import datetime
 from biobank_agent.registry import skill
 
 
+def _format_value(v):
+    """Convert numpy types to Python natives for display.
+    
+    Handles numpy scalars and arrays that would otherwise print as type names.
+    """
+    try:
+        import numpy as np
+        if isinstance(v, (np.integer, np.floating)):
+            # Numpy scalar → Python native
+            return v.item()
+        elif isinstance(v, np.ndarray):
+            # Numpy array → list
+            return v.tolist()
+    except (ImportError, AttributeError):
+        pass
+    return v
+
+
 @skill(
     name="generate_report",
     description="Generate a structured analysis report from all analyses performed in this session. "
@@ -44,12 +62,14 @@ def generate_report(title: str = "UK Biobank Analysis Report", *, ctx=None) -> d
                 for k, v in rec.key_results.items():
                     if k == "error":
                         sections.append(f"- ⚠ Error: {v}\n")
-                    elif k == "figure":
+                    elif k == "figure" or k == "figures":
                         continue  # handled below
                     elif isinstance(v, list) and len(v) > 5:
-                        sections.append(f"- {k}: [{v[0]}, ..., {v[-1]}] ({len(v)} items)\n")
+                        v_formatted = _format_value(v)
+                        sections.append(f"- {k}: [{v_formatted[0]}, ..., {v_formatted[-1]}] ({len(v_formatted)} items)\n")
                     else:
-                        sections.append(f"- {k}: {v}\n")
+                        v_formatted = _format_value(v)
+                        sections.append(f"- {k}: {v_formatted}\n")
             sections.append("")
 
     # Figures section
@@ -57,9 +77,14 @@ def generate_report(title: str = "UK Biobank Analysis Report", *, ctx=None) -> d
         sections.append("## Figures\n")
         for fig_path in ctx.state.figures:
             p = Path(fig_path)
-            if p.suffix == ".png":
+            if p.suffix in (".png", ".pdf"):  # Include both PNG and PDF
                 rel = p.name
-                sections.append(f"![{p.stem}]({rel})\n")
+                if p.suffix == ".png":
+                    # PNG: embed inline
+                    sections.append(f"![{p.stem}]({rel})\n")
+                else:  # PDF
+                    # PDF: link instead of inline embed
+                    sections.append(f"[{p.stem}]({rel})\n")
         sections.append("")
 
     # Cohort info
@@ -75,11 +100,20 @@ def generate_report(title: str = "UK Biobank Analysis Report", *, ctx=None) -> d
         sections.append("| Key | Type | AUC | Cases | Features |\n")
         sections.append("|-----|------|-----|-------|----------|\n")
         for key, meta in ctx.state.model_metadata.items():
+            # Safe formatting with fallbacks for numpy types
+            auc_val = meta.get('auc')
+            if auc_val is not None:
+                auc_val = _format_value(auc_val)
+                auc_str = f"{float(auc_val):.4f}" if auc_val else "N/A"
+            else:
+                auc_str = "N/A"
+            
             sections.append(
                 f"| {key} | {meta.get('model_type', '?')} | "
-                f"{meta.get('auc', '?'):.4f} | {meta.get('n_cases', '?')} | "
+                f"{auc_str} | {meta.get('n_cases', '?')} | "
                 f"{meta.get('n_features', '?')} |\n"
             )
+        sections.append("")
 
     # Write markdown
     md_content = "\n".join(sections)
