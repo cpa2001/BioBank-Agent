@@ -12,3 +12,6 @@ reports/
 custom_skills/
 *.pkl
 *.joblib
+AUDIT_*.md
+AUDIT_*.txt
+.pytest_cache/

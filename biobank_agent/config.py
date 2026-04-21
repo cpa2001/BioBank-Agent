@@ -59,6 +59,10 @@ class Settings(BaseSettings):
         return self.ukb_parquet_dir / "esimpint.txt"
 
     @property
+    def category_parquet_dir(self) -> Path:
+        return self.ukb_parquet_dir / "categories"
+
+    @property
     def raw_csv_dir(self) -> Path:
         return self.ukb_raw_dir / "UKB_info"
 

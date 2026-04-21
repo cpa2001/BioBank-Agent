@@ -39,6 +39,8 @@ class DataManager:
         self.conn = duckdb.connect(":memory:")
         self._parquet_fields: set[str] | None = None
         self._csv_views_registered: set[str] = set()
+        self._category_views: list[str] = []
+        self._category_field_map: dict[str, str] = {}  # field_id → category view name
         self._init_parquet_views()
 
     # ── Initialisation ──────────────────────────────────────
@@ -53,20 +55,55 @@ class DataManager:
             path = getattr(self.settings, attr)
             if not path.exists():
                 continue
+            safe = str(path).replace("'", "''")
             # Single file OR directory of parquets
             if path.is_file() and path.suffix == ".parquet":
-                pattern = str(path)
                 self.conn.execute(
-                    f"CREATE VIEW IF NOT EXISTS {view_name} AS "
-                    f"SELECT * FROM read_parquet('{pattern}')"
+                    f"CREATE OR REPLACE VIEW {view_name} AS "
+                    f"SELECT * FROM read_parquet('{safe}')"
                 )
             else:
-                pattern = f"{path}/*.parquet"
+                pattern = f"{safe}/*.parquet"
                 self.conn.execute(
-                    f"CREATE VIEW IF NOT EXISTS {view_name} AS "
+                    f"CREATE OR REPLACE VIEW {view_name} AS "
                     f"SELECT * FROM read_parquet('{pattern}', union_by_name=true)"
                 )
             logger.info("Registered %s view from %s", view_name, path)
+
+        # Register category parquets if they exist
+        self._register_category_parquets()
+
+    def _register_category_parquets(self) -> None:
+        """Register category parquet files (from batch_rebuild) as individual DuckDB views."""
+        cat_dir = self.settings.category_parquet_dir
+        if not cat_dir.exists():
+            return
+
+        for pq_file in sorted(cat_dir.glob("*.parquet")):
+            view_name = f"cat_{pq_file.stem.lower()}"
+            safe = str(pq_file).replace("'", "''")
+            try:
+                self.conn.execute(
+                    f"CREATE OR REPLACE VIEW {view_name} AS "
+                    f"SELECT * FROM read_parquet('{safe}')"
+                )
+                self._category_views.append(view_name)
+
+                # Map field IDs in this category to the view name
+                cat_cols = self.conn.execute(
+                    f"SELECT column_name FROM information_schema.columns "
+                    f"WHERE table_name = '{view_name}'"
+                ).fetchall()
+                for (col,) in cat_cols:
+                    if col != "eid":
+                        fid = col.split("-")[0]
+                        if fid.isdigit():
+                            self._category_field_map[fid] = view_name
+
+                logger.info("Registered category view %s from %s (%d columns)",
+                            view_name, pq_file.name, len(cat_cols))
+            except Exception as e:
+                logger.warning("Failed to register %s: %s", pq_file.name, e)
 
     def _get_parquet_fields(self) -> set[str]:
         """Lazily cache the set of field IDs available in biomarkers view."""
@@ -83,6 +120,19 @@ class DataManager:
                         self._parquet_fields.add(fid)
             except Exception:
                 self._parquet_fields = set()
+            # Also include fields from category parquets
+            for view_name in self._category_views:
+                try:
+                    cat_cols = self.conn.execute(
+                        f"SELECT column_name FROM information_schema.columns "
+                        f"WHERE table_name = '{view_name}'"
+                    ).fetchall()
+                    for (col,) in cat_cols:
+                        if col != "eid":
+                            fid = col.split("-")[0]
+                            self._parquet_fields.add(fid)
+                except Exception:
+                    pass
         return self._parquet_fields
 
     def _register_csv_view(self, category: str) -> None:
@@ -126,8 +176,11 @@ class DataManager:
         return mapping
 
     def field_source(self, field_id: str) -> str:
-        """Return 'parquet' or a category name for the best source."""
+        """Return 'parquet', a category view name, or a category CSV name for the best source."""
         if field_id in self._get_parquet_fields():
+            # Check if it's specifically in a category parquet
+            if field_id in self._category_field_map:
+                return self._category_field_map[field_id]
             return "parquet"
         csv_map = self._build_field_csv_map()
         return csv_map.get(field_id, "unknown")
@@ -156,6 +209,9 @@ class DataManager:
 
         if source == "parquet":
             sql = f"SELECT eid, {col_name} AS value FROM biomarkers"
+        elif source.startswith("cat_"):
+            # Category parquet view
+            sql = f"SELECT eid, {col_name} AS value FROM {source}"
         elif source != "unknown":
             self._register_csv_view(source)
             view = f"csv_{source.lower()}"
@@ -194,11 +250,15 @@ class DataManager:
         return self.query(sql)
 
     def get_deaths(self, icd10_prefix: Optional[str] = None) -> pd.DataFrame:
-        """Get death cause records."""
+        """Get death cause records.
+
+        Uses parameterized queries to prevent SQL injection.
+        """
         sql = "SELECT * FROM deaths"
         if icd10_prefix:
-            sql += f" WHERE cause_icd10 LIKE '{icd10_prefix}%'"
-        return self.conn.execute(sql).df()
+            sql += " WHERE cause_icd10 LIKE ?"
+            return self.query(sql, [f"{icd10_prefix}%"])
+        return self.query(sql)
 
     def count_subjects(self) -> int:
         """Total subjects in biomarkers table."""
@@ -211,3 +271,8 @@ class DataManager:
             "WHERE table_name = 'biomarkers' ORDER BY ordinal_position"
         ).fetchall()
         return [r[0] for r in rows]
+
+    def refresh_parquet_views(self) -> None:
+        """Re-register parquet views after parquet rebuild. Invalidates field cache."""
+        self._parquet_fields = None
+        self._init_parquet_views()

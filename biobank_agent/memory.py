@@ -45,7 +45,10 @@ class LongTermMemory:
         }
 
     def _save(self) -> None:
-        self._path.write_text(json.dumps(self._data, indent=2, default=str))
+        """Atomic write: write to .tmp then rename to avoid corruption."""
+        tmp_path = self._path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(self._data, indent=2, default=str))
+        tmp_path.replace(self._path)
 
     # ── Tier 1: Hyperparameter Memory ─────────────────────
 

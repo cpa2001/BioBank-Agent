@@ -2,18 +2,25 @@
 
 All models (Claude, GPT, Gemini) are accessed via the same
 OpenAI-compatible endpoint at api.shubiaobiao.cn.
+Includes retry logic with exponential backoff for transient errors.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Generator, Optional
 
-from openai import OpenAI
+from openai import OpenAI, APIError, APIConnectionError, RateLimitError, APITimeoutError
 
 logger = logging.getLogger(__name__)
+
+# Retryable error types
+_RETRYABLE_ERRORS = (APIConnectionError, RateLimitError, APITimeoutError)
+_MAX_RETRIES = 3
+_BASE_DELAY = 2.0  # seconds
 
 
 @dataclass
@@ -56,7 +63,11 @@ class LLMClient:
         temperature: float = 0.1,
         max_tokens: int = 4096,
     ) -> LLMResponse:
-        """Send a chat completion request with optional tool definitions."""
+        """Send a chat completion request with optional tool definitions.
+
+        Retries on transient errors (rate limit, connection, timeout) with
+        exponential backoff up to _MAX_RETRIES times.
+        """
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -67,8 +78,50 @@ class LLMClient:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        response = self.client.chat.completions.create(**kwargs)
-        return self._parse_response(response)
+        last_error = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                t0 = time.time()
+                response = self.client.chat.completions.create(**kwargs)
+                elapsed = time.time() - t0
+                result = self._parse_response(response)
+                if result.usage:
+                    logger.info(
+                        "LLM [%s] %d prompt + %d completion tokens (%.1fs)",
+                        self.model,
+                        result.usage.get("prompt_tokens", 0),
+                        result.usage.get("completion_tokens", 0),
+                        elapsed,
+                    )
+                return result
+            except _RETRYABLE_ERRORS as e:
+                last_error = e
+                if attempt < _MAX_RETRIES:
+                    delay = _BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        "LLM call failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, _MAX_RETRIES + 1, e, delay,
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error("LLM call failed after %d attempts: %s", _MAX_RETRIES + 1, e)
+            except APIError as e:
+                # Server errors (500/502/503) are retryable
+                if e.status_code and e.status_code >= 500:
+                    last_error = e
+                    if attempt < _MAX_RETRIES:
+                        delay = _BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            "LLM server error %d (attempt %d/%d): %s. Retrying in %.1fs...",
+                            e.status_code, attempt + 1, _MAX_RETRIES + 1, e, delay,
+                        )
+                        time.sleep(delay)
+                    else:
+                        logger.error("LLM server error after %d attempts: %s", _MAX_RETRIES + 1, e)
+                else:
+                    raise  # Non-retryable API errors (400, 401, 403, etc.)
+
+        raise last_error  # type: ignore[misc]
 
     def stream(
         self,
