@@ -1,6 +1,7 @@
 """Cohort builder — construct case/control datasets from ICD10 codes.
 
-Uses DuckDB SQL on the diagnoses view for efficient filtering.
+Uses DuckDB SQL on the diagnoses view for efficient filtering with parameterized queries
+to prevent SQL injection.
 """
 
 from __future__ import annotations
@@ -40,22 +41,22 @@ def build_cohort(
     """
     conn = dm.conn
 
-    # 1. Identify cases
-    cases_df = conn.execute(f"""
+    # 1. Identify cases using parameterized query (prevents SQL injection)
+    cases_df = conn.execute("""
         SELECT DISTINCT eid FROM diagnoses
-        WHERE diag_icd10 LIKE '{icd10_code}%'
-    """).df()
+        WHERE diag_icd10 LIKE ?
+    """, [f"{icd10_code}%"]).df()
     n_cases = len(cases_df)
     logger.info("ICD10 %s: %d cases found", icd10_code, n_cases)
 
     if n_cases == 0:
         raise ValueError(f"No cases found for ICD10 code '{icd10_code}'")
 
-    # 2. Also check death causes
-    death_cases = conn.execute(f"""
+    # 2. Also check death causes using parameterized query
+    death_cases = conn.execute("""
         SELECT DISTINCT eid FROM deaths
-        WHERE cause_icd10 LIKE '{icd10_code}%'
-    """).df()
+        WHERE cause_icd10 LIKE ?
+    """, [f"{icd10_code}%"]).df()
     all_case_eids = set(cases_df["eid"].tolist()) | set(death_cases["eid"].tolist())
     n_cases = len(all_case_eids)
     logger.info("Total cases (diagnoses + deaths): %d", n_cases)
