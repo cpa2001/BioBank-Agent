@@ -40,6 +40,8 @@ def predict(
     ctx=None,
 ) -> dict:
     """Predict disease risk for individual patients."""
+    id_col = ctx.settings.subject_id_col
+
     # Retrieve trained model
     if model_key not in ctx.state.models:
         available = list(ctx.state.models.keys())
@@ -109,7 +111,7 @@ def predict(
     predictions = []
     for i, eid in enumerate(eids[:50]):  # Limit output to 50
         pred = {
-            "eid": str(eid),
+            id_col: str(eid),
             "risk_score": round(float(probs[i]), 4),
             "risk_category": risk_categories[i],
         }
@@ -153,6 +155,8 @@ def _fetch_patient_features(
     ctx,
 ) -> pd.DataFrame:
     """Fetch biomarker data for specific patient EIDs."""
+    id_col = ctx.settings.subject_id_col
+
     # Use DataManager to query features
     from biobank_agent.data.features import BIOMARKER_GROUPS
 
@@ -179,8 +183,8 @@ def _fetch_patient_features(
         try:
             df = ctx.dm.get_field(fid)
             if df is not None:
-                df = df[df["eid"].astype(str).isin(eid_list)]
-                dfs.append(df.set_index("eid"))
+                df = df[df[id_col].astype(str).isin(eid_list)]
+                dfs.append(df.set_index(id_col))
         except Exception:
             continue
 

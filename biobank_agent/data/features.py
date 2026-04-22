@@ -140,11 +140,11 @@ def get_feature_group(group_name: str) -> dict[str, str]:
     return groups.get(group_name, ALL_BIOMARKERS)
 
 
-def rename_columns(df, catalog=None) -> dict[str, str]:
+def rename_columns(df, catalog=None, id_col: str = "eid") -> dict[str, str]:
     """Create a mapping from field-instance.array to human-readable names."""
     rename_map = {}
     for col in df.columns:
-        if col in ("eid", "label"):
+        if col in (id_col, "label"):
             continue
         fid = col.split("-")[0]
         name = ALL_FEATURES.get(fid)

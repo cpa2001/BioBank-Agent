@@ -39,6 +39,8 @@ class Settings(BaseSettings):
         return self.raw_dir
 
     # ── Biobank Identity ─────────────────────────────────────────
+    # ── Biobank Identity ─────────────────────────────────────────
+    bank_id: str = "ukb"
     biobank_name: str = "UK Biobank"
     biobank_abbreviation: str = "UKB"
     biobank_description: str = (

@@ -40,7 +40,9 @@ def _get_estimator(model_type: str):
     name="train_model",
     description="Train a machine learning model to predict a disease from biomarkers. "
                 "Performs 5-fold stratified cross-validation and reports AUC with 95% CI. "
-                "The trained model is stored in session state for subsequent analysis.",
+                "The trained model is stored in session state for subsequent analysis. "
+                "After training, consider running statistical_review to check for issues, "
+                "and feature_importance to identify top predictors.",
     parameters={
         "icd10_code": {
             "type": "string",
@@ -62,6 +64,7 @@ def _get_estimator(model_type: str):
 )
 def train_model(icd10_code: str, model_type: str = "xgb", n_folds: int = 5, *, ctx=None) -> dict:
     dm = ctx.dm
+    id_col = ctx.settings.subject_id_col
 
     # Build or reuse cohort
     cohort_key = f"{icd10_code}_1:4"
@@ -77,7 +80,7 @@ def train_model(icd10_code: str, model_type: str = "xgb", n_folds: int = 5, *, c
 
     # Prepare features
     feature_cols = [c for c in df.columns
-                    if c not in ("eid", "label")
+                    if c not in (id_col, "label")
                     and df[c].dtype in ("float64", "float32", "int64", "int32")]
 
     X = df[feature_cols].copy()

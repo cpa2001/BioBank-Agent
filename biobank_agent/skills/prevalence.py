@@ -8,8 +8,9 @@ from biobank_agent.utils.plotting import nature_figure, save_figure, PALETTE
 @skill(
     name="prevalence",
     description="Calculate disease prevalence in the biobank cohort. Returns top N most common "
-                "ICD10 3-character codes with patient counts and prevalence percentages. "
-                "Generates a horizontal bar chart.",
+                "diagnosis codes with patient counts and prevalence percentages. "
+                "Generates a horizontal bar chart. "
+                "Run this first for any new disease before building cohorts or training models.",
     parameters={
         "top_n": {
             "type": "integer",

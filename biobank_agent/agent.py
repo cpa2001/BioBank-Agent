@@ -21,7 +21,7 @@ from .data.loader import DataManager
 from .llm import LLMClient, LLMResponse
 from .memory import LongTermMemory
 from .registry import SkillRegistry, autodiscover_skills, discover_custom_skills, get_registry
-from .state import AnalysisRecord, SessionState
+from .state import AnalysisRecord, Provenance, SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -251,13 +251,30 @@ class Agent:
 
                 # Record — only figures produced by THIS tool call
                 new_figs = [str(p) for p in self.state.figures[figs_before:]]
+                ts = datetime.now().isoformat()
+                clean_args = {k: v for k, v in tc.args.items() if k != "ctx"}
+                key_res = result if isinstance(result, dict) else {"result": str(result)[:200]}
+
                 self.state.add_record(AnalysisRecord(
-                    timestamp=datetime.now().isoformat(),
+                    timestamp=ts,
                     skill=tc.name,
-                    args={k: v for k, v in tc.args.items() if k != "ctx"},
-                    key_results=result if isinstance(result, dict) else {"result": str(result)[:200]},
+                    args=clean_args,
+                    key_results=key_res,
                     figure_paths=new_figs,
                 ))
+
+                # Record provenance for reproducibility
+                if not is_error:
+                    prov = Provenance(
+                        provenance_id=Provenance.make_id(tc.name, clean_args, ts),
+                        skill=tc.name,
+                        args=clean_args,
+                        timestamp=ts,
+                        bank_id=self.settings.bank_id,
+                        result_hash=Provenance.compute_hash(key_res),
+                        parent_ids=[p.provenance_id for p in self.state.provenances[-3:]],
+                    )
+                    self.state.provenances.append(prov)
 
                 # Add tool result message
                 self.messages.append({

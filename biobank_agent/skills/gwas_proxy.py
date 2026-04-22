@@ -41,6 +41,8 @@ def gwas_proxy(
     ctx=None,
 ) -> dict:
     """Run phenotype-wide association against a disease."""
+    id_col = ctx.settings.subject_id_col
+
     from biobank_agent.data.cohort import build_cohort
     from biobank_agent.data.features import BIOMARKER_GROUPS
 
@@ -56,8 +58,8 @@ def gwas_proxy(
     if n_cases < 50:
         return {"error": f"Too few cases ({n_cases}) for GWAS-proxy. Need >= 50."}
 
-    cases = cohort_df[cohort_df["label"] == 1]["eid"].tolist()
-    controls = cohort_df[cohort_df["label"] == 0]["eid"].tolist()
+    cases = cohort_df[cohort_df["label"] == 1][id_col].tolist()
+    controls = cohort_df[cohort_df["label"] == 0][id_col].tolist()
 
     # Test all biomarker fields
     results = []
@@ -73,12 +75,12 @@ def gwas_proxy(
             if df is None or df.empty:
                 continue
 
-            col = [c for c in df.columns if c != "eid"][0]
+            col = [c for c in df.columns if c != id_col][0]
             df[col] = pd.to_numeric(df[col], errors="coerce")
             df = df.dropna(subset=[col])
 
-            case_vals = df[df["eid"].isin(cases)][col].values
-            ctrl_vals = df[df["eid"].isin(controls)][col].values
+            case_vals = df[df[id_col].isin(cases)][col].values
+            ctrl_vals = df[df[id_col].isin(controls)][col].values
 
             if len(case_vals) < 20 or len(ctrl_vals) < 20:
                 continue

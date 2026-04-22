@@ -1,0 +1,118 @@
+# UK Biobank Configuration
+# This file defines all UKB-specific schema, column names, and feature groups.
+# Other biobanks (FinnGen, CKB, HPP) provide their own YAML files.
+
+bank_id: ukb
+display_name: UK Biobank
+description: "large-scale prospective cohort study, 500K+ participants aged 40-69 at recruitment (2006-2010)"
+caveats: "healthy volunteer cohort with known selection biases; ~94% White British"
+coding_system: ICD10
+
+# Schema
+patient_id_column: eid
+diagnoses_code_column: diag_icd10
+deaths_code_column: cause_icd10
+field_column_pattern: "{field_id}-{instance}.{array}"
+default_instance: 0
+default_array: 0
+
+# File naming (UKB-specific parquet names)
+biomarker_parquet_name: "ukb.parquet"
+diagnoses_parquet_name: "hesin_diag.parquet"
+deaths_parquet_name: "death_cause.parquet"
+catalog_fields_file: "field.txt"
+catalog_categories_file: "category.txt"
+
+# Feature groups — field_id → human-readable name
+feature_groups:
+  blood_biochemistry:
+    "30600": Albumin
+    "30610": Alkaline phosphatase
+    "30620": Alanine aminotransferase
+    "30630": Apolipoprotein A
+    "30640": Apolipoprotein B
+    "30650": Aspartate aminotransferase
+    "30660": Direct bilirubin
+    "30670": Urea
+    "30680": Calcium
+    "30690": Cholesterol
+    "30700": Creatinine
+    "30710": C-reactive protein
+    "30720": Cystatin C
+    "30730": Gamma glutamyltransferase
+    "30740": Glucose
+    "30750": Glycated haemoglobin (HbA1c)
+    "30760": HDL cholesterol
+    "30770": IGF-1
+    "30780": LDL direct
+    "30790": Lipoprotein A
+    "30800": Oestradiol
+    "30810": Phosphate
+    "30830": SHBG
+    "30840": Total bilirubin
+    "30850": Testosterone
+    "30860": Total protein
+    "30870": Triglycerides
+    "30880": Urate
+    "30890": Vitamin D
+
+  blood_count:
+    "30000": White blood cell (leukocyte) count
+    "30010": Red blood cell (erythrocyte) count
+    "30020": Haemoglobin concentration
+    "30030": Haematocrit percentage
+    "30040": Mean corpuscular volume
+    "30050": Mean corpuscular haemoglobin
+    "30060": Mean corpuscular haemoglobin concentration
+    "30070": Red blood cell distribution width
+    "30080": Platelet count
+    "30090": Platelet crit
+    "30100": Mean platelet volume
+    "30110": Platelet distribution width
+    "30120": Lymphocyte count
+    "30130": Monocyte count
+    "30140": Neutrophill count
+    "30150": Eosinophill count
+    "30160": Basophill count
+    "30170": Nucleated red blood cell count
+    "30180": Lymphocyte percentage
+    "30190": Monocyte percentage
+    "30200": Neutrophill percentage
+    "30210": Eosinophill percentage
+    "30220": Basophill percentage
+    "30230": Nucleated red blood cell percentage
+    "30240": Reticulocyte percentage
+    "30250": Reticulocyte count
+    "30260": Mean reticulocyte volume
+    "30270": Mean sphered cell volume
+    "30280": Immature reticulocyte fraction
+    "30290": High light scatter reticulocyte percentage
+    "30300": High light scatter reticulocyte count
+
+  anthropometric:
+    "48": Waist circumference
+    "49": Hip circumference
+    "50": Standing height
+    "21001": Body mass index (BMI)
+    "23104": Body mass index (BMI) (impedance)
+
+  blood_pressure:
+    "4079": Diastolic blood pressure (automated)
+    "4080": Systolic blood pressure (automated)
+    "93": Systolic blood pressure (manual)
+    "94": Diastolic blood pressure (manual)
+    "102": Pulse rate (automated)
+
+  demographics:
+    "31": Sex
+    "34": Year of birth
+    "52": Month of birth
+    "21000": Ethnic background
+    "21003": Age when attended assessment centre
+    "21022": Age at recruitment
+
+  lifestyle:
+    "1558": Alcohol intake frequency
+    "20116": Smoking status
+    "1160": Sleep duration
+    "20161": Pack years of smoking

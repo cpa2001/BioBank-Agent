@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -22,6 +25,34 @@ class TokenUsage:
     def update(self, usage: dict) -> None:
         self.prompt_tokens += usage.get("prompt_tokens", 0)
         self.completion_tokens += usage.get("completion_tokens", 0)
+
+
+@dataclass
+class Provenance:
+    """Reproducibility record for a single analysis step.
+
+    Links each result to its inputs, parameters, and parent results,
+    enabling full provenance chains for scientific reproducibility.
+    """
+    provenance_id: str          # short hash of skill+args+timestamp
+    skill: str
+    args: dict
+    timestamp: str
+    bank_id: str                # which biobank config was active
+    result_hash: str            # hash of key_results for integrity
+    parent_ids: list[str] = field(default_factory=list)
+
+    @staticmethod
+    def compute_hash(result: dict) -> str:
+        """Deterministic hash of a result dict for integrity verification."""
+        serialized = json.dumps(result, sort_keys=True, default=str)
+        return hashlib.sha256(serialized.encode()).hexdigest()[:12]
+
+    @staticmethod
+    def make_id(skill: str, args: dict, timestamp: str) -> str:
+        """Generate a short provenance ID."""
+        key = f"{skill}:{json.dumps(args, sort_keys=True, default=str)}:{timestamp}"
+        return hashlib.md5(key.encode()).hexdigest()[:8]
 
 
 @dataclass
@@ -68,6 +99,9 @@ class SessionState:
 
     # ── Token tracking ────────────────────────────────────
     token_usage: TokenUsage = field(default_factory=TokenUsage)
+
+    # ── Provenance chain ─────────────────────────────────
+    provenances: list[Provenance] = field(default_factory=list)
 
     def add_record(self, record: AnalysisRecord) -> None:
         self.records.append(record)

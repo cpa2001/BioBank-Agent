@@ -33,6 +33,7 @@ from biobank_agent.utils.plotting import nature_figure, save_figure, PALETTE
 def min_sample(icd10_code: str, case_counts: str = "50,100,200,500,1000,2000,5000",
                n_repeats: int = 3, *, ctx=None) -> dict:
     dm = ctx.dm
+    id_col = ctx.settings.subject_id_col
 
     counts = [int(c.strip()) for c in case_counts.split(",")]
 
@@ -45,7 +46,7 @@ def min_sample(icd10_code: str, case_counts: str = "50,100,200,500,1000,2000,500
         ctx.state.cohorts[cohort_key] = full_df
 
     feature_cols = [c for c in full_df.columns
-                    if c not in ("eid", "label")
+                    if c not in (id_col, "label")
                     and full_df[c].dtype in ("float64", "float32", "int64", "int32")]
     X_full = full_df[feature_cols].fillna(full_df[feature_cols].median())
     y_full = full_df["label"]
