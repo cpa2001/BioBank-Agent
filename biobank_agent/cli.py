@@ -1,30 +1,75 @@
 """Rich-based CLI for Biobank Agent.
 
-Entry point: `bb` command (configured in pyproject.toml).
-Subcommands: `bb rebuild-parquet` for batch parquet rebuild.
+Entry point: `biobank` command (configured in pyproject.toml).
+Subcommands: `biobank rebuild-parquet` for batch parquet rebuild.
+Slash commands: /skills, /status, /history, /plan, /compact, /clear, /cost,
+                /model, /export, /help, /figures, /cohorts, /models,
+                /record, /pipelines, /errors, /memory
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
+from datetime import datetime
+from pathlib import Path
 
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from .agent import Agent
 from .config import get_settings
+from .planner import PlanMode
 
 console = Console()
 
 BANNER = r"""
-[bold cyan]╔══════════════════════════════════════════╗
-║   Biobank Agent (bb) v0.1.0              ║
-║   UK Biobank Phenotype Analysis          ║
-║   502K subjects · 8,868 fields · ICD10   ║
-╚══════════════════════════════════════════╝[/]
+[bold cyan]╔═══════════════════════════════════════════════════╗
+║   Biobank Agent v2.0                              ║
+║   Autonomous Scientific Discovery for UK Biobank  ║
+║   502K subjects · 4,971 fields · 6.9M diagnoses   ║
+╚═══════════════════════════════════════════════════╝[/]
+"""
+
+HELP_TEXT = """
+[bold]Available Commands:[/]
+
+[bold cyan]Session[/]
+  /help              Show this help message
+  /status            Session state, platform info, memory summary
+  /cost              Show token usage and estimated cost
+  /compact           Compress conversation history (keep last 10 turns)
+  /clear             Reset session state (cohorts, models, figures)
+  /export [format]   Export session as JSON or Markdown
+
+[bold cyan]Analysis[/]
+  /skills            List all available analysis tools
+  /history           Show analysis history
+  /figures           List all generated figures
+  /cohorts           List active cohorts with summary stats
+  /models            List trained models with AUC
+
+[bold cyan]Planning[/]
+  /plan <task>       Enter plan mode for complex tasks
+  /plan-approve      Approve plan and begin execution
+  /plan-exit         Exit plan mode
+  /plans             List all saved plans
+
+[bold cyan]Pipelines & Memory[/]
+  /record <name>     Save current session as a replayable pipeline
+  /pipelines         List saved pipelines
+  /memory            Show long-term memory summary
+  /errors            Show error catalog from long-term memory
+
+[bold cyan]Configuration[/]
+  /model <name>      Switch LLM model at runtime
+
+[bold cyan]General[/]
+  quit / exit / q    Exit the agent
 """
 
 
@@ -111,17 +156,24 @@ def main() -> None:
     with console.status("[bold green]Loading data layer..."):
         agent = Agent(settings)
 
-    console.print(f"[green]✓[/] {len(agent.registry)} skills loaded")
-    console.print(f"[green]✓[/] {agent.dm.count_subjects():,} subjects available")
-    console.print(f"[green]✓[/] {len(agent.catalog.fields):,} field definitions")
+    # Initialize plan mode
+    planner = PlanMode(settings.plans_dir)
+
+    # Token tracking
+    token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_cost_usd": 0.0}
+
+    console.print(f"[green]>[/] {len(agent.registry)} skills loaded")
+    console.print(f"[green]>[/] {agent.dm.count_subjects():,} subjects available")
+    console.print(f"[green]>[/] {len(agent.catalog.fields):,} field definitions")
     console.print()
-    console.print("[dim]Type your query, or 'quit' to exit. Ctrl+C to interrupt.[/]")
+    console.print("[dim]Type your query, or /help for commands. Ctrl+C to interrupt.[/]")
     console.print()
 
     # REPL loop
     while True:
         try:
-            query = console.input("[bold cyan]bb>[/] ").strip()
+            prompt_str = "[bold magenta]plan>[/] " if planner.is_active else "[bold cyan]biobank>[/] "
+            query = console.input(prompt_str).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Goodbye.[/]")
             break
@@ -132,44 +184,50 @@ def main() -> None:
             console.print("[dim]Goodbye.[/]")
             break
 
-        # Special commands
-        if query == "/skills":
-            _show_skills(agent)
-            continue
-        if query == "/status":
-            _show_status(agent)
-            continue
-        if query == "/history":
-            _show_history(agent)
-            continue
-        if query.startswith("/record "):
-            name = query.split(" ", 1)[1].strip()
-            _record_pipeline(agent, name)
-            continue
-        if query == "/pipelines":
-            _show_pipelines(agent)
-            continue
-        if query == "/errors":
-            _show_errors(agent)
-            continue
-        if query == "/memory":
-            _show_memory(agent)
+        # ── Slash commands ──────────────────────────────────
+        if query.startswith("/"):
+            _handle_command(query, agent, planner, token_usage)
             continue
 
-        # Run agent
+        # ── Run agent ───────────────────────────────────────
         try:
+            # In plan mode, prepend plan context
+            if planner.is_active:
+                plan_context = (
+                    f"[PLAN MODE - Status: {planner.status}]\n"
+                    f"Current plan:\n{planner.get_plan_content()}\n\n"
+                    f"User says: {query}"
+                )
+                effective_query = plan_context
+            else:
+                effective_query = query
+
+            figs_before = len(agent.state.figures)
+
             with console.status("[bold green]Thinking..."):
-                response = agent.run(query)
+                response = agent.run(effective_query)
+
+            # Update cumulative token usage
+            tu = agent.state.token_usage
+            token_usage["prompt_tokens"] = tu.prompt_tokens
+            token_usage["completion_tokens"] = tu.completion_tokens
+
             console.print()
             console.print(Markdown(response))
             console.print()
 
-            # Show any new figures
-            if agent.state.figures:
-                last_figs = agent.state.figures[-3:]
-                for fig_path in last_figs:
-                    console.print(f"[dim]📊 Figure saved: {fig_path}[/]")
+            # Show new figures from this turn only
+            new_figs = agent.state.figures[figs_before:]
+            if new_figs:
+                for fig_path in new_figs[-5:]:
+                    console.print(f"[dim]Figure saved: {fig_path}[/]")
                 console.print()
+
+            # Show token usage after each turn
+            console.print(
+                f"[dim]tokens: {tu.prompt_tokens:,} in + "
+                f"{tu.completion_tokens:,} out[/]"
+            )
 
         except KeyboardInterrupt:
             agent.state.interrupted = True
@@ -179,36 +237,316 @@ def main() -> None:
             console.print(f"[red]Error: {e}[/]")
 
 
+def _handle_command(
+    query: str,
+    agent: Agent,
+    planner: PlanMode,
+    token_usage: dict,
+) -> None:
+    """Dispatch slash commands."""
+    parts = query.split(None, 1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    # ── Session commands ────────────────────────────────
+    if cmd == "/help":
+        console.print(Markdown(HELP_TEXT))
+
+    elif cmd == "/status":
+        _show_status(agent, planner, token_usage)
+
+    elif cmd == "/cost":
+        _show_cost(token_usage, agent)
+
+    elif cmd == "/compact":
+        _compact(agent)
+
+    elif cmd == "/clear":
+        _clear(agent)
+
+    elif cmd == "/export":
+        fmt = arg or "json"
+        _export(agent, fmt)
+
+    # ── Analysis commands ───────────────────────────────
+    elif cmd == "/skills":
+        _show_skills(agent)
+
+    elif cmd == "/history":
+        _show_history(agent)
+
+    elif cmd == "/figures":
+        _show_figures(agent)
+
+    elif cmd == "/cohorts":
+        _show_cohorts(agent)
+
+    elif cmd == "/models":
+        _show_models(agent)
+
+    # ── Plan commands ───────────────────────────────────
+    elif cmd == "/plan":
+        if not arg:
+            console.print("[yellow]Usage: /plan <task description>[/]")
+        else:
+            result = planner.enter(arg)
+            console.print(Markdown(result))
+
+    elif cmd == "/plan-approve":
+        result = planner.approve()
+        console.print(Markdown(result))
+
+    elif cmd == "/plan-exit":
+        result = planner.exit()
+        console.print(result)
+
+    elif cmd == "/plans":
+        plans = planner.list_plans()
+        if not plans:
+            console.print("[dim]No saved plans.[/]")
+        else:
+            for p in plans:
+                status_color = {"DONE": "green", "EXECUTION": "yellow", "BLOCKED": "red"}.get(p["status"], "dim")
+                console.print(f"  [{status_color}]{p['status']}[/] {p['file']}")
+
+    # ── Pipeline & memory commands ──────────────────────
+    elif cmd == "/record":
+        if not arg:
+            console.print("[yellow]Usage: /record <pipeline_name>[/]")
+        else:
+            _record_pipeline(agent, arg)
+
+    elif cmd == "/pipelines":
+        _show_pipelines(agent)
+
+    elif cmd == "/errors":
+        _show_errors(agent)
+
+    elif cmd == "/memory":
+        _show_memory(agent)
+
+    # ── Configuration commands ──────────────────────────
+    elif cmd == "/model":
+        if not arg:
+            console.print(f"Current model: [cyan]{agent.settings.llm_model}[/]")
+        else:
+            old = agent.settings.llm_model
+            agent.settings.llm_model = arg
+            agent.llm.model = arg
+            console.print(f"Model switched: {old} → [cyan]{arg}[/]")
+
+    else:
+        console.print(f"[yellow]Unknown command: {cmd}. Type /help for available commands.[/]")
+
+
+# ── Command implementations ─────────────────────────────────
+
+
 def _show_skills(agent: Agent) -> None:
-    skills = agent.registry.list_skills()
-    console.print(Panel(
-        "\n".join(f"[cyan]{s['name']}[/]: {s['description']}" for s in skills),
-        title="Available Skills",
-    ))
+    table = Table(title="Available Skills", show_lines=False, padding=(0, 1))
+    table.add_column("Skill", style="cyan", no_wrap=True)
+    table.add_column("Description", style="dim")
+    for s in agent.registry.list_skills():
+        table.add_row(s["name"], s["description"][:80])
+    console.print(table)
 
 
-def _show_status(agent: Agent) -> None:
+def _show_status(agent: Agent, planner: PlanMode, token_usage: dict) -> None:
     from .utils.platform import platform_summary
-    status_lines = [
-        agent.state.context_summary(),
+    lines = [agent.state.context_summary()]
+
+    if planner.is_active:
+        lines.append(f"\nPlan Mode: [magenta]{planner.status}[/]")
+        if planner.current_plan:
+            lines.append(f"Plan File: {planner.current_plan.name}")
+
+    lines.extend([
         "",
         f"Platform: {platform_summary()}",
         f"Model: {agent.settings.llm_model}",
         f"Data: {agent.settings.ukb_parquet_dir}",
         f"Skills: {len(agent.registry)}",
-    ]
+        f"Tokens: {token_usage['prompt_tokens']:,} prompt + {token_usage['completion_tokens']:,} completion",
+    ])
+
     mem_summary = agent.memory.summary()
     if mem_summary:
-        status_lines.append(mem_summary)
-    console.print(Panel("\n".join(status_lines), title="Session Status"))
+        lines.append(mem_summary)
+    console.print(Panel("\n".join(lines), title="Session Status"))
+
+
+def _show_cost(token_usage: dict, agent: Agent) -> None:
+    """Show token usage and estimated cost."""
+    prompt = token_usage["prompt_tokens"]
+    completion = token_usage["completion_tokens"]
+    total = prompt + completion
+
+    # Rough cost estimates (per 1M tokens)
+    model = agent.settings.llm_model.lower()
+    if "claude" in model and "sonnet" in model:
+        cost_per_m_in, cost_per_m_out = 3.0, 15.0
+    elif "gpt-4" in model:
+        cost_per_m_in, cost_per_m_out = 2.5, 10.0
+    else:
+        cost_per_m_in, cost_per_m_out = 1.0, 3.0
+
+    est_cost = (prompt * cost_per_m_in + completion * cost_per_m_out) / 1_000_000
+
+    console.print(Panel(
+        f"Prompt tokens:     {prompt:>10,}\n"
+        f"Completion tokens: {completion:>10,}\n"
+        f"Total tokens:      {total:>10,}\n"
+        f"Estimated cost:    ${est_cost:>9.4f}\n"
+        f"Model:             {agent.settings.llm_model}",
+        title="Token Usage",
+    ))
+
+
+def _compact(agent: Agent) -> None:
+    """Compress conversation history, keeping system + last 10 turns."""
+    before = len(agent.messages)
+    if before <= 20:
+        console.print(f"[dim]History already compact ({before} messages).[/]")
+        return
+
+    # Keep the last 20 messages (roughly 10 turns)
+    agent.messages = agent.messages[-20:]
+    after = len(agent.messages)
+    console.print(f"[green]Compacted:[/] {before} → {after} messages ({before - after} removed)")
+
+
+def _clear(agent: Agent) -> None:
+    """Reset session state."""
+    agent.messages.clear()
+    agent.state.cohorts.clear()
+    agent.state.models.clear()
+    agent.state.model_metadata.clear()
+    agent.state.figures.clear()
+    agent.state.records.clear()
+    agent.state.feature_matrix = None
+    agent.state.labels = None
+    agent.state.embeddings.clear()
+    agent.state.custom_data.clear()
+    console.print("[green]Session cleared.[/] All cohorts, models, figures, and history reset.")
+
+
+def _export(agent: Agent, fmt: str) -> None:
+    """Export session as JSON or Markdown."""
+    export_dir = agent.settings.reports_dir / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if fmt == "json":
+        data = {
+            "timestamp": timestamp,
+            "model": agent.settings.llm_model,
+            "records": [
+                {
+                    "timestamp": r.timestamp,
+                    "skill": r.skill,
+                    "args": r.args,
+                    "key_results": {k: str(v) for k, v in r.key_results.items()},
+                    "figures": r.figure_paths,
+                }
+                for r in agent.state.records
+            ],
+            "cohorts": {name: len(df) for name, df in agent.state.cohorts.items()},
+            "models": list(agent.state.model_metadata.keys()),
+            "n_figures": len(agent.state.figures),
+        }
+        path = export_dir / f"session_{timestamp}.json"
+        path.write_text(json.dumps(data, indent=2, default=str))
+    elif fmt in ("md", "markdown"):
+        lines = [f"# Biobank Agent Session Export\n", f"**Date:** {timestamp}\n"]
+        for r in agent.state.records:
+            lines.append(f"## {r.skill}\n")
+            lines.append(f"**Args:** {r.args}\n")
+            for k, v in r.key_results.items():
+                lines.append(f"- {k}: {v}\n")
+            lines.append("")
+        path = export_dir / f"session_{timestamp}.md"
+        path.write_text("\n".join(lines))
+    else:
+        console.print(f"[yellow]Unknown format: {fmt}. Use 'json' or 'md'.[/]")
+        return
+
+    console.print(f"[green]Session exported to:[/] {path}")
 
 
 def _show_history(agent: Agent) -> None:
     if not agent.state.records:
         console.print("[dim]No analyses performed yet.[/]")
         return
-    for r in agent.state.records:
-        console.print(f"[dim]{r.timestamp}[/] [cyan]{r.skill}[/]({r.args}) → {r.key_results}")
+    table = Table(title="Analysis History", show_lines=False)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Time", style="dim", width=16)
+    table.add_column("Skill", style="cyan")
+    table.add_column("Key Results", style="white", max_width=60)
+    for i, r in enumerate(agent.state.records, 1):
+        results_str = ", ".join(f"{k}={v}" for k, v in list(r.key_results.items())[:3])
+        table.add_row(str(i), r.timestamp[:16], r.skill, results_str[:60])
+    console.print(table)
+
+
+def _show_figures(agent: Agent) -> None:
+    """List all generated figures."""
+    if not agent.state.figures:
+        console.print("[dim]No figures generated yet.[/]")
+        return
+    table = Table(title="Generated Figures")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Path", style="cyan")
+    table.add_column("Format", style="green", width=5)
+    for i, fig_path in enumerate(agent.state.figures, 1):
+        p = Path(fig_path)
+        table.add_row(str(i), str(p.name), p.suffix.lstrip(".").upper())
+    console.print(table)
+    console.print(f"[dim]Total: {len(agent.state.figures)} figures[/]")
+
+
+def _show_cohorts(agent: Agent) -> None:
+    """List active cohorts with summary stats."""
+    if not agent.state.cohorts:
+        console.print("[dim]No active cohorts.[/]")
+        return
+    table = Table(title="Active Cohorts")
+    table.add_column("Name", style="cyan")
+    table.add_column("Subjects", style="green", justify="right")
+    table.add_column("Cases", style="yellow", justify="right")
+    table.add_column("Controls", style="dim", justify="right")
+    for name, df in agent.state.cohorts.items():
+        n_total = len(df)
+        if "label" in df.columns:
+            n_cases = int(df["label"].sum())
+            n_controls = n_total - n_cases
+        else:
+            n_cases, n_controls = "?", "?"
+        table.add_row(name, f"{n_total:,}", str(n_cases), str(n_controls))
+    console.print(table)
+
+
+def _show_models(agent: Agent) -> None:
+    """List trained models with AUC."""
+    if not agent.state.model_metadata:
+        console.print("[dim]No trained models.[/]")
+        return
+    table = Table(title="Trained Models")
+    table.add_column("Key", style="cyan")
+    table.add_column("Type", style="green")
+    table.add_column("AUC", style="yellow", justify="right")
+    table.add_column("Cases", justify="right")
+    table.add_column("Features", justify="right")
+    for key, meta in agent.state.model_metadata.items():
+        auc = meta.get("auc")
+        auc_str = f"{float(auc):.4f}" if auc is not None else "N/A"
+        table.add_row(
+            key,
+            meta.get("model_type", "?"),
+            auc_str,
+            str(meta.get("n_cases", "?")),
+            str(meta.get("n_features", "?")),
+        )
+    console.print(table)
 
 
 def _record_pipeline(agent: Agent, name: str) -> None:
@@ -246,14 +584,19 @@ def _show_errors(agent: Agent) -> None:
     if not errors:
         console.print("[dim]No errors recorded.[/]")
         return
-    console.print(Panel(
-        "\n".join(
-            f"[red]{e['error_type']}[/] in [cyan]{e['skill']}[/] "
-            f"({e['count']}x, last: {e['last_seen'][:10]})"
-            for e in errors
-        ),
-        title="Error Catalog",
-    ))
+    table = Table(title="Error Catalog")
+    table.add_column("Error", style="red")
+    table.add_column("Skill", style="cyan")
+    table.add_column("Count", justify="right")
+    table.add_column("Last Seen", style="dim")
+    for e in errors:
+        table.add_row(
+            e["error_type"],
+            e["skill"],
+            str(e["count"]),
+            e["last_seen"][:10] if e["last_seen"] else "?",
+        )
+    console.print(table)
 
 
 def _show_memory(agent: Agent) -> None:

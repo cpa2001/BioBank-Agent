@@ -49,6 +49,34 @@ class SkillRegistry:
         self._module_paths[name] = module_path
         self._descriptions[name] = schema["function"]["description"]
 
+    def unregister(self, name: str) -> None:
+        """Remove a skill by name."""
+        self._schemas.pop(name, None)
+        self._callables.pop(name, None)
+        self._module_paths.pop(name, None)
+        self._descriptions.pop(name, None)
+
+    def reload_skill(self, name: str) -> None:
+        """Hot-reload a skill: reimport its module and re-register."""
+        if name in self._module_paths:
+            mod_path = self._module_paths[name]
+            mod = importlib.import_module(mod_path)
+            importlib.reload(mod)
+            # Re-find the decorated function
+            for attr_name in dir(mod):
+                attr = getattr(mod, attr_name)
+                if callable(attr) and getattr(attr, "_skill_name", None) == name:
+                    schema = getattr(attr, "_skill_schema", None)
+                    if schema:
+                        self.register(name, attr, schema)
+                    break
+            logger.info("Hot-reloaded skill: %s", name)
+        elif name in self._callables:
+            # Direct callable — nothing to reload
+            logger.warning("Skill %s is not module-based, cannot reload", name)
+        else:
+            raise ValueError(f"Unknown skill: {name}")
+
     # ── Execution ────────────────────────────────────────
 
     def execute(self, name: str, args: dict, ctx: Any = None) -> Any:
@@ -171,3 +199,35 @@ def autodiscover_skills(package_path: str = "biobank_agent.skills") -> None:
             logger.debug("Loaded skill module: %s", full_name)
         except Exception as e:
             logger.warning("Failed to load skill %s: %s", full_name, e)
+
+
+def discover_custom_skills(custom_dir: Path) -> int:
+    """Discover and load skills from a custom directory.
+
+    Scans ``custom_dir`` for ``.py`` files containing @skill-decorated functions.
+    Returns the number of newly loaded skills.
+    """
+    import sys
+
+    if not custom_dir.exists():
+        return 0
+
+    before = len(_registry)
+    for py_file in sorted(custom_dir.glob("*.py")):
+        if py_file.name.startswith("_"):
+            continue
+        module_name = f"custom_skills.{py_file.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, py_file)
+        if spec and spec.loader:
+            try:
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = mod
+                spec.loader.exec_module(mod)
+                logger.info("Loaded custom skill: %s", py_file.name)
+            except Exception as e:
+                logger.warning("Failed to load custom skill %s: %s", py_file.name, e)
+
+    loaded = len(_registry) - before
+    if loaded > 0:
+        logger.info("Loaded %d custom skill(s) from %s", loaded, custom_dir)
+    return loaded

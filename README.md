@@ -1,6 +1,6 @@
-# Biobank Agent (`bb`)
+# Biobank Agent
 
-A CLI AI agent for UK Biobank phenotype analysis. Natural language interface to 502,370 subjects, 4,971 biomarker fields, and 6.9M diagnosis records.
+Autonomous scientific discovery agent for UK Biobank phenotype analysis. Natural language interface to 502,370 subjects, 4,971 biomarker fields, and 6.9M diagnosis records.
 
 ## Quick Start
 
@@ -14,48 +14,63 @@ cp .env.example .env
 # Edit .env with your API key and data paths
 
 # Run
-bb
+biobank
 ```
 
 ## Usage
 
 ```
-bb> What are the top 20 most common diseases in UK Biobank?
-bb> Train an XGBoost model to predict Type 2 Diabetes from biomarkers
-bb> Show Kaplan-Meier survival curves for acute MI (I21)
-bb> Run a complete analysis of Chronic Kidney Disease and generate a report
+biobank> What are the top 20 most common diseases in UK Biobank?
+biobank> Discover disease-specific biomarkers for Type 2 Diabetes
+biobank> Train an XGBoost model to predict E11 and show feature importance
+biobank> Read this paper and compare findings with our UK Biobank data
+biobank> Search for latest Chronic Kidney Disease biomarker studies
+biobank> Generate a Nature Methods-quality report for all analyses
 ```
 
 ### CLI Commands
 
 | Command | Description |
 |---------|-------------|
+| `/help` | Show all available commands |
 | `/skills` | List all available analysis tools |
 | `/status` | Session state, platform info, memory summary |
+| `/cost` | Show token usage and estimated cost |
+| `/compact` | Compress conversation history |
+| `/clear` | Reset session state |
+| `/plan <task>` | Enter plan mode for complex tasks |
+| `/plan-approve` | Approve plan and begin execution |
+| `/plan-exit` | Exit plan mode |
+| `/model <name>` | Switch LLM model at runtime |
 | `/history` | Show analysis history |
-| `/record <name>` | Save current session as a replayable pipeline |
+| `/figures` | List all generated figures |
+| `/cohorts` | List active cohorts |
+| `/models` | List trained models with AUC |
+| `/record <name>` | Save session as a replayable pipeline |
 | `/pipelines` | List saved pipelines |
-| `/errors` | Show error catalog from long-term memory |
+| `/export <fmt>` | Export session as JSON/Markdown |
+| `/errors` | Show error catalog |
 | `/memory` | Show long-term memory summary |
 
 ### Subcommands
 
 ```bash
-bb rebuild-parquet                        # Rebuild parquet from category CSVs
-bb rebuild-parquet --categories=Genomics  # Rebuild specific category only
-bb --model=gpt-5.4                        # Override model at runtime
+biobank rebuild-parquet                        # Rebuild parquet from category CSVs
+biobank rebuild-parquet --categories=Genomics  # Rebuild specific category only
+biobank --model=gpt-5.4                        # Override model at runtime
 ```
 
 ## Architecture
 
 ```
 biobank_agent/
-├── cli.py                  # Rich terminal UI with REPL
+├── cli.py                  # Rich terminal UI with REPL + 18 slash commands
 ├── agent.py                # ReAct loop (native tool_use, auto-retry, error tracking)
+├── planner.py              # Plan mode engine (INTAKE → ALIGNMENT → EXECUTION → DONE)
 ├── llm.py                  # OpenAI-compatible client (retry + backoff)
-├── registry.py             # Skill auto-discovery via @skill decorator
+├── registry.py             # Skill auto-discovery via @skill decorator + hot-reload
 ├── config.py               # Pydantic settings from .env
-├── state.py                # Session state (cohorts, models, figures, records)
+├── state.py                # Session state (cohorts, models, figures, token tracking)
 ├── memory.py               # 4-tier persistent memory (configs, pipelines, fields, errors)
 │
 ├── data/
@@ -65,27 +80,38 @@ biobank_agent/
 │   ├── features.py         # Biomarker group definitions
 │   └── parquet_builder.py  # Batch CSV→parquet rebuild
 │
-├── skills/                 # 26 analysis skills (auto-discovered)
+├── skills/                 # 39 analysis skills (auto-discovered)
 │   ├── prevalence.py       # Disease prevalence charts
 │   ├── train_model.py      # XGBoost/LightGBM/CatBoost + CV
+│   ├── predict.py          # Patient-level disease risk prediction
+│   ├── discovery.py        # Automated scientific discovery pipeline
+│   ├── gwas_proxy.py       # Phenotype-wide association study
 │   ├── survival.py         # Kaplan-Meier + log-rank
-│   ├── replay_pipeline.py  # Pipeline macro replay
+│   ├── web_search.py       # DuckDuckGo/Brave/Serper web search
+│   ├── web_fetch.py        # URL content fetching + HTML→text
+│   ├── read_pdf.py         # PDF text + table extraction (PyMuPDF)
+│   ├── fetch_paper.py      # Paper acquisition by DOI/URL/title
+│   ├── read_paper.py       # Deep critical paper analysis
+│   ├── nature_writer.py    # Nature-quality manuscript writing
+│   ├── brainstorm.py       # AI4Science research ideation
+│   ├── critical_thinking.py # Scientific claims evaluation
+│   ├── deep_research.py    # Multi-source literature research
+│   ├── smart_plot.py       # Publication-quality figure generation
 │   ├── create_skill.py     # AST-gated skill generation
-│   └── ...
+│   └── ...                 # 22 more skills
 │
 ├── utils/
-│   ├── plotting.py         # Nature-style matplotlib (300 dpi, Arial, Okabe-Ito)
-│   ├── stats.py            # Mann-Whitney, chi², FDR correction, log-rank
+│   ├── plotting.py         # Nature/ICML-style matplotlib (SVG+PDF, 300 dpi, Okabe-Ito)
+│   ├── report_templates.py # Report section templates, CSS, LaTeX preamble
+│   ├── stats.py            # Mann-Whitney, chi-squared, FDR, log-rank
 │   ├── icd10.py            # ICD10 code → name lookup, chapter grouping
 │   └── platform.py         # GPU/CPU detection, architecture info
 │
-└── interfaces/             # Extension stubs (Foundation Models, Multimodal)
-    ├── fm_embedding.py     # Abstract: Evo2, ESM-2, BrainLM integration
-    ├── multimodal.py       # Abstract: tabular + embedding fusion
-    └── evolution.py        # Abstract: self-evolution hooks
+├── interfaces/             # Extension stubs (Foundation Models, Multimodal)
+└── plans/                  # Plan mode storage
 ```
 
-## Skills
+## Skills (39)
 
 ### Analysis (17)
 
@@ -107,7 +133,35 @@ biobank_agent/
 | `comorbidity` | Co-occurrence network + odds ratios |
 | `embedding` | t-SNE / UMAP patient scatter plots |
 | `min_sample` | Sample size sensitivity curves |
-| `generate_report` | Markdown + HTML analysis report |
+| `generate_report` | Markdown + HTML analysis report (technical or paper draft) |
+
+### Scientific Discovery (4)
+
+| Skill | Description |
+|-------|-------------|
+| `predict` | Patient-level disease risk prediction from trained models |
+| `discover` | Automated discovery pipeline (cohort → model → features → PheWAS) |
+| `gwas_proxy` | Phenotype-wide association study (GWAS proxy) |
+| `smart_plot` | Publication-quality figures with style selection (Nature/ICML) |
+
+### Research & Literature (7)
+
+| Skill | Description |
+|-------|-------------|
+| `web_search` | Web search via DuckDuckGo/Brave/Serper |
+| `web_fetch` | Fetch + parse web pages to text |
+| `read_pdf` | PDF text and table extraction |
+| `fetch_paper` | Download papers by DOI/URL/title |
+| `read_paper` | Deep critical paper analysis |
+| `nature_writer` | Nature-quality manuscript section writing |
+| `deep_research` | Multi-source research with citations |
+
+### Ideation & Evaluation (2)
+
+| Skill | Description |
+|-------|-------------|
+| `brainstorm` | AI4Science research ideation with evidence grounding |
+| `critical_thinking` | Scientific claims evaluation (7-step protocol) |
 
 ### Self-Evolution (9)
 
@@ -136,35 +190,21 @@ biobank_agent/
 
 **Total: 4,971 unique field IDs accessible via DuckDB.**
 
-### Raw CSV (Comprehensive Fallback)
-
-| File | Columns | Size |
-|------|---------|------|
-| `ukb672073_Biological_Samples.csv` | 1,775 | 3.5 GB |
-| `ukb672073_Health_Related_Outcomes.csv` | 4,896 | 7.3 GB |
-| `ukb672073_Online_Follow_up.csv` | 5,467 | 8.3 GB |
-| `ukb672073_Genomics.csv` | 194 | 1.0 GB |
-| `ukb672073_Additional_Exposures.csv` | 279 | 679 MB |
-| `ukb672073_Population_Characteristics.csv` | 34 | 78 MB |
-
-### Metadata
-
-- `field.txt`: 11,821 field definitions
-- `category.txt`: 410 categories
-- `esimpint.txt` / `ehierint.txt`: encoding lookups
-
 ## Configuration
 
 ```bash
 # .env
 LLM_BASE_URL=http://your-api-endpoint
 LLM_API_KEY=your-key
-LLM_MODEL=claude-sonnet-4-6       # or gpt-5.4, gemini-3.1-pro-preview, etc.
+LLM_MODEL=claude-sonnet-4-6
+
 UKB_PARQUET_DIR=./milton_data
 UKB_RAW_DIR=./UKB
-```
 
-Switch model at runtime: `bb --model=gpt-5.4`
+# Optional
+SEARCH_PROVIDER=duckduckgo  # or 'brave', 'serper'
+SEARCH_API_KEY=             # required for brave/serper
+```
 
 ## Memory System
 
@@ -174,13 +214,6 @@ Switch model at runtime: `bb --model=gpt-5.4`
 | Mid-term | Analysis records (exact numbers) | Session state |
 | Long-term | Best model configs, saved pipelines, field usage | `~/.biobank_agent/memory.json` |
 | Error catalog | Error patterns + suggested fixes | `~/.biobank_agent/memory.json` |
-
-## Extension Points
-
-- **Foundation Models**: `interfaces/fm_embedding.py` — plug in Evo2, ESM-2, BrainLM
-- **Multimodal Fusion**: `interfaces/multimodal.py` — combine tabular + FM embeddings
-- **Self-Evolution**: `interfaces/evolution.py` — pipeline macros, skill generation
-- **Custom Skills**: Drop `.py` files in `custom_skills/` with `@skill` decorator
 
 ## Platform Support
 
@@ -201,4 +234,4 @@ MIT
 
 ## Author
 
-CHEN Pengan · chenpengan@link.cuhk.edu.hk
+CHEN Pengan, chenpengan@link.cuhk.edu.hk

@@ -60,16 +60,12 @@ def correlation(group: str = "biochemistry", *, ctx=None) -> dict:
     g.ax_heatmap.tick_params(axis="both", which="major", labelsize=5)
     g.fig.suptitle(f"Biomarker Correlation ({group})", y=1.01, fontsize=8)
 
-    # Use standard save_figure function (returns list of paths for PNG and PDF)
-    ctx.report_dir.mkdir(parents=True, exist_ok=True)
     paths = save_figure(
         g.fig,
         f"correlation_{group}",
         ctx.report_dir,
-        formats=("png", "pdf")
+        formats=("svg", "pdf"),
     )
-
-    # Extend figures list with all generated paths
     ctx.state.figures.extend(paths)
 
     # Top correlated pairs
@@ -90,5 +86,5 @@ def correlation(group: str = "biochemistry", *, ctx=None) -> dict:
         "n_features": len(field_ids),
         "n_subjects_sampled": 50000,
         "top_correlations": pairs[:15],
-        "figures": [str(p) for p in paths],  # Return both PNG and PDF paths
+        "figures": [str(p) for p in paths],
     }

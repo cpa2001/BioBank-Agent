@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     reports_dir: Path = Path("./reports")
     memory_dir: Path = Path.home() / ".biobank_agent"
 
+    # ── Web Search ──────────────────────────────────────────────
+    search_provider: str = "duckduckgo"  # "duckduckgo" | "brave" | "serper"
+    search_api_key: str = ""
+
+    # ── Plan Mode ────────────────────────────────────────────────
+    plans_dir: Path = Path("./plans")
+
+    # ── Custom Skills ────────────────────────────────────────────
+    custom_skills_dir: Path = Path("./custom_skills")
+
     # ── Agent ────────────────────────────────────────────────────
     max_tool_rounds: int = 30
     context_window: int = 180_000

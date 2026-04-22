@@ -18,13 +18,15 @@ from .data.catalog import FieldCatalog
 from .data.loader import DataManager
 from .llm import LLMClient, LLMResponse
 from .memory import LongTermMemory
-from .registry import SkillRegistry, autodiscover_skills, get_registry
+from .registry import SkillRegistry, autodiscover_skills, discover_custom_skills, get_registry
 from .state import AnalysisRecord, SessionState
 
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are **Biobank Agent (bb)**, an expert biomedical data analyst for UK Biobank research.
+You are **Biobank Agent**, an autonomous scientific discovery system for UK Biobank research.
+You combine biomedical expertise with computational analysis to discover disease biomarkers,
+build predictive models, and generate publication-quality reports.
 
 ## Data available
 - **502,370 participants** with 2,031 biomarker columns (parquet, fast)
@@ -71,6 +73,7 @@ class Agent:
 
         # Skills
         autodiscover_skills()
+        discover_custom_skills(settings.custom_skills_dir)
         self.registry = get_registry()
         logger.info("Loaded %d skills", len(self.registry))
 
@@ -110,6 +113,10 @@ class Agent:
                 messages=all_messages,
                 tools=self.registry.tool_schemas() or None,
             )
+
+            # Track token usage
+            if response.usage:
+                self.state.token_usage.update(response.usage)
 
             # If no tool calls → final answer
             if not response.has_tool_calls:

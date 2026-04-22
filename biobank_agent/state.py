@@ -10,6 +10,21 @@ import pandas as pd
 
 
 @dataclass
+class TokenUsage:
+    """Cumulative token usage tracking."""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    def update(self, usage: dict) -> None:
+        self.prompt_tokens += usage.get("prompt_tokens", 0)
+        self.completion_tokens += usage.get("completion_tokens", 0)
+
+
+@dataclass
 class AnalysisRecord:
     """Immutable record of one skill execution — exact numbers, never summarised."""
     timestamp: str
@@ -50,6 +65,9 @@ class SessionState:
     # ── Extension slots (future multimodal / FM) ──────────
     embeddings: dict[str, Any] = field(default_factory=dict)
     custom_data: dict[str, Any] = field(default_factory=dict)
+
+    # ── Token tracking ────────────────────────────────────
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
 
     def add_record(self, record: AnalysisRecord) -> None:
         self.records.append(record)

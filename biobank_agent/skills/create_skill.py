@@ -123,27 +123,55 @@ def create_skill(
     try:
         temp_skill_dir = ctx.settings.reports_dir / "generated_skills"
         temp_skill_dir.mkdir(parents=True, exist_ok=True)
-        
+
         skill_path = temp_skill_dir / f"{name}.py"
         skill_path.write_text(skill_code)
-        
+
         logger.info("Generated skill saved to: %s", skill_path)
     except Exception as e:
         return {
             "status": "validation_failed",
             "error": f"Failed to save skill file: {e}",
         }
-    
-    return {
-        "status": "success",
-        "generated_skill_path": str(skill_path),
-        "code": skill_code,
-        "message": (
-            f"✓ Skill '{name}' generated and saved.\n\n"
+
+    # Auto-activate: copy to custom_skills/ and hot-reload into registry
+    activated = False
+    try:
+        custom_dir = ctx.settings.custom_skills_dir
+        custom_dir.mkdir(parents=True, exist_ok=True)
+        active_path = custom_dir / f"{name}.py"
+        active_path.write_text(skill_code)
+
+        # Hot-reload into the running registry
+        from biobank_agent.registry import discover_custom_skills
+        n_loaded = discover_custom_skills(custom_dir)
+        if n_loaded > 0:
+            activated = True
+            logger.info("Skill '%s' hot-loaded into registry", name)
+    except Exception as e:
+        logger.warning("Auto-activation failed (skill still saved for manual review): %s", e)
+
+    if activated:
+        message = (
+            f"Skill '{name}' generated, validated, and activated.\n\n"
+            f"The skill is now available in this session — no restart needed.\n"
+            f"Source: {skill_path}\n"
+            f"Active: {active_path}"
+        )
+    else:
+        message = (
+            f"Skill '{name}' generated and saved.\n\n"
             f"Next steps:\n"
             f"1. Review the code at: {skill_path}\n"
             f"2. If approved, move to: biobank_agent/skills/{name}.py\n"
             f"3. Restart the agent to import and use the skill\n\n"
             f"Generated skill is INACTIVE until moved to biobank_agent/skills/"
-        ),
+        )
+
+    return {
+        "status": "success",
+        "generated_skill_path": str(skill_path),
+        "activated": activated,
+        "code": skill_code,
+        "message": message,
     }

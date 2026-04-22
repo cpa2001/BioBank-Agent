@@ -1,3 +1,3 @@
-"""Biobank Agent — CLI AI agent for UK Biobank phenotype analysis."""
+"""Biobank Agent — Autonomous scientific discovery for UK Biobank."""
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"

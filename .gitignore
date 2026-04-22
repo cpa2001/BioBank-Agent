@@ -10,8 +10,13 @@ build/
 .idea/
 reports/
 custom_skills/
+plans/
 *.pkl
 *.joblib
 AUDIT_*.md
 AUDIT_*.txt
+FINDINGS_SUMMARY.md
+IMPLEMENTATION_QUICK_REFERENCE.md
+BIOBANK_AUDIT_REPORT.txt
+AUDIT_COMPLETION_SUMMARY.md
 .pytest_cache/
