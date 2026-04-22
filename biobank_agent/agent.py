@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections import Counter
@@ -20,8 +21,17 @@ from .data.catalog import FieldCatalog
 from .data.loader import DataManager
 from .llm import LLMClient, LLMResponse
 from .memory import LongTermMemory
-from .registry import SkillRegistry, autodiscover_skills, discover_custom_skills, get_registry
+from .registry import autodiscover_skills, discover_custom_skills, get_registry
 from .state import AnalysisRecord, Provenance, SessionState
+
+# Multi-model & reasoning imports (lazy-friendly)
+from .complexity import Strategy
+from .orchestrator import MultiModelOrchestrator, ModelSpec
+from .reflexion import ReflexionEngine
+from .verdict import VerdictEngine
+from .guardrails import DelegationGuardrails
+from .retrieval import AgenticRAG
+from .tool_learner import ToolLearner
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +78,39 @@ class Agent:
             api_key=settings.llm_api_key,
             model=settings.llm_model,
         )
+        self.llm.tool_call_content_mode = settings.tool_call_content_mode
+
+        # Discover relay-supported models (best effort) for richer multi-agent routing.
+        self.available_models: list[str] = self._discover_available_models()
+
+        # Multi-model orchestrator
+        model_pool = self._build_model_pool(settings, self.available_models)
+        self.orchestrator = MultiModelOrchestrator(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            default_model=settings.llm_model,
+            model_pool=model_pool,
+            complexity_threshold=settings.complexity_threshold,
+            debate_rounds=settings.debate_rounds,
+        )
+
+        # Reflexion engine (structured self-correction)
+        self.reflexion = ReflexionEngine(
+            llm=self.llm,
+            memory=self.memory,
+        ) if settings.enable_reflexion else None
+
+        # Verdict engine (PASS/FAIL/PARTIAL verification)
+        self.verdict_engine = VerdictEngine(self.llm)
+
+        # Delegation guardrails (anti-pattern enforcement)
+        self.guardrails = DelegationGuardrails()
+
+        # Agentic RAG (autonomous retrieval on uncertainty)
+        self.rag = AgenticRAG(llm=self.llm, memory=self.memory)
+
+        # Tool learner (skill performance tracking)
+        self.tool_learner = ToolLearner(memory=self.memory)
 
         # Skills
         autodiscover_skills()
@@ -81,6 +124,107 @@ class Agent:
         # Background review
         self._review_lock = threading.Lock()
         self._review_interval = 5  # trigger review every N records
+
+    @staticmethod
+    def _split_model_csv(raw: str) -> list[str]:
+        """Split comma-separated model IDs and drop empties."""
+        return [m.strip() for m in raw.split(",") if m.strip()]
+
+    @classmethod
+    def _build_model_pool(
+        cls,
+        settings: Settings,
+        available_models: list[str] | None = None,
+    ) -> list[ModelSpec]:
+        """Build model pool from config + discovered relay models."""
+        pool = [ModelSpec(settings.llm_model, "generalist", priority=10)]
+        seen = {settings.llm_model}
+        available_set = set(available_models or [])
+
+        # 1) Explicit model pool from env has highest priority.
+        explicit_pool = bool(settings.model_pool)
+        if explicit_pool:
+            candidates = cls._split_model_csv(settings.model_pool)
+        else:
+            # 2) Auto pool from preferred models if relay discovery is enabled.
+            preferred = cls._split_model_csv(settings.preferred_multi_models)
+            if available_set:
+                candidates = [m for m in preferred if m in available_set]
+                if not candidates:
+                    candidates = [m for m in available_models or [] if m != settings.llm_model]
+            else:
+                candidates = []
+
+        max_models = 999 if explicit_pool else max(1, settings.max_auto_model_pool)
+        for idx, model_id in enumerate(candidates):
+            if model_id in seen:
+                continue
+            priority = max(1, 8 - idx)
+            pool.append(ModelSpec(model_id, role="generalist", priority=priority))
+            seen.add(model_id)
+            if len(pool) >= max_models:
+                break
+        return pool
+
+    def _discover_available_models(self) -> list[str]:
+        """Fetch relay model list (non-fatal on failure)."""
+        if not self.settings.auto_discover_models:
+            return []
+        api_key = (self.settings.llm_api_key or "").strip()
+        if not api_key or api_key.startswith("your-"):
+            return []
+        try:
+            return self.llm.list_models(refresh=False)
+        except Exception as e:  # defensive: never break startup on discovery
+            logger.warning("Model discovery failed: %s", e)
+            return []
+
+    def refresh_available_models(self) -> list[str]:
+        """Refresh relay model list and rebuild auto pool when applicable."""
+        api_key = (self.settings.llm_api_key or "").strip()
+        if not api_key or api_key.startswith("your-"):
+            return list(self.available_models)
+        try:
+            self.available_models = self.llm.list_models(refresh=True)
+        except Exception as e:
+            logger.warning("Model refresh failed: %s", e)
+            self.available_models = self.available_models or []
+
+        if self.settings.auto_discover_models and not self.settings.model_pool:
+            self.orchestrator.model_pool = self._build_model_pool(
+                self.settings,
+                self.available_models,
+            )
+        return list(self.available_models)
+
+    def switch_model(self, model_id: str) -> None:
+        """Switch default model at runtime and keep orchestrator in sync."""
+        model_id = model_id.strip()
+        if not model_id:
+            return
+        self.settings.llm_model = model_id
+        self.llm.model = model_id
+        self.orchestrator.default_model = model_id
+
+        if all(spec.model_id != model_id for spec in self.orchestrator.model_pool):
+            self.orchestrator.model_pool.insert(0, ModelSpec(model_id, "generalist", priority=10))
+
+    @staticmethod
+    def _plan_mode_status(query: str) -> str | None:
+        """Extract plan-mode status from CLI-wrapped query context."""
+        match = re.search(r"\[PLAN MODE - Status:\s*([A-Z]+)\]", query)
+        if not match:
+            return None
+        return match.group(1).strip().upper()
+
+    def _forced_strategy(self, query: str) -> Strategy | None:
+        """Force multi-agent strategy for early planning stages."""
+        status = self._plan_mode_status(query)
+        if status in {"INTAKE", "ALIGNMENT"}:
+            return Strategy.SUPERVISOR
+        if status == "EXECUTION":
+            return Strategy.ENSEMBLE
+        return None
 
     def _build_data_description(self) -> str:
         """Generate dynamic data description from live data layer."""
@@ -149,14 +293,23 @@ class Agent:
             if self.state.interrupted:
                 return "[Interrupted by user]"
 
-            # Build messages with fresh system prompt
+            # Call LLM (with optional multi-model routing)
             all_messages = [self._system_message()] + self.messages
 
-            # Call LLM
-            response = self.llm.chat(
-                messages=all_messages,
-                tools=self.registry.tool_schemas() or None,
-            )
+            force_strategy = self._forced_strategy(user_query)
+            if self.settings.multi_model_enabled and len(self.orchestrator.model_pool) > 1:
+                response = self.orchestrator.route(
+                    query=user_query,
+                    messages=all_messages,
+                    tools=self.registry.tool_schemas() or None,
+                    records=self.state.records,
+                    force_strategy=force_strategy,
+                )
+            else:
+                response = self.llm.chat(
+                    messages=all_messages,
+                    tools=self.registry.tool_schemas() or None,
+                )
 
             # Track token usage
             if response.usage:
@@ -170,7 +323,8 @@ class Agent:
 
             # Process tool calls
             # First, add the assistant message with tool_calls
-            assistant_msg = {"role": "assistant", "content": response.text or ""}
+            # content is set to None when empty — _sanitize_messages() handles relay compat
+            assistant_msg = {"role": "assistant", "content": response.text or None}
             assistant_msg["tool_calls"] = [
                 {
                     "id": tc.id,
@@ -210,29 +364,53 @@ class Agent:
                     if suggestions:
                         error_info["known_fixes"] = suggestions[:3]
 
-                    # Auto-retry once for retryable errors (not ValueError/KeyError/etc.)
+                    # Auto-retry with Reflexion (structured) or simple heuristic
                     retried = False
                     try:
-                        from .skills.retry import should_retry_on_error
-                        if should_retry_on_error(e):
-                            logger.info("Retrying %s with adjusted params...", tc.name)
-                            retry_args = dict(tc.args)
-                            # Simple parameter adjustments
-                            for key in ("n_folds", "top_n"):
-                                if key in retry_args and isinstance(retry_args[key], int):
-                                    retry_args[key] = max(2, retry_args[key] // 2)
-                            for key in ("sample_size",):
-                                if key in retry_args and isinstance(retry_args[key], int):
-                                    retry_args[key] = retry_args[key] // 2
-                            result = self.registry.execute(tc.name, retry_args, ctx=ctx)
-                            # Mark result as retried so LLM knows params changed
-                            if isinstance(result, dict):
-                                result["_retried_with"] = {
-                                    k: v for k, v in retry_args.items()
-                                    if k in ("n_folds", "top_n", "sample_size") and retry_args[k] != tc.args.get(k)
-                                }
-                            result_str = json.dumps(result, default=str, ensure_ascii=False)
-                            retried = True
+                        if self.reflexion and self.reflexion.should_retry(e, tc.name):
+                            # Structured reflexion: LLM analyzes root cause
+                            logger.info("Reflexion: analyzing failure of %s...", tc.name)
+                            reflection = self.reflexion.reflect(
+                                skill_name=tc.name,
+                                args=tc.args,
+                                error=e,
+                                context=self.state.context_summary()[:500],
+                            )
+                            if reflection.retry_recommended and reflection.corrections:
+                                retry_args = {**tc.args, **reflection.corrected_args}
+                                logger.info(
+                                    "Reflexion: retrying %s with corrections: %s (confidence=%.2f)",
+                                    tc.name, reflection.corrected_args, reflection.confidence,
+                                )
+                                result = self.registry.execute(tc.name, retry_args, ctx=ctx)
+                                if isinstance(result, dict):
+                                    result["_reflexion"] = {
+                                        "root_cause": reflection.root_cause,
+                                        "corrections": {c.param: c.new_value for c in reflection.corrections},
+                                        "confidence": reflection.confidence,
+                                    }
+                                result_str = json.dumps(result, default=str, ensure_ascii=False)
+                                retried = True
+                        elif not self.reflexion:
+                            # Legacy fallback: simple parameter halving
+                            from .skills.retry import should_retry_on_error
+                            if should_retry_on_error(e):
+                                logger.info("Retrying %s with halved params (no reflexion)...", tc.name)
+                                retry_args = dict(tc.args)
+                                for key in ("n_folds", "top_n"):
+                                    if key in retry_args and isinstance(retry_args[key], int):
+                                        retry_args[key] = max(2, retry_args[key] // 2)
+                                for key in ("sample_size",):
+                                    if key in retry_args and isinstance(retry_args[key], int):
+                                        retry_args[key] = retry_args[key] // 2
+                                result = self.registry.execute(tc.name, retry_args, ctx=ctx)
+                                if isinstance(result, dict):
+                                    result["_retried_with"] = {
+                                        k: v for k, v in retry_args.items()
+                                        if k in ("n_folds", "top_n", "sample_size") and retry_args[k] != tc.args.get(k)
+                                    }
+                                result_str = json.dumps(result, default=str, ensure_ascii=False)
+                                retried = True
                     except Exception as retry_err:
                         logger.warning("Retry of %s also failed: %s", tc.name, retry_err)
 
@@ -248,6 +426,26 @@ class Agent:
                     for arg_val in tc.args.values():
                         if isinstance(arg_val, str) and arg_val.replace("-", "").isdigit():
                             self.memory.record_field_usage(arg_val)
+
+                # Tool learner: record execution stats
+                try:
+                    self.tool_learner.record(
+                        tc.name, {k: v for k, v in tc.args.items() if k != "ctx"},
+                        result if isinstance(result, dict) else {}, elapsed,
+                    )
+                except Exception:
+                    pass  # non-critical
+
+                # Verdict: verify successful results for data quality
+                if not is_error and tc.name not in ("think", "generate_report"):
+                    try:
+                        verdict = self.verdict_engine.verify_skill_result(
+                            tc.name, tc.args, result if isinstance(result, dict) else {},
+                        )
+                        if verdict.n_blockers > 0:
+                            logger.warning("Verdict FAIL for %s: %s", tc.name, verdict.summary())
+                    except Exception:
+                        pass  # non-critical
 
                 # Record — only figures produced by THIS tool call
                 new_figs = [str(p) for p in self.state.figures[figs_before:]]

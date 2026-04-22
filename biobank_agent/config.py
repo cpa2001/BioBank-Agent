@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +18,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # ── LLM ──────────────────────────────────────────────────────
@@ -26,8 +27,15 @@ class Settings(BaseSettings):
     llm_model: str = "claude-sonnet-4-6"
 
     # ── Data Paths ───────────────────────────────────────────────
-    data_dir: Path = Path("./milton_data")
-    raw_dir: Path = Path("./UKB")
+    # Accept both new (DATA_DIR/RAW_DIR) and legacy (UKB_PARQUET_DIR/UKB_RAW_DIR) env var names
+    data_dir: Path = Field(
+        default=Path("./milton_data"),
+        validation_alias=AliasChoices("data_dir", "DATA_DIR", "UKB_PARQUET_DIR"),
+    )
+    raw_dir: Path = Field(
+        default=Path("./UKB"),
+        validation_alias=AliasChoices("raw_dir", "RAW_DIR", "UKB_RAW_DIR"),
+    )
 
     # Backward compatibility aliases
     @property
@@ -38,7 +46,6 @@ class Settings(BaseSettings):
     def ukb_raw_dir(self) -> Path:
         return self.raw_dir
 
-    # ── Biobank Identity ─────────────────────────────────────────
     # ── Biobank Identity ─────────────────────────────────────────
     bank_id: str = "ukb"
     biobank_name: str = "UK Biobank"
@@ -82,6 +89,18 @@ class Settings(BaseSettings):
     # ── Agent ────────────────────────────────────────────────────
     max_tool_rounds: int = 30
     context_window: int = 180_000
+
+    # ── Multi-Model Orchestration ────────────────────────────────
+    multi_model_enabled: bool = True
+    model_pool: str = ""       # comma-separated model IDs, e.g. "claude-sonnet-4-6,gpt-4o"
+    auto_discover_models: bool = True
+    preferred_multi_models: str = "gpt-5.4,gemini-3.1-pro-preview"
+    max_auto_model_pool: int = 3
+    debate_rounds: int = 2
+    complexity_threshold: float = 0.7   # score above this triggers multi-model
+    enable_reflexion: bool = True       # structured self-correction on failure
+    enable_tot: bool = False            # Tree-of-Thought for branching decisions
+    tool_call_content_mode: str = "null"  # "null" | "empty" — how to send empty content with tool_calls
 
     # ── Derived Paths ────────────────────────────────────────────
 

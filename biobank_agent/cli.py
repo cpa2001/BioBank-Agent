@@ -4,7 +4,7 @@ Entry point: `biobank` command (configured in pyproject.toml).
 Subcommands: `biobank rebuild-parquet` for batch parquet rebuild.
 Slash commands: /skills, /status, /history, /plan, /compact, /clear, /cost,
                 /model, /export, /help, /figures, /cohorts, /models,
-                /record, /pipelines, /errors, /memory
+                /record, /pipelines, /errors, /memory, /models-available
 """
 
 from __future__ import annotations
@@ -12,9 +12,18 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.formatted_text import FormattedText, HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.styles import Style as PTStyle
+from rich import box
+from rich.columns import Columns
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -27,55 +36,232 @@ from .planner import PlanMode
 
 console = Console()
 
+@dataclass(frozen=True)
+class CommandHint:
+    """Command metadata for help rendering and slash completion."""
+    command: str
+    usage: str
+    description: str
 
-def _make_banner(settings) -> str:
-    """Generate dynamic banner from settings."""
-    name = settings.biobank_name
-    return (
-        f"\n[bold cyan]"
-        f"╔═══════════════════════════════════════════════════╗\n"
-        f"║   Biobank Agent v2.0                              ║\n"
-        f"║   Autonomous Scientific Discovery                 ║\n"
-        f"║   Data source: {name:<35s} ║\n"
-        f"╚═══════════════════════════════════════════════════╝[/]\n"
+    @property
+    def insert_text(self) -> str:
+        """Text inserted by autocomplete."""
+        return f"{self.command} " if self.usage != self.command else self.command
+
+HELP_SECTIONS = [
+    ("Session", [
+        ("/help", "Show this help message"),
+        ("/status", "Session state, platform info, memory summary"),
+        ("/cost", "Show token usage and estimated cost"),
+        ("/compact", "Compress conversation history (keep last 10 turns)"),
+        ("/clear", "Reset session state (cohorts, models, figures)"),
+        ("/export [format]", "Export session as JSON or Markdown"),
+    ]),
+    ("Analysis", [
+        ("/skills", "List all available analysis tools"),
+        ("/history", "Show analysis history"),
+        ("/figures", "List all generated figures"),
+        ("/cohorts", "List active cohorts with summary stats"),
+        ("/models", "List trained models with AUC"),
+    ]),
+    ("Planning", [
+        ("/plan <task>", "Enter plan mode for complex tasks"),
+        ("/plan-approve", "Approve plan and begin execution"),
+        ("/plan-exit", "Exit plan mode"),
+        ("/plans", "List all saved plans"),
+    ]),
+    ("Pipelines & Memory", [
+        ("/record <name>", "Save current session as a replayable pipeline"),
+        ("/pipelines", "List saved pipelines"),
+        ("/memory", "Show long-term memory summary"),
+        ("/errors", "Show error catalog from long-term memory"),
+    ]),
+    ("Configuration", [
+        ("/model <name>", "Switch LLM model at runtime"),
+        ("/models-pool", "Show available models in the pool"),
+        ("/models-available", "Fetch model list from current relay endpoint"),
+        ("/strategy <mode>", "Set routing: auto, single, debate, ensemble"),
+        ("/debate <query>", "Force multi-model debate for a query"),
+    ]),
+    ("General", [
+        ("quit / exit / q", "Exit the agent"),
+    ]),
+]
+
+
+def _command_hints() -> list[CommandHint]:
+    """Flatten HELP_SECTIONS into command hints."""
+    hints: list[CommandHint] = []
+    for _, rows in HELP_SECTIONS:
+        for usage, description in rows:
+            command = usage.split()[0]
+            if command.startswith("/"):
+                hints.append(CommandHint(command=command, usage=usage, description=description))
+    return hints
+
+
+class SlashCommandCompleter(Completer):
+    """Autocomplete slash commands such as /help, /status, /plan."""
+
+    def __init__(self, hints: list[CommandHint]) -> None:
+        self.hints = hints
+
+    def get_completions(self, document, complete_event):  # noqa: D401
+        text = document.text_before_cursor.lstrip()
+        if not text.startswith("/"):
+            return
+
+        # Only autocomplete the command token.
+        if " " in text:
+            if text.endswith(" "):
+                return
+            fragment = text.split(None, 1)[0]
+        else:
+            fragment = text
+
+        for hint in self.hints:
+            if hint.command.startswith(fragment):
+                yield Completion(
+                    hint.insert_text,
+                    start_position=-len(fragment),
+                    display=hint.usage,
+                    display_meta=hint.description,
+                )
+
+
+def _build_prompt_session(settings) -> PromptSession:
+    """Create an interactive prompt session with slash autocomplete."""
+    settings.memory_dir.mkdir(parents=True, exist_ok=True)
+    history_path = settings.memory_dir / "cli_history.txt"
+    hints = _command_hints()
+    completer = SlashCommandCompleter(hints)
+    style = PTStyle.from_dict(
+        {
+            "prompt.main": "bold #56d4dd",
+            "prompt.plan": "bold #f59e0b",
+            "prompt.sep": "#768194",
+            "bottom-toolbar": "fg:#9aa4b2 bg:#1f2937",
+            "completion-menu.completion": "fg:#cbd5e1 bg:#0f172a",
+            "completion-menu.completion.current": "fg:#ffffff bg:#334155",
+            "completion-menu.meta.completion": "fg:#94a3b8 bg:#0f172a",
+            "completion-menu.meta.completion.current": "fg:#e2e8f0 bg:#334155",
+        }
     )
 
-HELP_TEXT = """
-[bold]Available Commands:[/]
+    return PromptSession(
+        history=FileHistory(str(history_path)),
+        auto_suggest=AutoSuggestFromHistory(),
+        completer=completer,
+        complete_while_typing=True,
+        complete_in_thread=True,
+        reserve_space_for_menu=8,
+        style=style,
+        bottom_toolbar=lambda: HTML(
+            "<b>Tab</b> autocomplete  •  <b>↑/↓</b> history  •  <b>/help</b> command palette"
+        ),
+    )
 
-[bold cyan]Session[/]
-  /help              Show this help message
-  /status            Session state, platform info, memory summary
-  /cost              Show token usage and estimated cost
-  /compact           Compress conversation history (keep last 10 turns)
-  /clear             Reset session state (cohorts, models, figures)
-  /export [format]   Export session as JSON or Markdown
 
-[bold cyan]Analysis[/]
-  /skills            List all available analysis tools
-  /history           Show analysis history
-  /figures           List all generated figures
-  /cohorts           List active cohorts with summary stats
-  /models            List trained models with AUC
+def _prompt_message(is_plan_mode: bool) -> FormattedText:
+    """Prompt prefix with mode-aware visual style."""
+    if is_plan_mode:
+        return FormattedText(
+            [
+                ("class:prompt.plan", "plan"),
+                ("class:prompt.sep", " › "),
+            ]
+        )
+    return FormattedText(
+        [
+            ("class:prompt.main", "biobank"),
+            ("class:prompt.sep", " › "),
+        ]
+    )
 
-[bold cyan]Planning[/]
-  /plan <task>       Enter plan mode for complex tasks
-  /plan-approve      Approve plan and begin execution
-  /plan-exit         Exit plan mode
-  /plans             List all saved plans
 
-[bold cyan]Pipelines & Memory[/]
-  /record <name>     Save current session as a replayable pipeline
-  /pipelines         List saved pipelines
-  /memory            Show long-term memory summary
-  /errors            Show error catalog from long-term memory
+def _read_query(prompt_session: PromptSession | None, planner: PlanMode) -> str:
+    """Read user input with prompt-toolkit on TTY, fallback otherwise."""
+    if prompt_session is None:
+        prompt_str = "[bold magenta]plan>[/] " if planner.is_active else "[bold cyan]biobank>[/] "
+        return console.input(prompt_str)
+    return prompt_session.prompt(_prompt_message(planner.is_active))
 
-[bold cyan]Configuration[/]
-  /model <name>      Switch LLM model at runtime
 
-[bold cyan]General[/]
-  quit / exit / q    Exit the agent
-"""
+def _render_startup_dashboard(
+    settings,
+    n_skills: int,
+    n_subjects: int | None,
+    n_fields: int,
+    model_pool: list[str] | None = None,
+    available_model_count: int = 0,
+) -> None:
+    """Render a modern startup dashboard."""
+    model_pool = model_pool or [settings.llm_model]
+    model_pool_preview = ", ".join(model_pool[:3])
+    if len(model_pool) > 3:
+        model_pool_preview += f" (+{len(model_pool) - 3})"
+
+    left = Table.grid(padding=(0, 1))
+    left.add_row("[bold #56d4dd]Biobank Agent[/] [bold #94a3b8]v2.0[/]")
+    left.add_row("[#cbd5e1]Autonomous Scientific Discovery[/]")
+    left.add_row(f"[#7dd3fc]Data source[/]: [bold]{settings.biobank_name}[/]")
+    left.add_row("")
+    left.add_row(f"[#7dd3fc]Model[/]: [#e2e8f0]{settings.llm_model}[/]")
+    left.add_row(f"[#7dd3fc]Routing[/]: [#e2e8f0]{'auto multi-agent' if settings.multi_model_enabled else 'single model'}[/]")
+    left.add_row(f"[#7dd3fc]Active pool[/]: [#e2e8f0]{model_pool_preview}[/]")
+    left.add_row(f"[#7dd3fc]Data[/]: [#a78bfa]{settings.data_dir}[/]")
+
+    right = Table.grid(padding=(0, 1))
+    right.add_row("[bold #fb7185]Quick Start[/]")
+    right.add_row("[#94a3b8]/help[/] browse all commands")
+    right.add_row("[#94a3b8]type [bold]/[/] + [bold]Tab[/] for autocomplete")
+    right.add_row("[#94a3b8]/status[/] session state")
+    right.add_row("[#94a3b8]/skills[/] analysis tools")
+    right.add_row("[#94a3b8]/models-available[/] relay model catalog")
+    if available_model_count > 0:
+        right.add_row(f"[#94a3b8]relay models discovered:[/] [bold]{available_model_count}[/]")
+
+    summary = Table.grid(expand=True)
+    summary.add_column(justify="left")
+    subject_text = f"{n_subjects:,}" if n_subjects is not None else "N/A"
+    summary.add_row(
+        f"[bold #34d399]●[/] skills [bold]{n_skills}[/]   "
+        f"[bold #38bdf8]●[/] subjects [bold]{subject_text}[/]   "
+        f"[bold #a78bfa]●[/] fields [bold]{n_fields:,}[/]   "
+        f"[bold #f59e0b]●[/] models [bold]{len(model_pool)}[/]"
+    )
+
+    console.print(
+        Columns(
+            [
+                Panel(
+                    left,
+                    title="[bold #56d4dd]Workspace[/]",
+                    border_style="#334155",
+                    box=box.ROUNDED,
+                    padding=(1, 2),
+                ),
+                Panel(
+                    right,
+                    title="[bold #fb7185]Hints[/]",
+                    border_style="#334155",
+                    box=box.ROUNDED,
+                    padding=(1, 2),
+                ),
+            ],
+            equal=True,
+            expand=True,
+        )
+    )
+    console.print(
+        Panel(
+            summary,
+            border_style="#1f2937",
+            box=box.SQUARE,
+            padding=(0, 1),
+        )
+    )
+    console.print()
 
 
 def rebuild_parquet_cmd() -> None:
@@ -148,37 +334,58 @@ def main() -> None:
 
     # Load settings
     settings = get_settings()
+    settings.ensure_dirs()
     if model:
         settings.llm_model = model
-
-    console.print(_make_banner(settings))
-
-    console.print(f"[dim]Model: {settings.llm_model}[/]")
-    console.print(f"[dim]Data: {settings.data_dir}[/]")
-    console.print()
 
     # Create agent
     with console.status("[bold green]Loading data layer..."):
         agent = Agent(settings)
 
+    # Warn about deprecated env var names
+    import os as _os
+    if _os.getenv("UKB_PARQUET_DIR") and not _os.getenv("DATA_DIR"):
+        console.print(
+            "[dim yellow]Note: UKB_PARQUET_DIR is deprecated; "
+            "rename to DATA_DIR in .env (both work for now)[/]"
+        )
+
     # Initialize plan mode
     planner = PlanMode(settings.plans_dir)
+    prompt_session = _build_prompt_session(settings) if sys.stdin.isatty() else None
 
     # Token tracking
     token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_cost_usd": 0.0}
 
-    console.print(f"[green]>[/] {len(agent.registry)} skills loaded")
-    console.print(f"[green]>[/] {agent.dm.count_subjects():,} subjects available")
-    console.print(f"[green]>[/] {len(agent.catalog.fields):,} field definitions")
-    console.print()
-    console.print("[dim]Type your query, or /help for commands. Ctrl+C to interrupt.[/]")
+    n_subjects = None
+    try:
+        n_subjects = agent.dm.count_subjects()
+    except Exception:
+        pass
+
+    n_fields = len(agent.catalog.fields)
+    model_pool = [spec.model_id for spec in agent.orchestrator.model_pool]
+    _render_startup_dashboard(
+        settings=settings,
+        n_skills=len(agent.registry),
+        n_subjects=n_subjects,
+        n_fields=n_fields,
+        model_pool=model_pool,
+        available_model_count=len(getattr(agent, "available_models", [])),
+    )
+
+    if n_subjects is None:
+        console.print(f"[yellow]![/] Biomarker data not found at {settings.data_dir}")
+        console.print("[dim]Set DATA_DIR in .env to your parquet directory[/]")
+    if n_fields <= 0:
+        console.print(f"[yellow]![/] Field catalogue empty (check {settings.field_txt})")
+    console.print("[dim]Press Ctrl+C or type quit to exit.[/]")
     console.print()
 
     # REPL loop
     while True:
         try:
-            prompt_str = "[bold magenta]plan>[/] " if planner.is_active else "[bold cyan]biobank>[/] "
-            query = console.input(prompt_str).strip()
+            query = _read_query(prompt_session, planner).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Goodbye.[/]")
             break
@@ -255,7 +462,7 @@ def _handle_command(
 
     # ── Session commands ────────────────────────────────
     if cmd == "/help":
-        console.print(Markdown(HELP_TEXT))
+        _show_help()
 
     elif cmd == "/status":
         _show_status(agent, planner, token_usage)
@@ -336,15 +543,67 @@ def _handle_command(
             console.print(f"Current model: [cyan]{agent.settings.llm_model}[/]")
         else:
             old = agent.settings.llm_model
+            switch_fn = getattr(agent, "switch_model", None)
+            if callable(switch_fn):
+                switch_fn(arg)
+            # Keep direct assignments for compatibility with mocks/tests.
             agent.settings.llm_model = arg
             agent.llm.model = arg
             console.print(f"Model switched: {old} → [cyan]{arg}[/]")
+
+    elif cmd == "/models-pool":
+        _show_model_pool(agent)
+
+    elif cmd == "/models-available":
+        _show_available_llm_models(agent)
+
+    elif cmd == "/strategy":
+        _set_strategy(agent, arg)
+
+    elif cmd == "/debate":
+        if not arg:
+            console.print("[yellow]Usage: /debate <query>[/]")
+        else:
+            _force_debate(agent, arg, token_usage)
 
     else:
         console.print(f"[yellow]Unknown command: {cmd}. Type /help for available commands.[/]")
 
 
 # ── Command implementations ─────────────────────────────────
+
+
+def _show_help() -> None:
+    """Render slash command help using Rich tables."""
+    console.print(
+        Panel(
+            "[bold #56d4dd]Command Palette[/]\n"
+            "[dim]Tip: type [bold]/[/] then press [bold]Tab[/] for autocomplete.[/]",
+            border_style="#334155",
+            box=box.ROUNDED,
+            padding=(1, 2),
+        )
+    )
+
+    for section, rows in HELP_SECTIONS:
+        console.print(f"[bold #7dd3fc]{section}[/]")
+        table = Table(
+            box=box.SIMPLE_HEAVY,
+            show_header=True,
+            header_style="bold #94a3b8",
+            pad_edge=True,
+            show_edge=True,
+            show_lines=False,
+            padding=(0, 1),
+        )
+        table.add_column("Command", style="#67e8f9", no_wrap=True)
+        table.add_column("Description", style="#e2e8f0")
+
+        for command, description in rows:
+            table.add_row(Text(command), description)
+
+        console.print(table)
+        console.print()
 
 
 def _show_skills(agent: Agent) -> None:
@@ -359,6 +618,8 @@ def _show_skills(agent: Agent) -> None:
 def _show_status(agent: Agent, planner: PlanMode, token_usage: dict) -> None:
     from .utils.platform import platform_summary
     lines = [agent.state.context_summary()]
+    pool = [spec.model_id for spec in getattr(agent.orchestrator, "model_pool", [])]
+    routing_mode = "auto multi-agent" if agent.settings.multi_model_enabled else "single model"
 
     if planner.is_active:
         lines.append(f"\nPlan Mode: [magenta]{planner.status}[/]")
@@ -369,7 +630,9 @@ def _show_status(agent: Agent, planner: PlanMode, token_usage: dict) -> None:
         "",
         f"Platform: {platform_summary()}",
         f"Model: {agent.settings.llm_model}",
-        f"Data: {agent.settings.ukb_parquet_dir}",
+        f"Routing: {routing_mode}",
+        f"Model Pool: {', '.join(pool) if pool else agent.settings.llm_model}",
+        f"Data: {agent.settings.data_dir}",
         f"Skills: {len(agent.registry)}",
         f"Tokens: {token_usage['prompt_tokens']:,} prompt + {token_usage['completion_tokens']:,} completion",
     ])
@@ -611,6 +874,110 @@ def _show_memory(agent: Agent) -> None:
         console.print("[dim]Long-term memory is empty.[/]")
         return
     console.print(Panel(summary, title="Long-term Memory"))
+
+
+def _show_model_pool(agent: Agent) -> None:
+    """Show available models in the orchestrator pool."""
+    pool = agent.orchestrator.model_pool
+    enabled = agent.settings.multi_model_enabled
+    table = Table(title=f"Model Pool ({'enabled' if enabled else 'disabled'})")
+    table.add_column("Model", style="cyan")
+    table.add_column("Role", style="green")
+    table.add_column("Priority", justify="right")
+    table.add_column("Default", style="yellow")
+    for spec in pool:
+        is_default = "yes" if spec.model_id == agent.settings.llm_model else ""
+        table.add_row(spec.model_id, spec.role, str(spec.priority), is_default)
+    console.print(table)
+    if not enabled:
+        console.print("[dim]Enable with MULTI_MODEL_ENABLED=true in .env[/]")
+        console.print("[dim]Add models with MODEL_POOL=model1,model2,model3[/]")
+    console.print("[dim]Run /models-available to fetch relay-supported models.[/]")
+
+
+def _show_available_llm_models(agent: Agent) -> None:
+    """Fetch and display model IDs available from relay /v1/models."""
+    models: list[str] = []
+    fetch_fn = getattr(agent, "refresh_available_models", None)
+    try:
+        if callable(fetch_fn):
+            models = fetch_fn()
+        else:
+            llm = getattr(agent, "llm", None)
+            if llm and hasattr(llm, "list_models"):
+                models = llm.list_models(refresh=True)
+            else:
+                models = list(getattr(agent, "available_models", []))
+    except Exception as e:
+        console.print(f"[red]Failed to fetch model list: {e}[/]")
+        return
+
+    if not models:
+        console.print("[yellow]No models returned by relay endpoint.[/]")
+        console.print("[dim]Check LLM_BASE_URL / API key, or try again later.[/]")
+        return
+
+    pool_ids = {spec.model_id for spec in getattr(agent.orchestrator, "model_pool", [])}
+    table = Table(title=f"Relay Models ({len(models)})")
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("Model ID", style="cyan")
+    table.add_column("In Pool", style="green")
+    table.add_column("Default", style="yellow")
+
+    for i, model_id in enumerate(models, 1):
+        table.add_row(
+            str(i),
+            model_id,
+            "yes" if model_id in pool_ids else "",
+            "yes" if model_id == agent.settings.llm_model else "",
+        )
+    console.print(table)
+
+
+def _set_strategy(agent: Agent, arg: str) -> None:
+    """Set the multi-model routing strategy."""
+    from .complexity import Strategy
+    if not arg:
+        current = "auto" if agent.settings.multi_model_enabled else "single"
+        console.print(f"Current strategy: [cyan]{current}[/]")
+        console.print("[dim]Options: auto, single, debate, ensemble[/]")
+        return
+    arg = arg.lower()
+    if arg == "single":
+        agent.settings.multi_model_enabled = False
+        console.print("[green]Strategy set to single-model[/]")
+    elif arg in ("auto", "debate", "ensemble"):
+        agent.settings.multi_model_enabled = True
+        console.print(f"[green]Strategy set to {arg}[/]")
+    else:
+        console.print(f"[yellow]Unknown strategy: {arg}. Use: auto, single, debate, ensemble[/]")
+
+
+def _force_debate(agent: Agent, query: str, token_usage: dict) -> None:
+    """Force a multi-model debate for a query."""
+    from .complexity import Strategy
+    from rich.markdown import Markdown
+
+    if len(agent.orchestrator.model_pool) < 2:
+        console.print("[yellow]Debate requires 2+ models. Add MODEL_POOL=model1,model2 to .env[/]")
+        return
+
+    console.print(f"[bold cyan]Debate:[/] {query}")
+    console.print(f"[dim]Models: {', '.join(m.model_id for m in agent.orchestrator.model_pool[:3])}[/]")
+
+    try:
+        messages = [agent._system_message()] + agent.messages + [
+            {"role": "user", "content": query}
+        ]
+        with console.status("[bold green]Models debating..."):
+            response = agent.orchestrator.debate(
+                messages=messages,
+                tools=agent.registry.tool_schemas() or None,
+            )
+        console.print()
+        console.print(Markdown(response.text))
+    except Exception as e:
+        console.print(f"[red]Debate failed: {e}[/]")
 
 
 if __name__ == "__main__":

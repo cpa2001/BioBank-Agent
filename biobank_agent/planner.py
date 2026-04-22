@@ -2,16 +2,240 @@
 
 Follows the INTAKE → ALIGNMENT → EXECUTION → DONE state machine.
 Each plan is stored as a markdown file in the plans/ directory.
+
+Enhanced with long-horizon planning (dependency graph) and 4-phase
+pipeline discipline from heathcliff233/my_codex.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .llm import LLMClient
 
 logger = logging.getLogger(__name__)
+
+
+# ── Long-horizon plan structures ──────────────────────────────
+
+
+@dataclass
+class PlanStep:
+    """A single step in a long-horizon plan with dependencies."""
+    id: str
+    skill: str
+    args: dict = field(default_factory=dict)
+    description: str = ""
+    depends_on: list[str] = field(default_factory=list)
+    can_parallelize: bool = False
+    status: str = "pending"   # pending | running | done | failed | skipped
+    result: dict = field(default_factory=dict)
+    error: str = ""
+
+    @property
+    def is_done(self) -> bool:
+        return self.status in ("done", "skipped")
+
+    @property
+    def is_blocked(self) -> bool:
+        return self.status == "pending" and bool(self.depends_on)
+
+
+@dataclass
+class LongHorizonPlan:
+    """A dependency-aware multi-step analysis plan.
+
+    Steps form a DAG where each step lists its dependencies.
+    The plan executor runs steps in topological order, parallelizing
+    independent branches where possible.
+    """
+    goal: str
+    steps: list[PlanStep] = field(default_factory=list)
+
+    @property
+    def total_steps(self) -> int:
+        return len(self.steps)
+
+    @property
+    def done_steps(self) -> int:
+        return sum(1 for s in self.steps if s.is_done)
+
+    @property
+    def failed_steps(self) -> int:
+        return sum(1 for s in self.steps if s.status == "failed")
+
+    def progress(self) -> float:
+        """0.0 to 1.0 completion ratio."""
+        return self.done_steps / self.total_steps if self.total_steps else 0.0
+
+    def next_runnable(self) -> list[PlanStep]:
+        """Return all steps whose dependencies are satisfied."""
+        done_ids = {s.id for s in self.steps if s.is_done}
+        return [
+            s for s in self.steps
+            if s.status == "pending"
+            and set(s.depends_on).issubset(done_ids)
+        ]
+
+    def mark_done(self, step_id: str, result: dict) -> None:
+        """Mark a step as completed with its result."""
+        for s in self.steps:
+            if s.id == step_id:
+                s.status = "done"
+                s.result = result
+                return
+
+    def mark_failed(self, step_id: str, error: str) -> None:
+        """Mark a step as failed and skip dependents."""
+        for s in self.steps:
+            if s.id == step_id:
+                s.status = "failed"
+                s.error = error
+                break
+        # Skip all transitive dependents
+        failed_ids = {step_id}
+        changed = True
+        while changed:
+            changed = False
+            for s in self.steps:
+                if s.status == "pending" and set(s.depends_on) & failed_ids:
+                    s.status = "skipped"
+                    s.error = f"Skipped: dependency {step_id} failed"
+                    failed_ids.add(s.id)
+                    changed = True
+
+    def summary(self) -> str:
+        """One-line progress summary."""
+        return (
+            f"Plan: {self.done_steps}/{self.total_steps} done, "
+            f"{self.failed_steps} failed, "
+            f"{len(self.next_runnable())} ready"
+        )
+
+    def to_markdown(self) -> str:
+        """Render plan as numbered markdown checklist."""
+        lines = [f"# Plan: {self.goal}\n"]
+        for i, s in enumerate(self.steps, 1):
+            check = "x" if s.is_done else ("!" if s.status == "failed" else " ")
+            deps = f" (after: {', '.join(s.depends_on)})" if s.depends_on else ""
+            lines.append(f"{i}. [{check}] `{s.skill}({s.args})`{deps}")
+            if s.description:
+                lines.append(f"   {s.description}")
+            if s.error:
+                lines.append(f"   **Error:** {s.error}")
+        lines.append(f"\n**Progress:** {self.progress():.0%}")
+        return "\n".join(lines)
+
+
+class LongHorizonPlanner:
+    """Decompose complex goals into dependency-aware step graphs.
+
+    Uses LLM to analyze a goal and produce a LongHorizonPlan with
+    skill-level steps and dependency ordering.
+
+    Usage::
+
+        planner = LongHorizonPlanner(llm)
+        plan = planner.decompose("Discover T2DM biomarkers", available_skills)
+        while plan.next_runnable():
+            for step in plan.next_runnable():
+                result = registry.execute(step.skill, step.args, ctx)
+                plan.mark_done(step.id, result)
+    """
+
+    def __init__(self, llm: Optional[LLMClient] = None) -> None:
+        self.llm = llm
+
+    def decompose(
+        self,
+        goal: str,
+        available_skills: list[str],
+        context: str = "",
+    ) -> LongHorizonPlan:
+        """Use LLM to decompose a goal into a step graph.
+
+        Falls back to a sensible default plan if LLM fails.
+        """
+        if not self.llm:
+            return self._default_plan(goal)
+
+        prompt = f"""Decompose this biobank research goal into concrete analysis steps.
+
+**Goal:** {goal}
+{f"**Context:** {context[:500]}" if context else ""}
+
+**Available tools:** {', '.join(available_skills[:30])}
+
+Output a JSON array where each step has:
+- "id": unique step ID (e.g., "s1", "s2")
+- "skill": tool name from the list above
+- "args": dict of arguments
+- "description": what this step does
+- "depends_on": array of step IDs that must complete first
+- "can_parallelize": true if this can run alongside other ready steps
+
+Example:
+[
+  {{"id": "s1", "skill": "prevalence", "args": {{"top_n": 10}}, "description": "Check disease prevalence", "depends_on": [], "can_parallelize": false}},
+  {{"id": "s2", "skill": "train_model", "args": {{"icd10_code": "E11"}}, "description": "Train predictor", "depends_on": ["s1"], "can_parallelize": false}}
+]
+
+Respond with ONLY the JSON array."""
+
+        try:
+            response = self.llm.chat(
+                messages=[
+                    {"role": "system", "content": "You are a biobank research planner. Output valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=2048,
+            )
+
+            text = response.text.strip()
+            if "```" in text:
+                parts = text.split("```")
+                for part in parts:
+                    clean = part.strip().removeprefix("json").strip()
+                    if clean.startswith("["):
+                        text = clean
+                        break
+
+            data = json.loads(text)
+            if not isinstance(data, list):
+                return self._default_plan(goal)
+
+            steps = []
+            for item in data:
+                steps.append(PlanStep(
+                    id=item.get("id", f"s{len(steps)+1}"),
+                    skill=item.get("skill", "think"),
+                    args=item.get("args", {}),
+                    description=item.get("description", ""),
+                    depends_on=item.get("depends_on", []),
+                    can_parallelize=item.get("can_parallelize", False),
+                ))
+
+            return LongHorizonPlan(goal=goal, steps=steps)
+
+        except Exception as e:
+            logger.warning("LLM plan decomposition failed: %s. Using default.", e)
+            return self._default_plan(goal)
+
+    def _default_plan(self, goal: str) -> LongHorizonPlan:
+        """Sensible default plan for common biobank analyses."""
+        return LongHorizonPlan(
+            goal=goal,
+            steps=[
+                PlanStep(id="s1", skill="think", args={"reasoning": f"Planning: {goal}"}, description="Analyze the goal"),
+                PlanStep(id="s2", skill="prevalence", args={"top_n": 10}, description="Check disease prevalence", depends_on=["s1"]),
+            ],
+        )
 
 PLAN_TEMPLATE = """\
 # Plan: {title}
@@ -153,6 +377,19 @@ class PlanMode:
         logger.info("Plan status: %s → %s", old, new_status)
         return f"Plan status changed: {old} → **{new_status}**"
 
+    def _has_open_questions(self) -> bool:
+        """Check whether unresolved open questions remain in the plan."""
+        if not self.current_plan or not self.current_plan.exists():
+            return False
+        content = self.current_plan.read_text()
+        marker = "## Open Questions"
+        if marker not in content:
+            return False
+        after_marker = content.split(marker, 1)[1]
+        # Extract only up to the next ## heading
+        next_section = after_marker.split("##", 1)[0]
+        return "[ ]" in next_section
+
     def approve(self) -> str:
         """Move from ALIGNMENT to EXECUTION after user approval."""
         if self.status == "INTAKE":
@@ -162,10 +399,8 @@ class PlanMode:
             return f"Cannot approve — status is {self.status}, expected ALIGNMENT."
 
         # Check for unresolved questions
-        if self.current_plan and self.current_plan.exists():
-            content = self.current_plan.read_text()
-            if "[ ]" in content.split("## Open Questions")[1].split("##")[0] if "## Open Questions" in content else "":
-                return "Cannot approve — there are unresolved open questions. Address them first."
+        if self._has_open_questions():
+            return "Cannot approve — there are unresolved open questions. Address them first."
 
         return self.set_status("EXECUTION")
 

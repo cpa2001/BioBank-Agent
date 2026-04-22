@@ -38,6 +38,99 @@ def _format_value(v):
     return v
 
 
+def _format_auc_with_ci(result: dict) -> str:
+    """Format AUC with 95% confidence interval — Nature standard.
+
+    Returns e.g. 'AUC = 0.852 (95% CI: 0.831-0.874)'
+    """
+    auc = _format_value(result.get("auc_mean", result.get("mean_auc", result.get("auc"))))
+    ci = result.get("auc_95ci", "")
+    if isinstance(auc, (int, float)):
+        if ci and isinstance(ci, str):
+            return f"AUC = {auc:.3f} ({ci.replace('[', '95% CI: ').replace(']', '')})"
+        return f"AUC = {auc:.3f}"
+    return "AUC = N/A"
+
+
+def _format_p_value(p) -> str:
+    """Format P-value per journal standards.
+
+    Returns e.g. 'P < 0.001', 'P = 0.023', 'P = 0.45 (n.s.)'
+    """
+    p = _format_value(p)
+    if not isinstance(p, (int, float)):
+        return f"P = {p}"
+    if p < 0.001:
+        return "P < 0.001"
+    if p < 0.01:
+        return f"P = {p:.3f}"
+    if p < 0.05:
+        return f"P = {p:.3f}"
+    return f"P = {p:.2f} (n.s.)"
+
+
+def _build_figure_caption(fig_path, rec, fig_n: int, ctx) -> str:
+    """Build a proper figure caption with sample sizes and test stats.
+
+    Returns e.g. '**Figure 1.** Prevalence of top 10 diseases in UK Biobank
+    (N = 502,370). Error bars represent 95% CIs.'
+    """
+    from pathlib import Path
+    p = Path(fig_path)
+    skill_name = rec.skill if rec else "analysis"
+    results = rec.key_results if rec else {}
+
+    caption_parts = [f"**Figure {fig_n}.**"]
+
+    # Skill-specific captions
+    if skill_name == "prevalence":
+        n = results.get("total_subjects", "N/A")
+        bank = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
+        n_str = f"{n:,}" if isinstance(n, int) else str(n)
+        caption_parts.append(f"Prevalence of top diseases in {bank} (N = {n_str}).")
+
+    elif skill_name == "train_model":
+        auc_str = _format_auc_with_ci(results)
+        model_type = rec.args.get("model_type", "model") if rec else "model"
+        n_cases = results.get("n_cases", "?")
+        n_controls = results.get("n_controls", "?")
+        caption_parts.append(
+            f"ROC curve for {model_type} classifier. "
+            f"{auc_str}. n = {n_cases} cases, {n_controls} controls."
+        )
+
+    elif skill_name == "survival":
+        p_val = results.get("log_rank_p")
+        icd = rec.args.get("icd10_code", "?") if rec else "?"
+        caption_parts.append(f"Kaplan-Meier survival curves for {icd}.")
+        if p_val is not None:
+            caption_parts.append(f"Log-rank {_format_p_value(p_val)}.")
+
+    elif skill_name == "feature_importance":
+        caption_parts.append("SHAP beeswarm plot showing feature contributions to model predictions.")
+
+    elif skill_name == "biomarker_dist":
+        biomarker = rec.args.get("field_name", "biomarker") if rec else "biomarker"
+        p_val = results.get("p_value", results.get("p"))
+        caption_parts.append(f"Distribution of {biomarker} in cases vs controls.")
+        if p_val is not None:
+            caption_parts.append(f"Mann-Whitney U test {_format_p_value(p_val)}.")
+
+    elif skill_name == "correlation":
+        caption_parts.append("Clustered correlation heatmap of biomarker panel.")
+
+    elif skill_name == "phewas":
+        caption_parts.append("PheWAS Manhattan plot. Dashed line indicates FDR-corrected significance threshold.")
+
+    elif skill_name == "comorbidity":
+        caption_parts.append("Comorbidity network showing co-occurrence patterns.")
+
+    else:
+        caption_parts.append(f"{skill_name.replace('_', ' ').title()} visualization.")
+
+    return " ".join(caption_parts)
+
+
 def _interpret_skill(rec) -> str:
     """Generate interpretive text for a skill execution record."""
     skill_name = rec.skill
@@ -69,9 +162,12 @@ def _interpret_skill(rec) -> str:
             )
 
         elif skill_name == "train_model":
-            auc = _format_value(results.get("mean_auc", results.get("auc", "?")))
+            auc_str = _format_auc_with_ci(results)
             model_type = args.get("model_type", results.get("model_type", "?"))
             n_features = results.get("n_features", "?")
+            n_cases = results.get("n_cases", "?")
+            n_controls = results.get("n_controls", "?")
+            auc = _format_value(results.get("mean_auc", results.get("auc_mean", results.get("auc", "?"))))
             if isinstance(auc, (int, float)):
                 quality = (
                     "excellent" if auc > 0.9 else
@@ -79,8 +175,9 @@ def _interpret_skill(rec) -> str:
                     "moderate" if auc > 0.7 else "limited"
                 )
                 return (
-                    f"The {model_type} model achieved a mean AUC of {auc:.4f}, indicating "
-                    f"{quality} discriminative ability using {n_features} features."
+                    f"The {model_type} model achieved {auc_str}, indicating "
+                    f"{quality} discriminative ability using {n_features} features "
+                    f"(n = {n_cases} cases, {n_controls} controls)."
                 )
             return f"Model training completed with {model_type}."
 
@@ -92,7 +189,7 @@ def _interpret_skill(rec) -> str:
                 sig = "significant" if float(p_val) < 0.05 else "non-significant"
                 return (
                     f"Distribution analysis of {biomarker}: {sig} difference between "
-                    f"cases and controls (P={float(p_val):.2e}, Mann-Whitney U test)."
+                    f"cases and controls ({_format_p_value(p_val)}, Mann-Whitney U test)."
                 )
             return f"Distribution analysis of {biomarker} completed."
 
@@ -102,7 +199,7 @@ def _interpret_skill(rec) -> str:
             if p_val is not None:
                 p_val = _format_value(p_val)
                 return (
-                    f"Survival analysis for {icd10}: log-rank test P={float(p_val):.2e}. "
+                    f"Survival analysis for {icd10}: log-rank test {_format_p_value(p_val)}. "
                     f"See Kaplan-Meier curve for time-to-event distributions."
                 )
             return f"Survival analysis for {icd10} completed."
@@ -332,14 +429,33 @@ def _build_report_sections(title: str, ctx) -> list[str]:
 
     bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
     sections.append("## Methodology Notes\n\n")
+
+    # Pull actual parameters from model metadata
+    method_details = []
+    if ctx.state.model_metadata:
+        for key, meta in ctx.state.model_metadata.items():
+            mt = meta.get("model_type", "gradient-boosted")
+            nf = meta.get("n_features", "all available")
+            method_details.append(
+                f"The {mt} classifier was trained with {nf} features."
+            )
+
     sections.append(
         f"All analyses were performed on the {bank_name} cohort using "
         "DuckDB for data access and Python scientific stack for computation. "
+        + (" ".join(method_details) + " " if method_details else "")
+        + "Cross-validation used stratified k-fold with standard 5-fold default. "
         "Statistical tests used two-sided P-values with significance threshold "
-        "alpha=0.05. Multiple testing correction applied via FDR (Benjamini-Hochberg) "
+        "\u03b1 = 0.05. Multiple testing correction applied via FDR (Benjamini-Hochberg) "
         "where indicated. Figures follow Nature journal guidelines "
-        "(Arial 7pt, 300 DPI, Okabe-Ito palette).\n\n"
+        "(Arial 7 pt, 300 DPI, Okabe-Ito colour-blind safe palette). "
+        "[CITATION_NEEDED]\n\n"
     )
+
+    # References placeholder for paper format
+    sections.append("## References\n\n")
+    sections.append("*[References to be added. Use Nature citation style: "
+                    "Author, A. B. et al. Title. *Journal* **vol**, pages (year).]*\n\n")
 
     return sections
 
@@ -478,32 +594,38 @@ def _build_brief_sections(title: str, ctx) -> list[str]:
 
 
 def _add_figures_section(sections: list[str], ctx) -> None:
-    """Add figures section to report."""
+    """Add figures section with proper scientific captions."""
     if not ctx.state.figures:
         return
     sections.append("## Figures\n\n")
     fig_n = 0
+
+    # Build a map of figure paths to analysis records for captions
+    fig_to_record = {}
+    for rec in ctx.state.records:
+        for fp in rec.figure_paths:
+            fig_to_record[fp] = rec
+
     for fig_path in ctx.state.figures:
         p = Path(fig_path)
         if p.suffix in (".svg", ".png", ".pdf"):
             fig_n += 1
             rel = p.name
+            rec = fig_to_record.get(str(fig_path))
+            caption = _build_figure_caption(fig_path, rec, fig_n, ctx)
+
             if p.suffix == ".svg":
-                # SVG: embed inline in markdown for self-contained reports
                 try:
                     svg_content = p.read_text(encoding="utf-8")
-                    sections.append(
-                        f"<!-- Figure {fig_n}: {p.stem} -->\n{svg_content}\n\n"
-                    )
+                    sections.append(f"<!-- Figure {fig_n}: {p.stem} -->\n{svg_content}\n\n")
                 except Exception:
-                    # Fallback to image reference if read fails
                     sections.append(f"![Figure {fig_n}]({rel})\n\n")
             elif p.suffix == ".png":
-                # PNG: embed as markdown image (backward compat)
                 sections.append(f"![Figure {fig_n}]({rel})\n\n")
             else:
-                # PDF: link instead of inline embed
                 sections.append(f"[Figure {fig_n} (PDF)]({rel})\n\n")
+
+            sections.append(f"*{caption}*\n\n")
     sections.append("")
 
 
@@ -526,19 +648,14 @@ def _add_cohorts_section(sections: list[str], ctx) -> None:
 
 
 def _add_models_section(sections: list[str], ctx) -> None:
-    """Add models summary table."""
+    """Add models summary table with AUC and 95% CI."""
     if not ctx.state.model_metadata:
         return
     sections.append("## Model Performance\n\n")
-    sections.append("| Model | Type | AUC | Cases | Features |\n")
-    sections.append("|-------|------|----:|------:|---------:|\n")
+    sections.append("| Model | Type | AUC (95% CI) | Cases | Features |\n")
+    sections.append("|-------|------|:-------------|------:|---------:|\n")
     for key, meta in ctx.state.model_metadata.items():
-        auc_val = meta.get("auc")
-        if auc_val is not None:
-            auc_val = _format_value(auc_val)
-            auc_str = f"{float(auc_val):.4f}"
-        else:
-            auc_str = "N/A"
+        auc_str = _format_auc_with_ci(meta)
         sections.append(
             f"| {key} | {meta.get('model_type', '?')} | "
             f"{auc_str} | {meta.get('n_cases', '?')} | "

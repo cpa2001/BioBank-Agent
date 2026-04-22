@@ -272,6 +272,15 @@ class DataManager:
         id_col = self._id_col
         return self.conn.execute(f"SELECT COUNT(DISTINCT {id_col}) FROM biomarkers").fetchone()[0]
 
+    @property
+    def data_available(self) -> bool:
+        """True if at least the biomarkers view is registered and has data."""
+        try:
+            self.conn.execute("SELECT 1 FROM biomarkers LIMIT 1")
+            return True
+        except Exception:
+            return False
+
     def list_parquet_columns(self) -> list[str]:
         """List all column names in the biomarkers view."""
         rows = self.conn.execute(

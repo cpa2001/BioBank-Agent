@@ -21,7 +21,7 @@ All notable changes to Biobank Agent are documented here.
 - New dependencies: pymupdf, httpx, html2text, beautifulsoup4, duckduckgo-search
 
 ### Changed
-- Renamed CLI entry point: `bb` → `biobank`
+- Renamed CLI entry point to `biobank` (legacy alias removed)
 - Report system rewritten with interpretive text and Key Findings
 - Plotting defaults to SVG+PDF instead of PNG+PDF
 - `create_skill` now auto-activates via `custom_skills/` hot-reload

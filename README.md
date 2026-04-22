@@ -25,6 +25,7 @@ Biobank Agent is an LLM-powered scientific discovery system designed for populat
 - **Publication-quality output** — Nature/ICML-style SVG+PDF figures, dual-format reports (technical & IMRaD)
 - **Self-evolution** — learns from errors, records analysis pipelines, generates new skills at runtime
 - **Plan mode** — structured multi-step planning with stage gates for complex analyses
+- **Native multi-agent routing** — auto-detects complex tasks and coordinates multiple frontier models
 
 Currently validated on **UK Biobank** (502K participants, 4,971 phenotype fields, 6.9M diagnosis records). Architecture supports extension to FinnGen, China Kadoorie Biobank, and other population cohorts.
 
@@ -105,6 +106,7 @@ biobank_agent/
 | `/clear` | Reset session state |
 | `/cost` | Token usage and estimated cost |
 | `/model <name>` | Switch LLM model |
+| `/models-available` | Fetch relay-supported model IDs |
 | `/figures` | List generated figures |
 | `/cohorts` | Active cohorts summary |
 | `/models` | Trained models with AUC |
@@ -130,6 +132,9 @@ RAW_DIR=./raw                               # Raw CSV fallback (optional)
 # Optional
 SEARCH_PROVIDER=duckduckgo                  # or brave, serper
 SEARCH_API_KEY=                             # required for brave/serper
+MULTI_MODEL_ENABLED=true                    # auto route hard tasks to multi-agent
+AUTO_DISCOVER_MODELS=true                   # query /v1/models from relay
+PREFERRED_MULTI_MODELS=gpt-5.4,gemini-3.1-pro-preview
 ```
 
 ## Memory System

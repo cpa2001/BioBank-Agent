@@ -19,7 +19,7 @@ DuckDB serves as the unified query layer, reading from two tiers:
 
 ### Category Parquets (`categories/`)
 
-Built from raw CSVs via `bb rebuild-parquet`. Each category is a separate file.
+Built from raw CSVs via `biobank rebuild-parquet`. Each category is a separate file.
 
 | Category | Fields | Columns | Size |
 |----------|--------|---------|------|

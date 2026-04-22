@@ -55,6 +55,41 @@ class LLMClient:
             base_url = base_url.rstrip("/") + "/v1"
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.model = model
+        self.tool_call_content_mode = "null"  # "null" | "empty"
+        self._model_cache: list[str] = []
+        self._model_cache_ts: float = 0.0
+        self._model_cache_ttl_s: float = 600.0
+
+    @staticmethod
+    def sanitize_messages(
+        messages: list[dict],
+        tool_call_content_mode: str = "null",
+    ) -> list[dict]:
+        """Normalize messages for relay compatibility.
+
+        Ensures:
+        - Every message has a ``content`` key (str or None, never missing)
+        - Assistant messages with tool_calls: empty content → null or ""
+          (configurable via tool_call_content_mode)
+        - Tool messages (role=tool): content always str
+        - System messages: content always non-empty str
+        """
+        result = []
+        null_content = None if tool_call_content_mode == "null" else ""
+        for msg in messages:
+            m = dict(msg)  # shallow copy — don't mutate caller's dict
+            role = m.get("role", "")
+            has_tool_calls = "tool_calls" in m
+
+            if "content" not in m:
+                m["content"] = null_content if has_tool_calls else ""
+            elif m["content"] is None or m["content"] == "":
+                if has_tool_calls:
+                    m["content"] = null_content
+                elif role == "tool":
+                    m["content"] = m["content"] or ""  # tool results must be str
+            result.append(m)
+        return result
 
     def chat(
         self,
@@ -70,7 +105,7 @@ class LLMClient:
         """
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": self.sanitize_messages(messages, self.tool_call_content_mode),
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
@@ -122,6 +157,67 @@ class LLMClient:
                     raise  # Non-retryable API errors (400, 401, 403, etc.)
 
         raise last_error  # type: ignore[misc]
+
+    def list_models(self, refresh: bool = False) -> list[str]:
+        """List models supported by the OpenAI-compatible relay.
+
+        Uses an in-memory cache to avoid frequent /models calls.
+        Returns an empty list on failure (non-fatal for the CLI/agent).
+        """
+        now = time.time()
+        cache_valid = (
+            self._model_cache
+            and (now - self._model_cache_ts) < self._model_cache_ttl_s
+        )
+        if cache_valid and not refresh:
+            return list(self._model_cache)
+
+        last_error = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                resp = self.client.models.list()
+                data = getattr(resp, "data", []) or []
+                ids = sorted({
+                    str(getattr(item, "id", "")).strip()
+                    for item in data
+                    if getattr(item, "id", None)
+                })
+                self._model_cache = [m for m in ids if m]
+                self._model_cache_ts = time.time()
+                return list(self._model_cache)
+            except _RETRYABLE_ERRORS as e:
+                last_error = e
+                if attempt < _MAX_RETRIES:
+                    delay = _BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        "Model list call failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, _MAX_RETRIES + 1, e, delay,
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.warning("Model list call failed after %d attempts: %s", _MAX_RETRIES + 1, e)
+            except APIError as e:
+                if e.status_code and e.status_code >= 500:
+                    last_error = e
+                    if attempt < _MAX_RETRIES:
+                        delay = _BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            "Model list server error %d (attempt %d/%d): %s. Retrying in %.1fs...",
+                            e.status_code, attempt + 1, _MAX_RETRIES + 1, e, delay,
+                        )
+                        time.sleep(delay)
+                    else:
+                        logger.warning("Model list server error after %d attempts: %s", _MAX_RETRIES + 1, e)
+                else:
+                    last_error = e
+                    break
+            except Exception as e:
+                last_error = e
+                break
+
+        if last_error:
+            logger.warning("Unable to fetch model list from relay: %s", last_error)
+        return list(self._model_cache)
 
     def stream(
         self,

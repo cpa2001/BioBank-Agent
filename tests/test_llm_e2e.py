@@ -13,8 +13,20 @@ import time
 
 import pytest
 
-# Mark all tests in this module as integration
-pytestmark = pytest.mark.integration
+def _integration_enabled() -> bool:
+    """Integration tests are opt-in to avoid accidental API calls."""
+    val = os.getenv("BIOBANK_RUN_INTEGRATION", "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
+
+
+# Mark all tests in this module as integration and opt-in-only.
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not _integration_enabled(),
+        reason="Set BIOBANK_RUN_INTEGRATION=1 to run integration tests.",
+    ),
+]
 
 
 def _get_settings():
@@ -23,6 +35,14 @@ def _get_settings():
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
     from biobank_agent.config import get_settings
     return get_settings()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _validate_credentials():
+    """Skip quickly when LLM credentials are unavailable."""
+    settings = _get_settings()
+    if not settings.llm_api_key:
+        pytest.skip("LLM_API_KEY is not configured for integration tests.")
 
 
 def _get_llm_client(model=None):

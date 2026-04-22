@@ -243,7 +243,7 @@ class TestReportInterpretiveText:
         text = _interpret_skill(rec)
 
         assert "xgboost" in text.lower()
-        assert "0.9200" in text
+        assert "0.920" in text
         assert "excellent" in text
 
     def test_interpret_prevalence(self):
