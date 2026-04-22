@@ -1,22 +1,78 @@
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+*.pyd
 *.egg-info/
+*.egg
 dist/
 build/
-.DS_Store
-.env
-*.log
+.eggs/
+sdist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing & Coverage
+.pytest_cache/
+.tox/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+.pytype/
+
+# IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project secrets
+.env
+
+# Generated output (not source code)
 reports/
-custom_skills/
 plans/
+custom_skills/
+brainstorm/
+
+# Serialized models
 *.pkl
 *.joblib
+
+# Logs
+*.log
+
+# Audit artifacts (never commit)
 AUDIT_*.md
 AUDIT_*.txt
-FINDINGS_SUMMARY.md
-IMPLEMENTATION_QUICK_REFERENCE.md
-BIOBANK_AUDIT_REPORT.txt
-AUDIT_COMPLETION_SUMMARY.md
-.pytest_cache/
+*_AUDIT*.md
+*_AUDIT*.txt
+FINDINGS_*.md
+VERIFICATION_*.md
+VERIFICATION_*.txt
+HARDCODING_*.md
+HARDCODING_*.txt
+FIXES_*.md
+REPOSITORY_*.md
+DELIVERABLES*.md
+DEPLOYMENT_*.txt
+FINAL_*.txt
+PHASE_*.md
+PHASE_*.txt
+README_AUDIT*.md
+IMPLEMENTATION_*.md

@@ -1,237 +1,181 @@
+<div align="center">
+
 # Biobank Agent
 
-Autonomous scientific discovery agent for UK Biobank phenotype analysis. Natural language interface to 502,370 subjects, 4,971 biomarker fields, and 6.9M diagnosis records.
+**Autonomous scientific discovery agent for population-scale biobank research**
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-265%20passed-brightgreen.svg)](#testing)
+
+*Natural language interface to large-scale biobank cohorts — from hypothesis to publication-quality report.*
+
+</div>
+
+---
+
+## Overview
+
+Biobank Agent is an LLM-powered scientific discovery system designed for population-scale biobank data analysis. It combines a **ReAct agent loop** with **39 specialized analysis skills** to enable end-to-end research workflows: cohort construction, biomarker discovery, predictive modelling, survival analysis, literature review, and publication-quality reporting.
+
+**Key capabilities:**
+- **Hypothesis-driven discovery** — automated pipelines from cohort building through feature importance to PheWAS
+- **Predictive modelling** — XGBoost/LightGBM/CatBoost with cross-validation, calibration, and SHAP explanations
+- **Literature integration** — search papers, read PDFs, cross-reference findings with biobank data
+- **Publication-quality output** — Nature/ICML-style SVG+PDF figures, dual-format reports (technical & IMRaD)
+- **Self-evolution** — learns from errors, records analysis pipelines, generates new skills at runtime
+- **Plan mode** — structured multi-step planning with stage gates for complex analyses
+
+Currently validated on **UK Biobank** (502K participants, 4,971 phenotype fields, 6.9M diagnosis records). Architecture supports extension to FinnGen, China Kadoorie Biobank, and other population cohorts.
 
 ## Quick Start
 
 ```bash
 # Install
-cd /path/to/UKB_agent
+git clone https://github.com/cpa2001/BioBank-Agent.git
+cd BioBank-Agent
 pip install -e ".[all]"
 
 # Configure
 cp .env.example .env
-# Edit .env with your API key and data paths
+# Edit .env: set LLM_API_KEY and DATA_DIR
 
 # Run
 biobank
 ```
 
-## Usage
+## Usage Examples
 
 ```
-biobank> What are the top 20 most common diseases in UK Biobank?
+biobank> What are the top 20 most common diseases?
 biobank> Discover disease-specific biomarkers for Type 2 Diabetes
 biobank> Train an XGBoost model to predict E11 and show feature importance
-biobank> Read this paper and compare findings with our UK Biobank data
-biobank> Search for latest Chronic Kidney Disease biomarker studies
-biobank> Generate a Nature Methods-quality report for all analyses
-```
-
-### CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show all available commands |
-| `/skills` | List all available analysis tools |
-| `/status` | Session state, platform info, memory summary |
-| `/cost` | Show token usage and estimated cost |
-| `/compact` | Compress conversation history |
-| `/clear` | Reset session state |
-| `/plan <task>` | Enter plan mode for complex tasks |
-| `/plan-approve` | Approve plan and begin execution |
-| `/plan-exit` | Exit plan mode |
-| `/model <name>` | Switch LLM model at runtime |
-| `/history` | Show analysis history |
-| `/figures` | List all generated figures |
-| `/cohorts` | List active cohorts |
-| `/models` | List trained models with AUC |
-| `/record <name>` | Save session as a replayable pipeline |
-| `/pipelines` | List saved pipelines |
-| `/export <fmt>` | Export session as JSON/Markdown |
-| `/errors` | Show error catalog |
-| `/memory` | Show long-term memory summary |
-
-### Subcommands
-
-```bash
-biobank rebuild-parquet                        # Rebuild parquet from category CSVs
-biobank rebuild-parquet --categories=Genomics  # Rebuild specific category only
-biobank --model=gpt-5.4                        # Override model at runtime
+biobank> Show Kaplan-Meier survival curves for acute MI (I21)
+biobank> Search for recent CKD biomarker studies and summarize findings
+biobank> Read this paper and compare with our cohort data
+biobank> /plan Comprehensive cardiovascular risk analysis
+biobank> Generate a Nature-quality report for all analyses
 ```
 
 ## Architecture
 
 ```
 biobank_agent/
-├── cli.py                  # Rich terminal UI with REPL + 18 slash commands
-├── agent.py                # ReAct loop (native tool_use, auto-retry, error tracking)
-├── planner.py              # Plan mode engine (INTAKE → ALIGNMENT → EXECUTION → DONE)
-├── llm.py                  # OpenAI-compatible client (retry + backoff)
-├── registry.py             # Skill auto-discovery via @skill decorator + hot-reload
-├── config.py               # Pydantic settings from .env
-├── state.py                # Session state (cohorts, models, figures, token tracking)
-├── memory.py               # 4-tier persistent memory (configs, pipelines, fields, errors)
+├── agent.py                 # ReAct loop with native tool_use
+├── planner.py               # Plan mode (INTAKE → ALIGNMENT → EXECUTION → DONE)
+├── llm.py                   # OpenAI-compatible client with retry + backoff
+├── registry.py              # @skill decorator, auto-discovery, hot-reload
+├── config.py                # Pydantic settings
+├── state.py                 # Session state + token tracking
+├── memory.py                # 4-tier persistent memory
 │
-├── data/
-│   ├── loader.py           # DuckDB unified data layer (parquet + CSV fallback)
-│   ├── catalog.py          # UKB field catalogue (11,821 fields, 410 categories)
-│   ├── cohort.py           # Case/control cohort builder (parameterized SQL)
-│   ├── features.py         # Biomarker group definitions
-│   └── parquet_builder.py  # Batch CSV→parquet rebuild
+├── data/                    # Data access layer (DuckDB + Parquet)
+│   ├── loader.py            # Unified query layer (parquet + CSV fallback)
+│   ├── catalog.py           # Field catalogue (11,821 fields, 410 categories)
+│   ├── cohort.py            # Case/control cohort builder
+│   ├── features.py          # Biomarker group definitions
+│   └── parquet_builder.py   # Batch CSV → Parquet rebuild
 │
-├── skills/                 # 39 analysis skills (auto-discovered)
-│   ├── prevalence.py       # Disease prevalence charts
-│   ├── train_model.py      # XGBoost/LightGBM/CatBoost + CV
-│   ├── predict.py          # Patient-level disease risk prediction
-│   ├── discovery.py        # Automated scientific discovery pipeline
-│   ├── gwas_proxy.py       # Phenotype-wide association study
-│   ├── survival.py         # Kaplan-Meier + log-rank
-│   ├── web_search.py       # DuckDuckGo/Brave/Serper web search
-│   ├── web_fetch.py        # URL content fetching + HTML→text
-│   ├── read_pdf.py         # PDF text + table extraction (PyMuPDF)
-│   ├── fetch_paper.py      # Paper acquisition by DOI/URL/title
-│   ├── read_paper.py       # Deep critical paper analysis
-│   ├── nature_writer.py    # Nature-quality manuscript writing
-│   ├── brainstorm.py       # AI4Science research ideation
-│   ├── critical_thinking.py # Scientific claims evaluation
-│   ├── deep_research.py    # Multi-source literature research
-│   ├── smart_plot.py       # Publication-quality figure generation
-│   ├── create_skill.py     # AST-gated skill generation
-│   └── ...                 # 22 more skills
+├── skills/                  # 39 analysis skills (auto-discovered)
+│   ├── Analysis (17)        # prevalence, cohort, biomarker_dist, correlation,
+│   │                        # train_model, evaluate_model, feature_importance,
+│   │                        # calibration, survival, phewas, comorbidity, ...
+│   ├── Discovery (4)        # predict, discover, gwas_proxy, smart_plot
+│   ├── Research (7)         # web_search, web_fetch, read_pdf, fetch_paper,
+│   │                        # read_paper, deep_research, nature_writer
+│   ├── Ideation (2)         # brainstorm, critical_thinking
+│   └── Self-Evolution (9)   # create_skill, record_macro, replay_pipeline,
+│                            # track_error, suggest_error_fix, ...
 │
-├── utils/
-│   ├── plotting.py         # Nature/ICML-style matplotlib (SVG+PDF, 300 dpi, Okabe-Ito)
-│   ├── report_templates.py # Report section templates, CSS, LaTeX preamble
-│   ├── stats.py            # Mann-Whitney, chi-squared, FDR, log-rank
-│   ├── icd10.py            # ICD10 code → name lookup, chapter grouping
-│   └── platform.py         # GPU/CPU detection, architecture info
-│
-├── interfaces/             # Extension stubs (Foundation Models, Multimodal)
-└── plans/                  # Plan mode storage
+└── utils/                   # Shared utilities
+    ├── plotting.py          # Nature/ICML-style SVG+PDF (300 DPI, Okabe-Ito)
+    ├── report_templates.py  # Section templates, CSS, LaTeX preamble
+    ├── stats.py             # Mann-Whitney, chi², FDR, log-rank
+    └── icd10.py             # ICD-10 code → name lookup
 ```
 
-## Skills (39)
+## CLI Commands
 
-### Analysis (17)
-
-| Skill | Description |
-|-------|-------------|
-| `think` | Internal reasoning trace |
-| `field_search` | Search UKB field catalogue by keyword |
-| `prevalence` | Disease prevalence bar charts with patient counts |
-| `cohort_summary` | Demographics, age/sex distribution for a disease cohort |
-| `biomarker_dist` | Cases vs controls violin plots + Mann-Whitney U |
-| `correlation` | Clustered correlation heatmaps with dendrograms |
-| `missing_data` | Missing data patterns and MCAR/MAR analysis |
-| `train_model` | XGBoost / LightGBM / CatBoost with 5-fold CV |
-| `evaluate_model` | ROC + PR curves with 95% CI |
-| `feature_importance` | SHAP beeswarm / tree-based importance |
-| `calibration` | Reliability diagram + ECE / MCE / Brier score |
-| `survival` | Kaplan-Meier curves + log-rank test |
-| `phewas` | PheWAS Manhattan plot with FDR correction |
-| `comorbidity` | Co-occurrence network + odds ratios |
-| `embedding` | t-SNE / UMAP patient scatter plots |
-| `min_sample` | Sample size sensitivity curves |
-| `generate_report` | Markdown + HTML analysis report (technical or paper draft) |
-
-### Scientific Discovery (4)
-
-| Skill | Description |
-|-------|-------------|
-| `predict` | Patient-level disease risk prediction from trained models |
-| `discover` | Automated discovery pipeline (cohort → model → features → PheWAS) |
-| `gwas_proxy` | Phenotype-wide association study (GWAS proxy) |
-| `smart_plot` | Publication-quality figures with style selection (Nature/ICML) |
-
-### Research & Literature (7)
-
-| Skill | Description |
-|-------|-------------|
-| `web_search` | Web search via DuckDuckGo/Brave/Serper |
-| `web_fetch` | Fetch + parse web pages to text |
-| `read_pdf` | PDF text and table extraction |
-| `fetch_paper` | Download papers by DOI/URL/title |
-| `read_paper` | Deep critical paper analysis |
-| `nature_writer` | Nature-quality manuscript section writing |
-| `deep_research` | Multi-source research with citations |
-
-### Ideation & Evaluation (2)
-
-| Skill | Description |
-|-------|-------------|
-| `brainstorm` | AI4Science research ideation with evidence grounding |
-| `critical_thinking` | Scientific claims evaluation (7-step protocol) |
-
-### Self-Evolution (9)
-
-| Skill | Description |
-|-------|-------------|
-| `record_macro` | Record session skill calls into a named pipeline |
-| `replay_pipeline` | Replay a saved pipeline with parameter overrides |
-| `list_pipelines` | List all saved pipelines |
-| `create_skill` | Generate new skills from code (AST safety-gated) |
-| `track_error` | Record errors with context to long-term memory |
-| `list_errors` | Show most common errors across sessions |
-| `suggest_error_fix` | Intelligent error recovery suggestions |
-| `analyze_workflow_patterns` | Skill sequence analysis + bottleneck detection |
-| `suggest_optimal_pipeline` | Recommend skill sequences for a given task |
-
-## Data
-
-### Parquet (Fast Path)
-
-| Dataset | Rows | Fields | Size |
-|---------|------|--------|------|
-| `ukb.parquet/` (biomarkers) | 502,370 | 484 field IDs (2,031 cols) | 363 MB |
-| `categories/` (6 category parquets) | 502,370 | 4,487 field IDs (10,741 cols) | 1.55 GB |
-| `hesin_diag.parquet/` (diagnoses) | 6,946,795 | 4 cols | 37 MB |
-| `death_cause.parquet/` (deaths) | 112,917 | 5 cols | 576 KB |
-
-**Total: 4,971 unique field IDs accessible via DuckDB.**
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all commands |
+| `/skills` | List available analysis skills |
+| `/plan <task>` | Enter structured plan mode |
+| `/compact` | Compress conversation history |
+| `/clear` | Reset session state |
+| `/cost` | Token usage and estimated cost |
+| `/model <name>` | Switch LLM model |
+| `/figures` | List generated figures |
+| `/cohorts` | Active cohorts summary |
+| `/models` | Trained models with AUC |
+| `/export <fmt>` | Export session (JSON/Markdown) |
+| `/history` | Analysis history |
+| `/record <name>` | Save session as pipeline |
+| `/pipelines` | List saved pipelines |
+| `/errors` | Error catalog |
+| `/memory` | Long-term memory summary |
+| `/status` | Full session status |
 
 ## Configuration
 
 ```bash
 # .env
-LLM_BASE_URL=http://your-api-endpoint
+LLM_BASE_URL=https://api.openai.com       # or any OpenAI-compatible endpoint
 LLM_API_KEY=your-key
-LLM_MODEL=claude-sonnet-4-6
+LLM_MODEL=gpt-4o                           # or claude-sonnet-4-6, etc.
 
-UKB_PARQUET_DIR=./milton_data
-UKB_RAW_DIR=./UKB
+DATA_DIR=./data                             # Parquet files
+RAW_DIR=./raw                               # Raw CSV fallback (optional)
 
 # Optional
-SEARCH_PROVIDER=duckduckgo  # or 'brave', 'serper'
-SEARCH_API_KEY=             # required for brave/serper
+SEARCH_PROVIDER=duckduckgo                  # or brave, serper
+SEARCH_API_KEY=                             # required for brave/serper
 ```
 
 ## Memory System
 
-| Tier | Scope | Storage |
-|------|-------|---------|
-| Short-term | Current session messages | In-memory |
-| Mid-term | Analysis records (exact numbers) | Session state |
-| Long-term | Best model configs, saved pipelines, field usage | `~/.biobank_agent/memory.json` |
+| Tier | Scope | Persistence |
+|------|-------|-------------|
+| Short-term | Current conversation | In-memory |
+| Mid-term | Analysis records with exact metrics | Session state |
+| Long-term | Model configs, pipelines, field usage | `~/.biobank_agent/memory.json` |
 | Error catalog | Error patterns + suggested fixes | `~/.biobank_agent/memory.json` |
-
-## Platform Support
-
-- **macOS ARM** (Apple Silicon): Full support, CPU-only
-- **Linux x86 + NVIDIA GPU**: Full support, optional CUDA acceleration
-- GPU-dependent features (SHAP deep explainer, UMAP with RAPIDS) auto-fallback to CPU
 
 ## Testing
 
 ```bash
-pytest tests/ -v                          # Run all 164 tests
+pytest tests/ -v                          # All tests
 pytest tests/ -v -m "not integration"     # Skip API-dependent tests
+```
+
+## Platform Support
+
+| Platform | Status |
+|----------|--------|
+| macOS ARM (Apple Silicon) | Full support, CPU |
+| Linux x86 + NVIDIA GPU | Full support, CUDA optional |
+
+GPU-dependent features (SHAP deep explainer, UMAP with RAPIDS) auto-fallback to CPU.
+
+## Citation
+
+If you use Biobank Agent in your research, please cite:
+
+```bibtex
+@software{biobank_agent,
+  title   = {Biobank Agent: Autonomous Scientific Discovery for Population-Scale Biobank Research},
+  author  = {Chen, Pengan},
+  year    = {2026},
+  url     = {https://github.com/cpa2001/BioBank-Agent}
+}
 ```
 
 ## License
 
-MIT
+[MIT](LICENSE)
 
 ## Author
 
-CHEN Pengan, chenpengan@link.cuhk.edu.hk
+**CHEN Pengan** · AIH Group, The Chinese University of Hong Kong
+
+chenpengan@link.cuhk.edu.hk
