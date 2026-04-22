@@ -24,21 +24,17 @@ from .state import AnalysisRecord, SessionState
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are **Biobank Agent**, an autonomous scientific discovery system for UK Biobank research.
+You are **Biobank Agent**, an autonomous scientific discovery system for biobank research.
 You combine biomedical expertise with computational analysis to discover disease biomarkers,
 build predictive models, and generate publication-quality reports.
 
-## Data available
-- **502,370 participants** with 2,031 biomarker columns (parquet, fast)
-- **6.9 million ICD10 diagnosis records** (hospital episode statistics)
-- **112,917 death records** with ICD10 cause-of-death codes
-- **4,953 additional field IDs** accessible via raw CSV fallback
-- **11,821 field definitions** in the UKB catalogue
+## Data source: {biobank_name}
+{data_description}
 
 ## Analysis principles
 1. Always check cohort sizes before modelling. Refuse to train if n_cases < 100.
 2. Report 95% confidence intervals alongside point estimates (AUC, OR, HR).
-3. For any new ICD10 code, run prevalence check first.
+3. For any new diagnosis code, run prevalence check first.
 4. Prefer established biomarker groups (metabolic, haematological, anthropometric) as baseline features.
 5. Use the `think` tool for multi-step reasoning before complex analyses.
 6. All figures must be publication-quality (Nature style: Arial, 300 dpi, no top/right spines).
@@ -80,10 +76,41 @@ class Agent:
         # Conversation
         self.messages: list[dict] = []
 
+    def _build_data_description(self) -> str:
+        """Generate dynamic data description from live data layer."""
+        parts = []
+        try:
+            n_subjects = self.dm.count_subjects()
+            parts.append(f"- **{n_subjects:,} participants** with biomarker data (parquet, fast)")
+        except Exception:
+            parts.append(f"- Participant data available via {self.settings.biobank_name}")
+
+        try:
+            n_diag = self.dm.conn.execute("SELECT COUNT(*) FROM diagnoses").fetchone()[0]
+            parts.append(f"- **{n_diag:,} diagnosis records** with coded diagnoses")
+        except Exception:
+            parts.append("- Diagnosis records available")
+
+        try:
+            n_deaths = self.dm.conn.execute("SELECT COUNT(*) FROM deaths").fetchone()[0]
+            parts.append(f"- **{n_deaths:,} death records** with cause-of-death codes")
+        except Exception:
+            pass
+
+        try:
+            n_fields = len(self.catalog.fields)
+            parts.append(f"- **{n_fields:,} field definitions** in the catalogue")
+        except Exception:
+            pass
+
+        return "\n".join(parts) if parts else "Data available via configured biobank."
+
     def _system_message(self) -> dict:
         mem_summary = self.memory.summary()
         content = SYSTEM_PROMPT.format(
-            session_state=self.state.context_summary()
+            biobank_name=self.settings.biobank_name,
+            data_description=self._build_data_description(),
+            session_state=self.state.context_summary(),
         )
         if mem_summary:
             content += f"\n\n{mem_summary}"

@@ -5,6 +5,9 @@ Design:
   - CSV files registered lazily as VIEWs when a field is requested that
     isn't in parquet
   - field_route() determines fastest source for any field ID
+
+Biobank-agnostic: all file names, column names, and table structures
+are driven by Settings. Default configuration targets UK Biobank.
 """
 
 from __future__ import annotations
@@ -20,8 +23,8 @@ from ..config import Settings
 
 logger = logging.getLogger(__name__)
 
-# Map category CSV filename stem → file
-_CATEGORY_CSVS = {
+# Default category CSV map (UKB application 672073). Overridable via Settings.
+_DEFAULT_CATEGORY_CSVS = {
     "Population_Characteristics": "ukb672073_Population_Characteristics.csv",
     "Biological_Samples": "ukb672073_Biological_Samples.csv",
     "Health_Related_Outcomes": "ukb672073_Health_Related_Outcomes.csv",
@@ -31,8 +34,17 @@ _CATEGORY_CSVS = {
 }
 
 
+def _escape_path(p: Path) -> str:
+    """Escape path for DuckDB SQL literal."""
+    return str(p).replace("'", "''")
+
+
 class DataManager:
-    """Singleton data access layer backed by DuckDB."""
+    """Singleton data access layer backed by DuckDB.
+
+    All biobank-specific names (subject ID column, diagnosis code column,
+    parquet file names) are read from ``settings`` — nothing is hardcoded.
+    """
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -40,7 +52,10 @@ class DataManager:
         self._parquet_fields: set[str] | None = None
         self._csv_views_registered: set[str] = set()
         self._category_views: list[str] = []
-        self._category_field_map: dict[str, str] = {}  # field_id → category view name
+        self._category_field_map: dict[str, str] = {}
+        self._id_col = settings.subject_id_col
+        self._diag_col = settings.diagnoses_code_col
+        self._death_col = settings.deaths_code_col
         self._init_parquet_views()
 
     # ── Initialisation ──────────────────────────────────────
@@ -55,8 +70,7 @@ class DataManager:
             path = getattr(self.settings, attr)
             if not path.exists():
                 continue
-            safe = str(path).replace("'", "''")
-            # Single file OR directory of parquets
+            safe = _escape_path(path)
             if path.is_file() and path.suffix == ".parquet":
                 self.conn.execute(
                     f"CREATE OR REPLACE VIEW {view_name} AS "
@@ -70,18 +84,18 @@ class DataManager:
                 )
             logger.info("Registered %s view from %s", view_name, path)
 
-        # Register category parquets if they exist
         self._register_category_parquets()
 
     def _register_category_parquets(self) -> None:
-        """Register category parquet files (from batch_rebuild) as individual DuckDB views."""
+        """Register category parquet files as individual DuckDB views."""
         cat_dir = self.settings.category_parquet_dir
         if not cat_dir.exists():
             return
 
+        id_col = self._id_col
         for pq_file in sorted(cat_dir.glob("*.parquet")):
             view_name = f"cat_{pq_file.stem.lower()}"
-            safe = str(pq_file).replace("'", "''")
+            safe = _escape_path(pq_file)
             try:
                 self.conn.execute(
                     f"CREATE OR REPLACE VIEW {view_name} AS "
@@ -89,38 +103,37 @@ class DataManager:
                 )
                 self._category_views.append(view_name)
 
-                # Map field IDs in this category to the view name
                 cat_cols = self.conn.execute(
                     f"SELECT column_name FROM information_schema.columns "
                     f"WHERE table_name = '{view_name}'"
                 ).fetchall()
                 for (col,) in cat_cols:
-                    if col != "eid":
+                    if col != id_col:
                         fid = col.split("-")[0]
                         if fid.isdigit():
                             self._category_field_map[fid] = view_name
 
-                logger.info("Registered category view %s from %s (%d columns)",
-                            view_name, pq_file.name, len(cat_cols))
+                logger.info("Registered category view %s (%d columns)",
+                            view_name, len(cat_cols))
             except Exception as e:
                 logger.warning("Failed to register %s: %s", pq_file.name, e)
 
     def _get_parquet_fields(self) -> set[str]:
-        """Lazily cache the set of field IDs available in biomarkers view."""
+        """Lazily cache the set of field IDs available in biomarkers + category views."""
         if self._parquet_fields is None:
+            id_col = self._id_col
+            self._parquet_fields = set()
             try:
                 cols = self.conn.execute(
                     "SELECT column_name FROM information_schema.columns "
                     "WHERE table_name = 'biomarkers'"
                 ).fetchall()
-                self._parquet_fields = set()
                 for (col,) in cols:
-                    if col != "eid":
+                    if col != id_col:
                         fid = col.split("-")[0]
                         self._parquet_fields.add(fid)
             except Exception:
-                self._parquet_fields = set()
-            # Also include fields from category parquets
+                pass
             for view_name in self._category_views:
                 try:
                     cat_cols = self.conn.execute(
@@ -128,7 +141,7 @@ class DataManager:
                         f"WHERE table_name = '{view_name}'"
                     ).fetchall()
                     for (col,) in cat_cols:
-                        if col != "eid":
+                        if col != id_col:
                             fid = col.split("-")[0]
                             self._parquet_fields.add(fid)
                 except Exception:
@@ -139,7 +152,7 @@ class DataManager:
         """Lazily register a category CSV as a DuckDB view."""
         if category in self._csv_views_registered:
             return
-        fname = _CATEGORY_CSVS.get(category)
+        fname = _DEFAULT_CATEGORY_CSVS.get(category)
         if fname is None:
             return
         csv_path = self.settings.raw_csv_dir / fname
@@ -147,25 +160,24 @@ class DataManager:
             logger.warning("CSV not found: %s", csv_path)
             return
         view_name = f"csv_{category.lower()}"
+        safe = _escape_path(csv_path)
         self.conn.execute(
             f"CREATE VIEW IF NOT EXISTS {view_name} AS "
-            f"SELECT * FROM read_csv_auto('{csv_path}', header=true, "
+            f"SELECT * FROM read_csv_auto('{safe}', header=true, "
             f"sample_size=1000, all_varchar=false)"
         )
         self._csv_views_registered.add(category)
-        logger.info("Registered CSV view %s from %s", view_name, csv_path)
+        logger.info("Registered CSV view %s", view_name)
 
     # ── Field routing ───────────────────────────────────────
 
-    # Pre-computed mapping: field ID prefix → category CSV
     _FIELD_TO_CSV: dict[str, str] | None = None
 
     def _build_field_csv_map(self) -> dict[str, str]:
-        """Build mapping from field ID → category by reading .txt files."""
         if DataManager._FIELD_TO_CSV is not None:
             return DataManager._FIELD_TO_CSV
         mapping: dict[str, str] = {}
-        for category in _CATEGORY_CSVS:
+        for category in _DEFAULT_CATEGORY_CSVS:
             txt_path = self.settings.raw_csv_dir / f"{category}.txt"
             if txt_path.exists():
                 for line in txt_path.read_text().strip().splitlines():
@@ -176,9 +188,8 @@ class DataManager:
         return mapping
 
     def field_source(self, field_id: str) -> str:
-        """Return 'parquet', a category view name, or a category CSV name for the best source."""
+        """Return 'parquet', a category view name, or a category CSV name."""
         if field_id in self._get_parquet_fields():
-            # Check if it's specifically in a category parquet
             if field_id in self._category_field_map:
                 return self._category_field_map[field_id]
             return "parquet"
@@ -189,13 +200,8 @@ class DataManager:
 
     def query(self, sql: str, params: list | tuple | None = None) -> pd.DataFrame:
         """Execute arbitrary DuckDB SQL and return DataFrame.
-        
-        Args:
-            sql: SQL query string. Use ? placeholders for parameters.
-            params: Optional list/tuple of parameters to bind (prevents SQL injection).
-        
-        Example:
-            df = dm.query("SELECT * FROM diagnoses WHERE diag_icd10 LIKE ?", ["E11%"])
+
+        Use ``?`` placeholders for parameters (prevents SQL injection).
         """
         if params:
             return self.conn.execute(sql, params).df()
@@ -204,65 +210,67 @@ class DataManager:
     def get_field(self, field_id: str, instance: int = 0, array: int = 0,
                   eids: Optional[list[int]] = None) -> pd.DataFrame:
         """Get a single field's values for all (or specified) subjects."""
+        id_col = self._id_col
         col_name = f'"{field_id}-{instance}.{array}"'
         source = self.field_source(field_id)
 
         if source == "parquet":
-            sql = f"SELECT eid, {col_name} AS value FROM biomarkers"
+            sql = f"SELECT {id_col}, {col_name} AS value FROM biomarkers"
         elif source.startswith("cat_"):
-            # Category parquet view
-            sql = f"SELECT eid, {col_name} AS value FROM {source}"
+            sql = f"SELECT {id_col}, {col_name} AS value FROM {source}"
         elif source != "unknown":
             self._register_csv_view(source)
             view = f"csv_{source.lower()}"
-            sql = f"SELECT eid, {col_name} AS value FROM {view}"
+            sql = f"SELECT {id_col}, {col_name} AS value FROM {view}"
         else:
             raise ValueError(f"Field {field_id} not found in any data source")
 
         if eids:
             eid_list = ",".join(str(e) for e in eids)
-            sql += f" WHERE eid IN ({eid_list})"
+            sql += f" WHERE {id_col} IN ({eid_list})"
         return self.conn.execute(sql).df()
 
     def get_biomarker_matrix(self, field_ids: list[str],
                              eids: Optional[list[int]] = None) -> pd.DataFrame:
         """Get a matrix of biomarker values (columns = field names)."""
+        id_col = self._id_col
         cols = []
         for fid in field_ids:
             col = f'"{fid}-0.0"'
             cols.append(f"{col} AS \"{fid}\"")
         col_str = ", ".join(cols)
-        sql = f"SELECT eid, {col_str} FROM biomarkers"
+        sql = f"SELECT {id_col}, {col_str} FROM biomarkers"
         if eids:
             eid_list = ",".join(str(e) for e in eids)
-            sql += f" WHERE eid IN ({eid_list})"
+            sql += f" WHERE {id_col} IN ({eid_list})"
         return self.conn.execute(sql).df()
 
-    def get_diagnoses(self, icd10_prefix: Optional[str] = None) -> pd.DataFrame:
-        """Get diagnosis records, optionally filtered by ICD10 prefix.
-        
+    def get_diagnoses(self, code_prefix: Optional[str] = None) -> pd.DataFrame:
+        """Get diagnosis records, optionally filtered by code prefix.
+
         Uses parameterized queries to prevent SQL injection.
         """
         sql = "SELECT * FROM diagnoses"
-        if icd10_prefix:
-            sql += " WHERE diag_icd10 LIKE ?"
-            return self.query(sql, [f"{icd10_prefix}%"])
+        if code_prefix:
+            sql += f" WHERE {self._diag_col} LIKE ?"
+            return self.query(sql, [f"{code_prefix}%"])
         return self.query(sql)
 
-    def get_deaths(self, icd10_prefix: Optional[str] = None) -> pd.DataFrame:
+    def get_deaths(self, code_prefix: Optional[str] = None) -> pd.DataFrame:
         """Get death cause records.
 
         Uses parameterized queries to prevent SQL injection.
         """
         sql = "SELECT * FROM deaths"
-        if icd10_prefix:
-            sql += " WHERE cause_icd10 LIKE ?"
-            return self.query(sql, [f"{icd10_prefix}%"])
+        if code_prefix:
+            sql += f" WHERE {self._death_col} LIKE ?"
+            return self.query(sql, [f"{code_prefix}%"])
         return self.query(sql)
 
     def count_subjects(self) -> int:
         """Total subjects in biomarkers table."""
-        return self.conn.execute("SELECT COUNT(DISTINCT eid) FROM biomarkers").fetchone()[0]
+        id_col = self._id_col
+        return self.conn.execute(f"SELECT COUNT(DISTINCT {id_col}) FROM biomarkers").fetchone()[0]
 
     def list_parquet_columns(self) -> list[str]:
         """List all column names in the biomarkers view."""
@@ -273,6 +281,6 @@ class DataManager:
         return [r[0] for r in rows]
 
     def refresh_parquet_views(self) -> None:
-        """Re-register parquet views after parquet rebuild. Invalidates field cache."""
+        """Re-register parquet views after rebuild. Invalidates field cache."""
         self._parquet_fields = None
         self._init_parquet_views()

@@ -109,7 +109,8 @@ def _template_abstract(content: str, style_rules: dict) -> str:
 """
 
 
-def _template_introduction(content: str, style_rules: dict) -> str:
+def _template_introduction(content: str, style_rules: dict, ctx=None) -> str:
+    bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
     return f"""## Writing Instruction: Introduction
 
 **Journal**: {style_rules['journal']}
@@ -125,7 +126,7 @@ def _template_introduction(content: str, style_rules: dict) -> str:
 3. **The gap**: What is NOT known, or what is wrong with current approaches.
    This gap must logically motivate what comes next.
 4. **Our approach**: "Here we [verb]..." in the final paragraph. State the
-   study design, dataset (UK Biobank, N=...), and preview the key finding.
+   study design, dataset ({bank_name}), and preview the key finding.
 
 **Style rules**:
 - Sentences: 15-25 words average
@@ -173,7 +174,8 @@ def _template_results(content: str, style_rules: dict) -> str:
 """
 
 
-def _template_discussion(content: str, style_rules: dict) -> str:
+def _template_discussion(content: str, style_rules: dict, ctx=None) -> str:
+    bank_caveats = ctx.settings.biobank_caveats if ctx and hasattr(ctx, "settings") else "healthy volunteer bias, selection biases, single time-point measurements"
     return f"""## Writing Instruction: Discussion
 
 **Journal**: {style_rules['journal']}
@@ -188,8 +190,7 @@ def _template_discussion(content: str, style_rules: dict) -> str:
 4. **Strengths**: Large sample size, prospective design, objective measurements,
    etc. Be specific.
 5. **Limitations**: Be honest and specific. Address confounding, generalisability,
-   measurement error, reverse causation. For UK Biobank: healthy volunteer bias,
-   predominantly White British, single time-point measurements.
+   measurement error, reverse causation. Key caveats: {bank_caveats}.
 6. **Conclusion**: One paragraph. Clinical/scientific implication. Future directions.
    Do not overstate.
 
@@ -208,14 +209,19 @@ def _template_discussion(content: str, style_rules: dict) -> str:
 """
 
 
-def _template_methods(content: str, style_rules: dict) -> str:
+def _template_methods(content: str, style_rules: dict, ctx=None) -> str:
+    bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
+    # Conditional note for biobank-specific application numbers
+    app_note = (
+        f"- For {bank_name}: include application number if applicable"
+    )
     return f"""## Writing Instruction: Methods
 
 **Journal**: {style_rules['journal']}
 **Location**: {style_rules['methods_location']}
 
 **Required subsections**:
-1. **Study population**: Source (UK Biobank), recruitment period, N total,
+1. **Study population**: Source ({bank_name}), recruitment period, N total,
    inclusion/exclusion criteria, ethical approval + informed consent statement.
 2. **Exposure / predictor variables**: How measured, field IDs, units,
    time of measurement.
@@ -231,7 +237,7 @@ def _template_methods(content: str, style_rules: dict) -> str:
 - Past tense throughout
 - Sufficient detail for reproduction
 - Report software versions
-- For UK Biobank: include application number
+{app_note}
 - For genetic data: imputation panel, QC filters, MAF threshold
 
 **Input content/findings**:

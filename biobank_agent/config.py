@@ -1,4 +1,8 @@
-"""Configuration loaded from .env via pydantic-settings."""
+"""Configuration loaded from .env via pydantic-settings.
+
+All biobank-specific settings have sensible UK Biobank defaults but are
+fully overridable for other biobanks (FinnGen, CKB, HPP, etc.).
+"""
 
 from __future__ import annotations
 
@@ -22,15 +26,49 @@ class Settings(BaseSettings):
     llm_model: str = "claude-sonnet-4-6"
 
     # ── Data Paths ───────────────────────────────────────────────
-    ukb_parquet_dir: Path = Path("./milton_data")
-    ukb_raw_dir: Path = Path("./UKB")
+    data_dir: Path = Path("./milton_data")
+    raw_dir: Path = Path("./UKB")
+
+    # Backward compatibility aliases
+    @property
+    def ukb_parquet_dir(self) -> Path:
+        return self.data_dir
+
+    @property
+    def ukb_raw_dir(self) -> Path:
+        return self.raw_dir
+
+    # ── Biobank Identity ─────────────────────────────────────────
+    biobank_name: str = "UK Biobank"
+    biobank_abbreviation: str = "UKB"
+    biobank_description: str = (
+        "a large-scale prospective cohort study comprising over 500,000 "
+        "participants aged 40-69 at recruitment"
+    )
+    biobank_caveats: str = (
+        "healthy volunteer cohort with known selection biases"
+    )
+
+    # ── Column / Schema Identity ─────────────────────────────────
+    subject_id_col: str = "eid"
+    diagnoses_code_col: str = "diag_icd10"
+    deaths_code_col: str = "cause_icd10"
+    field_column_pattern: str = "{field_id}-{instance}.{array}"
+
+    # ── Dataset File Names ───────────────────────────────────────
+    biomarker_parquet_name: str = "ukb.parquet"
+    diagnoses_parquet_name: str = "hesin_diag.parquet"
+    deaths_parquet_name: str = "death_cause.parquet"
+    catalog_fields_file: str = "field.txt"
+    catalog_categories_file: str = "category.txt"
+    catalog_encoding_file: str = "esimpint.txt"
 
     # ── Output ───────────────────────────────────────────────────
     reports_dir: Path = Path("./reports")
     memory_dir: Path = Path.home() / ".biobank_agent"
 
-    # ── Web Search ──────────────────────────────────────────────
-    search_provider: str = "duckduckgo"  # "duckduckgo" | "brave" | "serper"
+    # ── Web Search ───────────────────────────────────────────────
+    search_provider: str = "duckduckgo"
     search_api_key: str = ""
 
     # ── Plan Mode ────────────────────────────────────────────────
@@ -43,46 +81,47 @@ class Settings(BaseSettings):
     max_tool_rounds: int = 30
     context_window: int = 180_000
 
-    # ── Derived paths ────────────────────────────────────────────
+    # ── Derived Paths ────────────────────────────────────────────
+
     @property
     def biomarker_parquet(self) -> Path:
-        return self.ukb_parquet_dir / "ukb.parquet"
+        return self.data_dir / self.biomarker_parquet_name
 
     @property
     def diagnoses_parquet(self) -> Path:
-        return self.ukb_parquet_dir / "hesin_diag.parquet"
+        return self.data_dir / self.diagnoses_parquet_name
 
     @property
     def deaths_parquet(self) -> Path:
-        return self.ukb_parquet_dir / "death_cause.parquet"
+        return self.data_dir / self.deaths_parquet_name
 
     @property
     def field_txt(self) -> Path:
-        return self.ukb_parquet_dir / "field.txt"
+        return self.data_dir / self.catalog_fields_file
 
     @property
     def category_txt(self) -> Path:
-        return self.ukb_parquet_dir / "category.txt"
+        return self.data_dir / self.catalog_categories_file
 
     @property
     def encoding_txt(self) -> Path:
-        return self.ukb_parquet_dir / "esimpint.txt"
+        return self.data_dir / self.catalog_encoding_file
 
     @property
     def category_parquet_dir(self) -> Path:
-        return self.ukb_parquet_dir / "categories"
+        return self.data_dir / "categories"
 
     @property
     def raw_csv_dir(self) -> Path:
-        return self.ukb_raw_dir / "UKB_info"
+        return self.raw_dir / "UKB_info"
 
     @property
     def main_csv(self) -> Path:
-        return self.ukb_raw_dir / "UKB" / "ukb672073.csv"
+        return self.raw_dir / "UKB" / "ukb672073.csv"
 
     @property
     def data_dict_csv(self) -> Path:
-        return self.ukb_raw_dir / "UKB" / "Data_Dictionary_Showcase.csv"
+        return self.raw_dir / "UKB" / "Data_Dictionary_Showcase.csv"
 
     def ensure_dirs(self) -> None:
         self.reports_dir.mkdir(parents=True, exist_ok=True)

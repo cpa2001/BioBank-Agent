@@ -27,13 +27,18 @@ from .planner import PlanMode
 
 console = Console()
 
-BANNER = r"""
-[bold cyan]╔═══════════════════════════════════════════════════╗
-║   Biobank Agent v2.0                              ║
-║   Autonomous Scientific Discovery for UK Biobank  ║
-║   502K subjects · 4,971 fields · 6.9M diagnoses   ║
-╚═══════════════════════════════════════════════════╝[/]
-"""
+
+def _make_banner(settings) -> str:
+    """Generate dynamic banner from settings."""
+    name = settings.biobank_name
+    return (
+        f"\n[bold cyan]"
+        f"╔═══════════════════════════════════════════════════╗\n"
+        f"║   Biobank Agent v2.0                              ║\n"
+        f"║   Autonomous Scientific Discovery                 ║\n"
+        f"║   Data source: {name:<35s} ║\n"
+        f"╚═══════════════════════════════════════════════════╝[/]\n"
+    )
 
 HELP_TEXT = """
 [bold]Available Commands:[/]
@@ -141,15 +146,15 @@ def main() -> None:
         format="%(name)s: %(message)s",
     )
 
-    console.print(BANNER)
-
     # Load settings
     settings = get_settings()
     if model:
         settings.llm_model = model
 
+    console.print(_make_banner(settings))
+
     console.print(f"[dim]Model: {settings.llm_model}[/]")
-    console.print(f"[dim]Data: {settings.ukb_parquet_dir}[/]")
+    console.print(f"[dim]Data: {settings.data_dir}[/]")
     console.print()
 
     # Create agent

@@ -1,3 +1,3 @@
-"""Biobank Agent — Autonomous scientific discovery for UK Biobank."""
+"""Biobank Agent — Autonomous scientific discovery for biobank research."""
 
 __version__ = "2.0.0"

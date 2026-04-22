@@ -204,7 +204,7 @@ def _extract_key_findings(records) -> list[str]:
         "title": {
             "type": "string",
             "description": "Report title",
-            "default": "UK Biobank Analysis Report",
+            "default": "Biobank Analysis Report",
         },
         "format": {
             "type": "string",
@@ -215,12 +215,16 @@ def _extract_key_findings(records) -> list[str]:
     required=[],
 )
 def generate_report(
-    title: str = "UK Biobank Analysis Report",
+    title: str = "Biobank Analysis Report",
     format: str = "report",
     *,
     ctx=None,
 ) -> dict:
     """Generate a structured, readable analysis report."""
+    # Dynamic title from settings if using default
+    if title == "Biobank Analysis Report" and ctx and hasattr(ctx, "settings"):
+        title = f"{ctx.settings.biobank_name} Analysis Report"
+
     report_dir = ctx.report_dir
     report_dir.mkdir(parents=True, exist_ok=True)
 
@@ -274,7 +278,8 @@ def _build_report_sections(title: str, ctx) -> list[str]:
         n_figs = len(ctx.state.figures)
         n_cohorts = len(ctx.state.cohorts)
         n_models = len(ctx.state.models)
-        parts = [f"This report summarizes {n_analyses} analyses performed on the UK Biobank dataset."]
+        bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
+        parts = [f"This report summarizes {n_analyses} analyses performed on the {bank_name} dataset."]
         if n_cohorts:
             parts.append(f"{n_cohorts} disease cohort(s) were constructed.")
         if n_models:
@@ -325,9 +330,10 @@ def _build_report_sections(title: str, ctx) -> list[str]:
     _add_cohorts_section(sections, ctx)
     _add_models_section(sections, ctx)
 
+    bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
     sections.append("## Methodology Notes\n\n")
     sections.append(
-        "All analyses were performed on the UK Biobank cohort (N=502,370) using "
+        f"All analyses were performed on the {bank_name} cohort using "
         "DuckDB for data access and Python scientific stack for computation. "
         "Statistical tests used two-sided P-values with significance threshold "
         "alpha=0.05. Multiple testing correction applied via FDR (Benjamini-Hochberg) "
@@ -341,6 +347,9 @@ def _build_report_sections(title: str, ctx) -> list[str]:
 def _build_paper_sections(title: str, ctx) -> list[str]:
     """Build IMRaD paper draft."""
     sections = []
+    bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
+    bank_desc = ctx.settings.biobank_description if ctx and hasattr(ctx, "settings") else "a large-scale prospective cohort study"
+    bank_caveats = ctx.settings.biobank_caveats if ctx and hasattr(ctx, "settings") else "healthy volunteer cohort with known selection biases"
 
     sections.append(f"# {title}\n\n")
     sections.append("*CHEN Pengan*\n\n")
@@ -350,10 +359,10 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
     findings = _extract_key_findings(ctx.state.records)
 
     abstract = (
-        "**Background:** We analysed the UK Biobank cohort (N=502,370) to identify "
+        f"**Background:** We analysed the {bank_name} cohort to identify "
         "disease-associated biomarkers and build predictive models. "
-        "**Methods:** Case-control cohorts were constructed from ICD-10 coded hospital "
-        "episode statistics. Gradient-boosted models were trained with 5-fold "
+        "**Methods:** Case-control cohorts were constructed from ICD-10 coded diagnoses. "
+        "Gradient-boosted models were trained with 5-fold "
         "cross-validation. Feature importance was assessed via SHAP values. "
         "**Results:** " + ". ".join(findings[:3]) + ". "
         "**Conclusions:** These findings highlight potential biomarkers for further "
@@ -361,17 +370,16 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
     )
     sections.append(PAPER_ABSTRACT.format(
         abstract=abstract,
-        keywords="UK Biobank, biomarkers, machine learning, disease prediction, epidemiology",
+        keywords=f"{bank_name}, biomarkers, machine learning, disease prediction, epidemiology",
     ))
 
     intro = (
-        "The UK Biobank is a large-scale prospective cohort study comprising over "
-        "500,000 participants aged 40-69 at recruitment, with extensive phenotypic, "
-        "genetic, and health outcome data. This rich resource enables systematic "
+        f"The {bank_name} is {bank_desc}. "
+        "This rich resource enables systematic "
         "identification of disease-associated biomarkers and construction of "
         "predictive models.\n\n"
-        "In this analysis, we leverage the UK Biobank's hospital episode statistics "
-        "(6.9 million ICD-10 coded diagnoses) alongside blood biochemistry, "
+        f"In this analysis, we leverage the {bank_name}'s coded diagnoses "
+        "alongside blood biochemistry, "
         "haematology, and anthropometric measurements to characterise disease "
         "cohorts and identify discriminative biomarker signatures."
     )
@@ -382,8 +390,8 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
         for name, df in ctx.state.cohorts.items():
             n_cases = int(df["label"].sum()) if "label" in df.columns else "N/A"
             cohort_info += (
-                f"For {name}, {n_cases:,} cases were identified from hospital episode "
-                f"statistics and matched with {len(df) - n_cases:,} controls. "
+                f"For {name}, {n_cases:,} cases were identified from coded diagnoses "
+                f"and matched with {len(df) - n_cases:,} controls. "
             )
 
     model_info = ""
@@ -397,9 +405,9 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
 
     sections.append(PAPER_METHODS.format(
         study_population=(
-            f"This study utilised data from 502,370 UK Biobank participants. "
+            f"This study utilised data from the {bank_name} cohort. "
             f"{cohort_info}"
-            "Diagnoses were extracted from hospital episode statistics (HES) using "
+            "Diagnoses were extracted from coded diagnosis records using "
             "ICD-10 coding. Biomarker measurements were obtained from baseline assessment."
         ),
         statistical_analysis=(
@@ -423,20 +431,20 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
 
     sections.append(PAPER_DISCUSSION.format(
         discussion=(
-            "Our analysis of the UK Biobank cohort revealed several notable findings. "
+            f"Our analysis of the {bank_name} cohort revealed several notable findings. "
             + " ".join(findings[:3]) + ". "
             "These results are consistent with prior epidemiological evidence and suggest "
             "potential avenues for biomarker-based risk stratification."
         ),
         limitations=(
-            "This study has several limitations. First, the UK Biobank represents a "
-            "'healthy volunteer' cohort with known selection biases. Second, biomarker "
+            f"This study has several limitations. First, the {bank_name} represents a "
+            f"{bank_caveats}. Second, biomarker "
             "measurements were obtained at a single baseline time point. Third, the "
             "observational nature of the study precludes causal inference."
         ),
         conclusions=(
             "We identified disease-associated biomarker signatures using machine learning "
-            "approaches applied to the UK Biobank. These findings warrant validation in "
+            f"approaches applied to the {bank_name}. These findings warrant validation in "
             "independent cohorts and prospective studies."
         ),
     ))

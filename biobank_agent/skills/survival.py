@@ -28,50 +28,53 @@ from biobank_agent.utils.stats import log_rank_test
 )
 def survival(icd10_code: str, *, ctx=None) -> dict:
     dm = ctx.dm
+    diag_col = ctx.settings.diagnoses_code_col
+    id_col = ctx.settings.subject_id_col
+    death_col = ctx.settings.deaths_code_col
 
     # Get case eids using parameterized query (prevents SQL injection)
     cases_df = dm.query(
-        "SELECT DISTINCT eid FROM diagnoses WHERE diag_icd10 LIKE ?",
+        f"SELECT DISTINCT {id_col} FROM diagnoses WHERE {diag_col} LIKE ?",
         [f"{icd10_code}%"]
     )
-    case_eids = set(cases_df["eid"].tolist())
+    case_eids = set(cases_df[id_col].tolist())
 
     # Get actual death records with dates
-    # Assume deaths table has: eid, cause_icd10, date_of_death (or similar date field)
+    # Assume deaths table has: id_col, death_col, date_of_death (or similar date field)
     try:
         deaths_full = dm.query("SELECT * FROM deaths")
     except Exception:
         # Fallback if deaths table unavailable
-        deaths_full = pd.DataFrame({"eid": []})
-    
-    dead_eids = set(deaths_full["eid"].tolist()) if len(deaths_full) > 0 else set()
+        deaths_full = pd.DataFrame({id_col: []})
+
+    dead_eids = set(deaths_full[id_col].tolist()) if len(deaths_full) > 0 else set()
 
     # Get age at recruitment (field 21022) and recruitment date (field 53-0.0, if available)
     # 53-0.0 is the baseline assessment date
     try:
         ages = dm.query(
-            'SELECT eid, "21022-0.0" AS age, "53-0.0" AS assessment_date FROM biomarkers '
-            'WHERE "21022-0.0" IS NOT NULL'
+            f'SELECT {id_col}, "21022-0.0" AS age, "53-0.0" AS assessment_date FROM biomarkers '
+            f'WHERE "21022-0.0" IS NOT NULL'
         )
     except Exception:
         # Fallback if field 53 unavailable
         ages = dm.query(
-            'SELECT eid, "21022-0.0" AS age FROM biomarkers WHERE "21022-0.0" IS NOT NULL'
+            f'SELECT {id_col}, "21022-0.0" AS age FROM biomarkers WHERE "21022-0.0" IS NOT NULL'
         )
         ages["assessment_date"] = pd.NaT
 
     # Mark cases and deceased
-    ages["is_case"] = ages["eid"].isin(case_eids).astype(int)
-    ages["is_dead"] = ages["eid"].isin(dead_eids).astype(int)
+    ages["is_case"] = ages[id_col].isin(case_eids).astype(int)
+    ages["is_dead"] = ages[id_col].isin(dead_eids).astype(int)
 
     # Compute realistic follow-up times from actual dates
     # If death records have date columns, use them; otherwise estimate from age and recruitment date
     if "assessment_date" in deaths_full.columns and len(deaths_full) > 0:
         # Merge with actual death dates
-        deaths_dates = deaths_full[["eid", "assessment_date"]].drop_duplicates()
+        deaths_dates = deaths_full[[id_col, "assessment_date"]].drop_duplicates()
         ages = ages.merge(
             deaths_dates.rename(columns={"assessment_date": "death_date"}),
-            on="eid",
+            on=id_col,
             how="left"
         )
         

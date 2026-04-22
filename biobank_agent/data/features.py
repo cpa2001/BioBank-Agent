@@ -1,8 +1,15 @@
-"""Biomarker feature groups and derived feature engineering."""
+"""Biomarker feature groups and derived feature engineering.
+
+Default field IDs target UK Biobank. Other biobanks should provide
+their own feature group mappings via configuration.
+
+The BIOMARKER_GROUPS dict is the canonical access point used by skills.
+"""
 
 from __future__ import annotations
 
-# ── Predefined biomarker groups (UKB field IDs) ──────────────
+# ── Default biomarker groups (UK Biobank field IDs) ────────────
+# These serve as defaults. Other biobanks override via BankConfig.
 
 BLOOD_BIOCHEMISTRY = {
     "30600": "Albumin",

@@ -26,16 +26,18 @@ from biobank_agent.utils.plotting import nature_figure, save_figure, PALETTE
 )
 def prevalence(top_n: int = 20, chapter_filter: str = "", *, ctx=None) -> dict:
     dm = ctx.dm
+    diag_col = ctx.settings.diagnoses_code_col
+    id_col = ctx.settings.subject_id_col
 
     # Count unique patients per 3-char ICD10 code
-    sql = """
-        SELECT LEFT(diag_icd10, 3) AS code, COUNT(DISTINCT eid) AS n_patients
+    sql = f"""
+        SELECT LEFT({diag_col}, 3) AS code, COUNT(DISTINCT {id_col}) AS n_patients
         FROM diagnoses
-        WHERE diag_icd10 IS NOT NULL AND diag_icd10 != ''
+        WHERE {diag_col} IS NOT NULL AND {diag_col} != ''
     """
     params = []
     if chapter_filter:
-        sql += " AND diag_icd10 LIKE ?"
+        sql += f" AND {diag_col} LIKE ?"
         params.append(f"{chapter_filter.upper()}%")
     sql += " GROUP BY code ORDER BY n_patients DESC"
     sql += f" LIMIT {top_n}"

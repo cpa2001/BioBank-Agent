@@ -28,40 +28,42 @@ from biobank_agent.utils.stats import mann_whitney, benjamini_hochberg
 )
 def phewas(field_id: str, min_cases: int = 500, *, ctx=None) -> dict:
     dm = ctx.dm
+    diag_col = ctx.settings.diagnoses_code_col
+    id_col = ctx.settings.subject_id_col
     biomarker_name = ALL_BIOMARKERS.get(field_id, f"Field {field_id}")
 
     # Get biomarker values
     col = f'"{field_id}-0.0"'
-    biomarker_df = dm.query(f"SELECT eid, {col} AS value FROM biomarkers WHERE {col} IS NOT NULL")
+    biomarker_df = dm.query(f"SELECT {id_col}, {col} AS value FROM biomarkers WHERE {col} IS NOT NULL")
 
     # Get disease counts (top diseases with enough cases)
     disease_counts = dm.query(f"""
-        SELECT LEFT(diag_icd10, 3) AS code, COUNT(DISTINCT eid) AS n
+        SELECT LEFT({diag_col}, 3) AS code, COUNT(DISTINCT {id_col}) AS n
         FROM diagnoses
-        WHERE diag_icd10 IS NOT NULL
+        WHERE {diag_col} IS NOT NULL
         GROUP BY code HAVING n >= {min_cases}
         ORDER BY n DESC
     """)
 
     # Test each disease
     results = []
-    all_eids = set(biomarker_df["eid"].tolist())
+    all_eids = set(biomarker_df[id_col].tolist())
 
     for _, row in disease_counts.iterrows():
         code = row["code"]
         # Get case eids for this disease
         case_df = dm.query(f"""
-            SELECT DISTINCT eid FROM diagnoses
-            WHERE diag_icd10 LIKE '{code}%'
+            SELECT DISTINCT {id_col} FROM diagnoses
+            WHERE {diag_col} LIKE '{code}%'
         """)
-        case_eids = set(case_df["eid"].tolist()) & all_eids
+        case_eids = set(case_df[id_col].tolist()) & all_eids
         control_eids = all_eids - case_eids
 
         if len(case_eids) < min_cases or len(control_eids) < 100:
             continue
 
-        cases_vals = biomarker_df[biomarker_df["eid"].isin(case_eids)]["value"].values
-        ctrls_vals = biomarker_df[biomarker_df["eid"].isin(control_eids)]["value"].values
+        cases_vals = biomarker_df[biomarker_df[id_col].isin(case_eids)]["value"].values
+        ctrls_vals = biomarker_df[biomarker_df[id_col].isin(control_eids)]["value"].values
 
         test = mann_whitney(cases_vals.astype(float), ctrls_vals.astype(float))
         chap_num, chap_name = icd10_chapter(code)

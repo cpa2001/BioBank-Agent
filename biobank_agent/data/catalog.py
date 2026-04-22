@@ -1,6 +1,7 @@
-"""UKB field catalogue and ICD10 code lookup.
+"""Biobank field catalogue and diagnosis code lookup.
 
-Parses field.txt and category.txt from UKB Showcase downloads.
+Default parser handles UK Biobank Showcase format (field.txt, category.txt).
+Other biobanks can supply alternative catalogue formats.
 """
 
 from __future__ import annotations

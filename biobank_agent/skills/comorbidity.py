@@ -25,22 +25,24 @@ from biobank_agent.utils.plotting import nature_figure, save_figure, PALETTE
 )
 def comorbidity(icd10_code: str, top_n: int = 15, *, ctx=None) -> dict:
     dm = ctx.dm
+    diag_col = ctx.settings.diagnoses_code_col
+    id_col = ctx.settings.subject_id_col
 
     # Get patients with target disease
     target_df = dm.query(f"""
-        SELECT DISTINCT eid FROM diagnoses
-        WHERE diag_icd10 LIKE '{icd10_code}%'
+        SELECT DISTINCT {id_col} FROM diagnoses
+        WHERE {diag_col} LIKE '{icd10_code}%'
     """)
-    target_eids = set(target_df["eid"].tolist())
+    target_eids = set(target_df[id_col].tolist())
     n_target = len(target_eids)
 
     # Get all diagnosis codes for these patients
     comorbid_df = dm.query(f"""
-        SELECT LEFT(diag_icd10, 3) AS code, COUNT(DISTINCT eid) AS n_co
+        SELECT LEFT({diag_col}, 3) AS code, COUNT(DISTINCT {id_col}) AS n_co
         FROM diagnoses
-        WHERE eid IN (SELECT DISTINCT eid FROM diagnoses WHERE diag_icd10 LIKE '{icd10_code}%')
-          AND LEFT(diag_icd10, 3) != '{icd10_code[:3]}'
-          AND diag_icd10 IS NOT NULL
+        WHERE {id_col} IN (SELECT DISTINCT {id_col} FROM diagnoses WHERE {diag_col} LIKE '{icd10_code}%')
+          AND LEFT({diag_col}, 3) != '{icd10_code[:3]}'
+          AND {diag_col} IS NOT NULL
         GROUP BY code
         HAVING n_co >= 100
         ORDER BY n_co DESC
@@ -55,8 +57,8 @@ def comorbidity(icd10_code: str, top_n: int = 15, *, ctx=None) -> dict:
 
         # Total with this disease
         total_with = dm.query(f"""
-            SELECT COUNT(DISTINCT eid) AS n FROM diagnoses
-            WHERE diag_icd10 LIKE '{code}%'
+            SELECT COUNT(DISTINCT {id_col}) AS n FROM diagnoses
+            WHERE {diag_col} LIKE '{code}%'
         """)["n"].iloc[0]
 
         # Odds ratio
