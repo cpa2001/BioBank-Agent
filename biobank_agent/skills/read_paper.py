@@ -1,7 +1,7 @@
 """Read paper skill — structured critical analysis of a scientific paper.
 
 Extracts text from a PDF or fetches by DOI, then produces an analysis
-template covering summary, methods, evidence quality, and UKB relevance.
+template covering summary, methods, evidence quality, and biobank relevance.
 """
 
 from __future__ import annotations
@@ -17,8 +17,25 @@ logger = logging.getLogger(__name__)
 # Common ICD-10 chapter prefixes for detection
 _ICD10_RE = re.compile(r"\b([A-Z]\d{2}(?:\.\d{1,2})?)\b")
 
-# Common UK Biobank field-like references (e.g. "field 30750", "UKB field ID 21001")
-_UKB_FIELD_RE = re.compile(r"(?:field|UKB|UK\s*Biobank)\s*(?:field\s*)?(?:ID\s*)?(\d{3,6})", re.IGNORECASE)
+# Default biobank field-like references (e.g. "field 30750", "UKB field ID 21001")
+# The pattern is rebuilt at runtime when ctx is available via _get_field_re()
+_DEFAULT_FIELD_RE = re.compile(r"(?:field|UKB|UK\s*Biobank)\s*(?:field\s*)?(?:ID\s*)?(\d{3,6})", re.IGNORECASE)
+
+
+def _get_field_re(ctx=None) -> re.Pattern:
+    """Return a compiled regex for biobank field references, using settings if available."""
+    settings = getattr(ctx, "settings", None) if ctx else None
+    if settings is None:
+        return _DEFAULT_FIELD_RE
+    bank_name = settings.biobank_name
+    bank_abbr = settings.biobank_abbreviation
+    # Build pattern: field|<abbr>|<full name>  (all case-insensitive)
+    alternatives = ["field", re.escape(bank_abbr)]
+    if bank_name != bank_abbr:
+        alternatives.append(re.escape(bank_name))
+    alt_str = "|".join(alternatives)
+    pattern = rf"(?:{alt_str})\s*(?:field\s*)?(?:ID\s*)?(\d{{3,6}})"
+    return re.compile(pattern, re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +45,7 @@ _UKB_FIELD_RE = re.compile(r"(?:field|UKB|UK\s*Biobank)\s*(?:field\s*)?(?:ID\s*)
 _FOCUS_PROMPTS: dict[str, str] = {
     "general": (
         "Provide a comprehensive analysis covering study design, statistical methods, "
-        "main findings, limitations, and relevance to UK Biobank research."
+        "main findings, limitations, and relevance to biobank research."
     ),
     "methods": (
         "Focus deeply on the methodology: study design, inclusion/exclusion criteria, "
@@ -37,12 +54,12 @@ _FOCUS_PROMPTS: dict[str, str] = {
     ),
     "biomarkers": (
         "Focus on biomarkers studied: which biomarkers were measured, assay platforms, "
-        "reference ranges, associations found, and which UK Biobank biomarker fields overlap."
+        "reference ranges, associations found, and which biobank biomarker fields overlap."
     ),
     "ukb-relevance": (
-        "Focus on UK Biobank relevance: does this paper use UKB data? What UKB fields "
+        "Focus on biobank relevance: does this paper use biobank data? What fields "
         "and ICD-10 codes are referenced? How could their approach be replicated or "
-        "extended using our UKB access?"
+        "extended using our biobank access?"
     ),
     "genetics": (
         "Focus on genetic methods and findings: GWAS design, SNPs identified, heritability "
@@ -51,14 +68,16 @@ _FOCUS_PROMPTS: dict[str, str] = {
     ),
     "epidemiology": (
         "Focus on epidemiological design: cohort definition, exposure/outcome measurement, "
-        "confounding adjustment, selection bias, and generalisability to the UK Biobank population."
+        "confounding adjustment, selection bias, and generalisability to the biobank population."
     ),
 }
 
 
-def _build_analysis_template(focus: str) -> str:
+def _build_analysis_template(focus: str, ctx=None) -> str:
     """Return a structured analysis template for the LLM to fill in."""
     focus_instruction = _FOCUS_PROMPTS.get(focus, _FOCUS_PROMPTS["general"])
+    bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
+    bank_abbr = ctx.settings.biobank_abbreviation if ctx and hasattr(ctx, "settings") else "Biobank"
 
     return f"""## Structured Paper Analysis
 
@@ -86,12 +105,12 @@ Please analyse this paper using the following framework.
 - **Effect Sizes (with 95% CI)**:
 - **Are conclusions proportionate to the evidence?** (yes/no + explanation):
 
-### 4. UK Biobank Relevance
-- **Uses UKB Data?** (yes/no):
+### 4. {bank_name} Relevance
+- **Uses {bank_abbr} Data?** (yes/no):
 - **ICD-10 Codes Referenced**:
-- **UKB Fields Referenced**:
-- **Biomarkers / Phenotypes That Overlap with UKB**:
-- **Could this analysis be replicated with our UKB data?** (yes/no + what's needed):
+- **{bank_abbr} Fields Referenced**:
+- **Biomarkers / Phenotypes That Overlap with {bank_abbr}**:
+- **Could this analysis be replicated with our {bank_abbr} data?** (yes/no + what's needed):
 
 ### 5. Key Takeaways for Our Research
 - **Actionable Insights**:
@@ -117,9 +136,10 @@ def _extract_icd10_codes(text: str) -> list[str]:
     return icd_codes[:50]  # cap at 50
 
 
-def _extract_ukb_field_refs(text: str) -> list[str]:
-    """Extract UK Biobank field ID references from text."""
-    matches = _UKB_FIELD_RE.findall(text)
+def _extract_biobank_field_refs(text: str, ctx=None) -> list[str]:
+    """Extract biobank field ID references from text."""
+    field_re = _get_field_re(ctx)
+    matches = field_re.findall(text)
     return list(dict.fromkeys(matches))[:30]  # unique, capped
 
 
@@ -130,7 +150,7 @@ def _extract_ukb_field_refs(text: str) -> list[str]:
 @skill(
     name="read_paper",
     description="Deep critical analysis of a scientific paper. Evaluates claims, methods, "
-                "evidence quality, and relevance to UK Biobank research.",
+                "evidence quality, and relevance to biobank research.",
     parameters={
         "paper_path_or_doi": {
             "type": "string",
@@ -223,13 +243,13 @@ def read_paper(paper_path_or_doi: str, focus: str = "general", *, ctx=None) -> d
     # ------------------------------------------------------------------
 
     icd10_codes = _extract_icd10_codes(paper_text)
-    ukb_fields = _extract_ukb_field_refs(paper_text)
+    biobank_fields = _extract_biobank_field_refs(paper_text, ctx=ctx)
 
     # ------------------------------------------------------------------
     # 3. Build analysis template for the agent LLM
     # ------------------------------------------------------------------
 
-    analysis_template = _build_analysis_template(focus)
+    analysis_template = _build_analysis_template(focus, ctx=ctx)
 
     # Truncate paper text to a reasonable size for LLM context
     max_text_chars = 8000
@@ -245,6 +265,6 @@ def read_paper(paper_path_or_doi: str, focus: str = "general", *, ctx=None) -> d
         "text_truncated": text_truncated,
         "analysis_template": analysis_template,
         "icd10_codes_mentioned": icd10_codes,
-        "ukb_fields_mentioned": ukb_fields,
+        "biobank_fields_mentioned": biobank_fields,
         "focus": focus,
     }

@@ -1,8 +1,12 @@
-"""3-tier memory system for Biobank Agent.
+"""Multi-tier memory system for Biobank Agent.
 
 Tier 1 (short-term): Current session messages — managed by agent.py
 Tier 2 (mid-term): AnalysisRecord log — managed by state.py
 Tier 3 (long-term): Persisted configs, pipelines, field usage — this file
+Tier 4 (error catalog): Error patterns + suggested fixes — this file
+Tier 5 (domain): Accumulated biobank knowledge — domain.md (prose)
+Tier 6 (user): Researcher preferences — user.md (prose)
+Tier 7 (episodic): Cross-session recall — sessions.db (SQLite FTS5)
 """
 
 from __future__ import annotations
@@ -30,6 +34,11 @@ class LongTermMemory:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self._path = self.memory_dir / "memory.json"
         self._data = self._load()
+
+        # Tier 5-7: Enhanced memory layers
+        self.domain = DomainMemory(self.memory_dir / "domain.md")
+        self.user = UserMemory(self.memory_dir / "user.md")
+        self.sessions = SessionSearch(self.memory_dir / "sessions.db")
 
     def _load(self) -> dict:
         if self._path.exists():
@@ -209,3 +218,188 @@ class LongTermMemory:
             })
         
         return sorted(errors, key=lambda x: x["count"], reverse=True)[:top_n]
+
+
+# ── Tier 5: Domain Knowledge Memory ──────────────────────────
+
+
+class DomainMemory:
+    """Persistent biobank knowledge — variable relationships, confounders, findings.
+
+    Stored as a Markdown file for human readability and direct injection
+    into the LLM system prompt. Follows the Hermes-agent pattern of
+    file-backed declarative memory.
+    """
+
+    _HEADER = "# Biobank Domain Knowledge\n\n"
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        if not self._path.exists():
+            self._path.write_text(self._HEADER, encoding="utf-8")
+
+    def read(self) -> str:
+        return self._path.read_text(encoding="utf-8")
+
+    def append_finding(self, heading: str, body: str) -> None:
+        """Append a dated entry. Idempotent — skips if body already present."""
+        existing = self.read()
+        if body.strip() in existing:
+            return
+        entry = (
+            f"\n### {heading} ({datetime.now().strftime('%Y-%m-%d')})\n"
+            f"{body.strip()}\n"
+        )
+        with open(self._path, "a", encoding="utf-8") as f:
+            f.write(entry)
+        logger.debug("Domain memory: added '%s'", heading)
+
+    def summary(self, max_chars: int = 2000) -> str:
+        """Return recent domain knowledge, truncated to max_chars."""
+        text = self.read()
+        if len(text) <= len(self._HEADER) + 5:
+            return ""
+        if len(text) <= max_chars:
+            return text
+        header_end = text.find("\n\n") + 2
+        tail = text[-(max_chars - header_end):]
+        return text[:header_end] + "...[earlier entries truncated]...\n" + tail
+
+
+# ── Tier 6: User Profile Memory ──────────────────────────────
+
+
+class UserMemory:
+    """Researcher preferences — inferred from session patterns.
+
+    Stored as Markdown with key-value entries that can be upserted.
+    """
+
+    _HEADER = "# Researcher Profile\n\n"
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        if not self._path.exists():
+            self._path.write_text(self._HEADER, encoding="utf-8")
+
+    def read(self) -> str:
+        return self._path.read_text(encoding="utf-8")
+
+    def upsert_preference(self, key: str, value: str) -> None:
+        """Insert or replace a keyed preference line."""
+        existing = self.read()
+        marker = f"**{key}:**"
+        new_line = f"{marker} {value}"
+        if marker in existing:
+            # Replace the entire line containing the marker
+            lines = existing.split("\n")
+            for i, line in enumerate(lines):
+                if marker in line:
+                    lines[i] = new_line
+                    break
+            self._path.write_text("\n".join(lines), encoding="utf-8")
+        else:
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(f"\n{new_line}\n")
+        logger.debug("User memory: upserted '%s'", key)
+
+    def summary(self) -> str:
+        text = self.read()
+        return text if len(text) > len(self._HEADER) + 5 else ""
+
+
+# ── Tier 7: Episodic Session Search ──────────────────────────
+
+
+class SessionSearch:
+    """Cross-session recall via SQLite FTS5.
+
+    Indexes past analysis sessions for BM25-ranked keyword search.
+    Enables "what did we find about diabetes last time?" queries.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        import sqlite3
+        self._db_path = db_path
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._setup()
+
+    def _setup(self) -> None:
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS sessions_meta (
+                session_id TEXT PRIMARY KEY,
+                timestamp  TEXT NOT NULL,
+                n_records  INTEGER DEFAULT 0
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+                session_id UNINDEXED,
+                user_query,
+                skills_used,
+                diseases,
+                key_findings,
+                tokenize = 'porter ascii'
+            );
+        """)
+        self._conn.commit()
+
+    def index_turn(
+        self,
+        session_id: str,
+        user_query: str,
+        records: list,
+    ) -> None:
+        """Index one agent turn for later recall."""
+        if not records:
+            return
+
+        skills_used = " ".join(sorted({r.skill for r in records if r.skill != "think"}))
+
+        diseases = " ".join(
+            str(v) for r in records
+            for k, v in r.args.items()
+            if k in ("icd10_code", "icd_code", "icd10", "disease_code", "code")
+        )
+
+        key_findings = " ".join(
+            f"{k}={v}"
+            for r in records
+            for k, v in r.key_results.items()
+            if not isinstance(v, (dict, list)) and k != "error"
+        )
+
+        self._conn.execute(
+            "INSERT OR REPLACE INTO sessions_meta VALUES (?, ?, ?)",
+            (session_id, datetime.now().isoformat(), len(records)),
+        )
+        self._conn.execute(
+            "DELETE FROM sessions_fts WHERE session_id = ?", (session_id,)
+        )
+        self._conn.execute(
+            "INSERT INTO sessions_fts VALUES (?, ?, ?, ?, ?)",
+            (session_id, user_query, skills_used, diseases, key_findings),
+        )
+        self._conn.commit()
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        """BM25-ranked search over past sessions."""
+        try:
+            rows = self._conn.execute(
+                """SELECT s.session_id, m.timestamp, m.n_records,
+                          s.user_query, s.diseases, s.key_findings,
+                          rank
+                   FROM sessions_fts s
+                   JOIN sessions_meta m USING (session_id)
+                   WHERE sessions_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (query, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.warning("Session search failed: %s", e)
+            return []
+
+    def close(self) -> None:
+        self._conn.close()

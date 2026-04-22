@@ -1,7 +1,7 @@
 """Brainstorm skill — structured research ideation for biomedical topics.
 
 Generates candidate research directions with hypotheses, approaches,
-data requirements, and UK Biobank feasibility assessments.
+data requirements, and biobank feasibility assessments.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ _DIRECTION_TEMPLATE_QUICK = """\
 **Hypothesis**: {hypothesis}
 **Approach**: {approach}
 **Data Requirements**: {data_requirements}
-**UKB Feasibility**: {feasibility}
+**Feasibility**: {feasibility}
 """
 
 _DIRECTION_TEMPLATE_DEEP = """\
@@ -39,11 +39,11 @@ _DIRECTION_TEMPLATE_DEEP = """\
 
 **Data Requirements**: {data_requirements}
 
-**UKB Feasibility**: {feasibility}
+**Feasibility**: {feasibility}
 
 **Evidence Support**:
 - What existing literature supports this direction?
-- What preliminary signals (if any) exist in UK Biobank?
+- What preliminary signals (if any) exist in the biobank?
 - Strength of prior evidence: [weak / moderate / strong]
 
 **Potential Pitfalls**:
@@ -64,6 +64,8 @@ def _build_brainstorm_document(
     n_ideas: int,
     depth: str,
     context_summary: str,
+    bank_name: str = "Biobank",
+    bank_abbr: str = "Biobank",
 ) -> str:
     """Build the structured brainstorm markdown document."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -109,7 +111,7 @@ def _build_brainstorm_document(
         "",
         "## 3. Research Directions",
         "",
-        "For each direction, evaluate feasibility using UK Biobank data.",
+        f"For each direction, evaluate feasibility using {bank_name} data.",
         "",
     ])
 
@@ -120,8 +122,8 @@ def _build_brainstorm_document(
                 title=f"[Direction {i} title]",
                 hypothesis=f"[Specific, testable hypothesis for direction {i}]",
                 approach="[Study design, statistical methods, analysis pipeline]",
-                data_requirements="[UKB fields needed, sample size estimates, inclusion/exclusion criteria]",
-                feasibility="[Assessment of whether UK Biobank has the required data and sufficient power]",
+                data_requirements=f"[{bank_abbr} fields needed, sample size estimates, inclusion/exclusion criteria]",
+                feasibility=f"[Assessment of whether {bank_name} has the required data and sufficient power]",
             )
         )
 
@@ -193,6 +195,10 @@ def brainstorm(topic: str, n_ideas: int = 5, depth: str = "quick", *, ctx=None) 
         depth = "quick"
     n_ideas = max(1, min(n_ideas, 20))  # clamp
 
+    # Resolve biobank identity from settings
+    bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
+    bank_abbr = ctx.settings.biobank_abbreviation if ctx and hasattr(ctx, "settings") else "Biobank"
+
     # Gather session context
     context_summary = ""
     if ctx is not None and hasattr(ctx, "state"):
@@ -202,7 +208,10 @@ def brainstorm(topic: str, n_ideas: int = 5, depth: str = "quick", *, ctx=None) 
             pass
 
     # Build the brainstorm document
-    document = _build_brainstorm_document(topic, n_ideas, depth, context_summary)
+    document = _build_brainstorm_document(
+        topic, n_ideas, depth, context_summary,
+        bank_name=bank_name, bank_abbr=bank_abbr,
+    )
 
     # Save to workspace
     workspace_path: str | None = None
@@ -238,7 +247,7 @@ def brainstorm(topic: str, n_ideas: int = 5, depth: str = "quick", *, ctx=None) 
         f"Brainstorm workspace created for '{topic}' with {n_ideas} direction slots "
         f"({'deep' if depth == 'deep' else 'quick'} mode). "
         f"The agent should now fill in each direction with specific hypotheses, "
-        f"methods, and UK Biobank feasibility assessments."
+        f"methods, and {bank_name} feasibility assessments."
     )
 
     return {

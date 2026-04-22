@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -76,6 +78,10 @@ class Agent:
         # Conversation
         self.messages: list[dict] = []
 
+        # Background review
+        self._review_lock = threading.Lock()
+        self._review_interval = 5  # trigger review every N records
+
     def _build_data_description(self) -> str:
         """Generate dynamic data description from live data layer."""
         parts = []
@@ -113,7 +119,18 @@ class Agent:
             session_state=self.state.context_summary(),
         )
         if mem_summary:
-            content += f"\n\n{mem_summary}"
+            content += f"\n\n## Long-term Memory\n{mem_summary}"
+
+        # Inject domain knowledge (prose, frozen snapshot)
+        domain_text = self.memory.domain.summary(max_chars=2000)
+        if domain_text:
+            content += f"\n\n## Domain Knowledge\n{domain_text}"
+
+        # Inject user profile
+        user_text = self.memory.user.summary()
+        if user_text:
+            content += f"\n\n## Researcher Profile\n{user_text}"
+
         return {"role": "system", "content": content}
 
     def run(self, user_query: str) -> str:
@@ -148,6 +165,7 @@ class Agent:
             # If no tool calls → final answer
             if not response.has_tool_calls:
                 self.messages.append({"role": "assistant", "content": response.text})
+                self._post_run(user_query)
                 return response.text
 
             # Process tool calls
@@ -253,7 +271,116 @@ class Agent:
         logger.warning("Max tool rounds (%d) reached for query: %s",
                        self.settings.max_tool_rounds, user_query[:100])
         self.messages.append({"role": "assistant", "content": "[Max tool rounds reached]"})
+        self._post_run(user_query)
         return "[Max tool rounds reached]"
+
+    def _post_run(self, user_query: str) -> None:
+        """Post-run housekeeping: index session, trigger background review."""
+        # Index this turn for cross-session recall
+        try:
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.memory.sessions.index_turn(
+                session_id=session_id,
+                user_query=user_query,
+                records=self.state.records[-20:],
+            )
+        except Exception as e:
+            logger.debug("Session indexing failed (non-critical): %s", e)
+
+        # Trigger background review every N records
+        n = len(self.state.records)
+        if n > 0 and n % self._review_interval == 0:
+            t = threading.Thread(target=self._background_review, daemon=True)
+            t.start()
+
+    def _background_review(self) -> None:
+        """Background sweep: extract findings, detect patterns, update memory."""
+        if not self._review_lock.acquire(blocking=False):
+            return
+        try:
+            recent = self.state.records[-10:]
+            self._save_domain_findings(recent)
+            self._detect_pipeline_patterns()
+            self._update_user_profile()
+        except Exception as e:
+            logger.debug("Background review non-critical failure: %s", e)
+        finally:
+            self._review_lock.release()
+
+    def _save_domain_findings(self, records) -> None:
+        """Extract significant findings to domain memory."""
+        for r in records:
+            if r.skill == "train_model":
+                auc = r.key_results.get("mean_auc", r.key_results.get("auc", 0))
+                if isinstance(auc, (int, float)) and auc > 0.70:
+                    disease = r.args.get("icd10_code", r.args.get("icd_code", "unknown"))
+                    model = r.args.get("model_type", "model")
+                    features = r.key_results.get("top_features", [])
+                    feat_str = ", ".join(str(f) for f in features[:5]) if features else "N/A"
+                    body = (
+                        f"- Disease: {disease}, Model: {model}, AUC: {auc:.3f}\n"
+                        f"- Top predictors: {feat_str}"
+                    )
+                    self.memory.domain.append_finding(f"Predictor: {disease}", body)
+
+                    if auc > 0.95:
+                        self.memory.domain.append_finding(
+                            f"WARNING: Possible leakage — {disease}",
+                            f"AUC={auc:.3f} is suspiciously high. Check for label leakage.",
+                        )
+
+            if r.skill == "survival":
+                p = r.key_results.get("log_rank_p", r.key_results.get("p_value", 1.0))
+                if isinstance(p, (int, float)) and p < 0.01:
+                    disease = r.args.get("icd10_code", r.args.get("icd_code", "unknown"))
+                    self.memory.domain.append_finding(
+                        f"Survival: {disease}",
+                        f"Significant log-rank test (p={p:.4f})",
+                    )
+
+    def _detect_pipeline_patterns(self) -> None:
+        """Auto-save repeated skill sequences as pipelines."""
+        skills = [r.skill for r in self.state.records if r.skill != "think"]
+        if len(skills) < 6:
+            return
+        trigrams: dict[tuple, int] = {}
+        for i in range(len(skills) - 2):
+            tri = (skills[i], skills[i + 1], skills[i + 2])
+            trigrams[tri] = trigrams.get(tri, 0) + 1
+        for trigram, count in trigrams.items():
+            if count >= 2:
+                name = "_".join(trigram)
+                if name not in self.memory.list_pipelines():
+                    for i in range(len(skills) - 2):
+                        if tuple(skills[i : i + 3]) == trigram:
+                            steps = [
+                                {"skill": r.skill, "args": r.args}
+                                for r in self.state.records[i : i + 3]
+                            ]
+                            self.memory.save_pipeline(name, steps)
+                            logger.info("Auto-saved pipeline: %s", name)
+                            break
+
+    def _update_user_profile(self) -> None:
+        """Infer researcher preferences from session history."""
+        all_diseases = [
+            str(v) for r in self.state.records
+            for k, v in r.args.items()
+            if k in ("icd10_code", "icd_code", "icd10", "disease_code")
+        ]
+        if all_diseases:
+            top = Counter(all_diseases).most_common(5)
+            top_str = ", ".join(f"{d}(n={c})" for d, c in top)
+            self.memory.user.upsert_preference("commonly_studied_diseases", top_str)
+
+        model_types = [
+            r.args.get("model_type")
+            for r in self.state.records
+            if r.skill == "train_model" and r.args.get("model_type")
+        ]
+        if model_types:
+            top_model = Counter(model_types).most_common(1)[0][0]
+            self.memory.user.upsert_preference("preferred_model", top_model)
 
     def _build_ctx(self, report_dir: Optional[Path] = None):
         """Build the context object passed to skills."""

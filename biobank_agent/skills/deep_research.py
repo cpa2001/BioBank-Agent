@@ -1,7 +1,7 @@
-"""Deep research skill — multi-source literature + UKB cross-reference.
+"""Deep research skill — multi-source literature + biobank cross-reference.
 
 Searches the web for recent literature on a topic, fetches abstracts,
-cross-references with the UK Biobank field catalogue, and compiles
+cross-references with the biobank field catalogue, and compiles
 a cited research brief.
 """
 
@@ -23,22 +23,23 @@ logger = logging.getLogger(__name__)
 
 def _search_literature(topic: str, max_sources: int, ctx: Any) -> list[dict]:
     """Search for recent literature on *topic*."""
+    bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
     try:
         from biobank_agent.skills.web_search import web_search
 
-        # Two search passes: general + UKB-specific
+        # Two search passes: general + biobank-specific
         general = web_search(
             query=f"{topic} scientific study",
             max_results=max_sources,
             ctx=ctx,
         )
-        ukb = web_search(
-            query=f"{topic} UK Biobank",
+        biobank = web_search(
+            query=f"{topic} {bank_name}",
             max_results=max(3, max_sources // 3),
             ctx=ctx,
         )
 
-        all_results = general.get("results", []) + ukb.get("results", [])
+        all_results = general.get("results", []) + biobank.get("results", [])
 
         # Deduplicate by URL
         seen_urls: set[str] = set()
@@ -80,8 +81,8 @@ def _fetch_abstracts(sources: list[dict], max_fetch: int, ctx: Any) -> list[dict
     return enriched
 
 
-def _cross_reference_ukb_fields(topic: str, ctx: Any) -> list[dict]:
-    """Search the UKB field catalogue for fields relevant to *topic*."""
+def _cross_reference_biobank_fields(topic: str, ctx: Any) -> list[dict]:
+    """Search the biobank field catalogue for fields relevant to *topic*."""
     if ctx is None or not hasattr(ctx, "catalog"):
         return []
 
@@ -115,7 +116,7 @@ def _cross_reference_ukb_fields(topic: str, ctx: Any) -> list[dict]:
                 continue
 
     except Exception as exc:
-        logger.debug("UKB field cross-reference failed: %s", exc)
+        logger.debug("Biobank field cross-reference failed: %s", exc)
 
     return relevant_fields[:30]  # cap at 30
 
@@ -123,7 +124,8 @@ def _cross_reference_ukb_fields(topic: str, ctx: Any) -> list[dict]:
 def _compile_brief(
     topic: str,
     sources: list[dict],
-    ukb_fields: list[dict],
+    biobank_fields: list[dict],
+    bank_name: str = "Biobank",
 ) -> str:
     """Compile a markdown research brief."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -131,7 +133,7 @@ def _compile_brief(
         f"# Research Brief: {topic}",
         f"**Generated**: {now}",
         f"**Sources reviewed**: {len(sources)}",
-        f"**UKB fields identified**: {len(ukb_fields)}",
+        f"**{bank_name} fields identified**: {len(biobank_fields)}",
         "",
         "---",
         "",
@@ -157,31 +159,31 @@ def _compile_brief(
     lines.extend([
         "---",
         "",
-        "## UK Biobank Relevant Fields",
+        f"## {bank_name} Relevant Fields",
         "",
     ])
 
-    if ukb_fields:
+    if biobank_fields:
         lines.append("| Field ID | Title | Category | Type |")
         lines.append("|----------|-------|----------|------|")
-        for f in ukb_fields:
+        for f in biobank_fields:
             lines.append(
                 f"| {f['field_id']} | {f['title']} | {f['category']} | {f['value_type']} |"
             )
         lines.append("")
     else:
-        lines.append("*No directly matching UKB fields found. Manual catalogue review recommended.*\n")
+        lines.append(f"*No directly matching {bank_name} fields found. Manual catalogue review recommended.*\n")
 
     lines.extend([
         "---",
         "",
         "## Synthesis & Next Steps",
         "",
-        "Based on the literature and available UK Biobank data, consider:",
+        f"Based on the literature and available {bank_name} data, consider:",
         "",
         "1. **Key findings across sources**: [Summarise common themes]",
         "2. **Gaps in current research**: [What questions remain unanswered?]",
-        "3. **UKB data availability**: [Can the identified fields answer remaining questions?]",
+        f"3. **{bank_name} data availability**: [Can the identified fields answer remaining questions?]",
         "4. **Recommended analyses**: [Specific analyses to run with the Biobank Agent]",
         "",
     ])
@@ -196,7 +198,7 @@ def _compile_brief(
 @skill(
     name="deep_research",
     description="Conduct multi-source research on a biomedical topic. Searches literature, "
-                "cross-references with UK Biobank data, and produces a cited research brief.",
+                "cross-references with biobank data, and produces a cited research brief.",
     parameters={
         "topic": {"type": "string", "description": "Research topic"},
         "max_sources": {
@@ -214,16 +216,17 @@ def deep_research(topic: str, max_sources: int = 10, *, ctx=None) -> dict:
 
     1. Search the web for recent papers and resources on *topic*.
     2. Fetch abstracts/content from the top results.
-    3. Cross-reference with the UKB field catalogue.
+    3. Cross-reference with the biobank field catalogue.
     4. Compile a structured research brief with citations.
 
     Returns
     -------
     dict
-        ``{"topic": ..., "sources": [...], "ukb_relevant_fields": [...],
+        ``{"topic": ..., "sources": [...], "biobank_relevant_fields": [...],
            "brief": str}``
     """
     max_sources = max(1, min(max_sources, 30))  # clamp
+    bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
 
     # Step 1: Search literature
     sources = _search_literature(topic, max_sources, ctx)
@@ -233,11 +236,11 @@ def deep_research(topic: str, max_sources: int = 10, *, ctx=None) -> dict:
     if sources:
         sources = _fetch_abstracts(sources, max_fetch, ctx)
 
-    # Step 3: Cross-reference with UKB catalogue
-    ukb_fields = _cross_reference_ukb_fields(topic, ctx)
+    # Step 3: Cross-reference with biobank catalogue
+    biobank_fields = _cross_reference_biobank_fields(topic, ctx)
 
     # Step 4: Compile brief
-    brief = _compile_brief(topic, sources, ukb_fields)
+    brief = _compile_brief(topic, sources, biobank_fields, bank_name=bank_name)
 
     # Save brief to report directory
     brief_path: str | None = None
@@ -270,8 +273,8 @@ def deep_research(topic: str, max_sources: int = 10, *, ctx=None) -> dict:
             for s in sources
         ],
         "n_sources": len(sources),
-        "ukb_relevant_fields": ukb_fields,
-        "n_ukb_fields": len(ukb_fields),
+        "biobank_relevant_fields": biobank_fields,
+        "n_biobank_fields": len(biobank_fields),
         "brief": brief,
         "brief_path": brief_path,
     }

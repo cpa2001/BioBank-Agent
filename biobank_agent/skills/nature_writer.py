@@ -256,6 +256,9 @@ _SECTION_BUILDERS: dict[str, Any] = {
     "methods": _template_methods,
 }
 
+# Templates that accept ctx as a third argument
+_CTX_AWARE_SECTIONS = {"introduction", "discussion", "methods"}
+
 
 # ---------------------------------------------------------------------------
 # Skill
@@ -324,7 +327,10 @@ def nature_writer(section: str, content: str, style: str = "nature", *, ctx=None
 
     style_rules = _STYLE_RULES[style]
     builder = _SECTION_BUILDERS[section]
-    writing_prompt = builder(content, style_rules)
+    if section in _CTX_AWARE_SECTIONS:
+        writing_prompt = builder(content, style_rules, ctx=ctx)
+    else:
+        writing_prompt = builder(content, style_rules)
 
     # Build a general style reminder appended to every prompt
     style_reminder = (

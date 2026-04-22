@@ -7,7 +7,7 @@ from biobank_agent.utils.plotting import nature_figure, save_figure, PALETTE
 
 @skill(
     name="prevalence",
-    description="Calculate disease prevalence in UK Biobank. Returns top N most common "
+    description="Calculate disease prevalence in the biobank cohort. Returns top N most common "
                 "ICD10 3-character codes with patient counts and prevalence percentages. "
                 "Generates a horizontal bar chart.",
     parameters={
@@ -55,7 +55,8 @@ def prevalence(top_n: int = 20, chapter_filter: str = "", *, ctx=None) -> dict:
     ax.set_yticks(list(y_pos))
     ax.set_yticklabels([f"{r['code']} {r['disease_name']}" for _, r in df.iterrows()])
     ax.set_xlabel("Number of patients")
-    ax.set_title(f"Top {top_n} diseases in UK Biobank (N={total:,})")
+    bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
+    ax.set_title(f"Top {top_n} diseases in {bank_name} (N={total:,})")
 
     # Add percentage labels
     for i, (_, row) in enumerate(df.iterrows()):
