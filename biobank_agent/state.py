@@ -22,9 +22,20 @@ class TokenUsage:
     def total_tokens(self) -> int:
         return self.prompt_tokens + self.completion_tokens
 
+    @staticmethod
+    def _coerce_count(value: Any) -> int:
+        """Convert relay-provided token count to a safe non-negative int."""
+        if value is None:
+            return 0
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, count)
+
     def update(self, usage: dict) -> None:
-        self.prompt_tokens += usage.get("prompt_tokens", 0)
-        self.completion_tokens += usage.get("completion_tokens", 0)
+        self.prompt_tokens += self._coerce_count(usage.get("prompt_tokens", 0))
+        self.completion_tokens += self._coerce_count(usage.get("completion_tokens", 0))
 
 
 @dataclass
@@ -102,6 +113,9 @@ class SessionState:
 
     # ── Provenance chain ─────────────────────────────────
     provenances: list[Provenance] = field(default_factory=list)
+
+    # ── Orchestration diagnostics ───────────────────────
+    last_orchestration: dict[str, Any] = field(default_factory=dict)
 
     def add_record(self, record: AnalysisRecord) -> None:
         self.records.append(record)

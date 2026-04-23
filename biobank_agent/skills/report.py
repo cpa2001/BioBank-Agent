@@ -9,6 +9,7 @@ Output formats: Markdown, HTML (self-contained with CSS), PDF (via pandoc)
 
 from pathlib import Path
 from datetime import datetime
+import json
 
 from biobank_agent.registry import skill
 from biobank_agent.utils.report_templates import (
@@ -292,6 +293,28 @@ def _extract_key_findings(records) -> list[str]:
     return findings[:5] if findings else ["Analysis completed -- see details below"]
 
 
+def _dedupe_records(records) -> list:
+    """Collapse consecutive duplicate non-think calls (same skill + args)."""
+    deduped = []
+    for rec in records:
+        if not deduped:
+            deduped.append(rec)
+            continue
+        prev = deduped[-1]
+        prev_sig = (prev.skill, json.dumps(prev.args, sort_keys=True, default=str))
+        cur_sig = (rec.skill, json.dumps(rec.args, sort_keys=True, default=str))
+        if rec.skill != "think" and cur_sig == prev_sig:
+            deduped[-1] = rec
+        else:
+            deduped.append(rec)
+    return deduped
+
+
+def _report_records(ctx) -> list:
+    """Records used for report rendering after de-duplication."""
+    return _dedupe_records(list(getattr(ctx.state, "records", [])))
+
+
 @skill(
     name="generate_report",
     description="Generate a structured analysis report from all session analyses. "
@@ -345,7 +368,7 @@ def generate_report(
         "markdown": str(md_path),
         "html": str(html_path) if html_path else None,
         "format": format,
-        "n_sections": len(ctx.state.records),
+        "n_sections": len(_report_records(ctx)),
         "n_figures": len(ctx.state.figures),
     }
 
@@ -355,6 +378,7 @@ def generate_report(
 
 def _build_report_sections(title: str, ctx) -> list[str]:
     """Build technical report with executive summary and Key Findings."""
+    records = _report_records(ctx)
     sections = []
 
     sections.append(REPORT_HEADER.format(
@@ -364,14 +388,14 @@ def _build_report_sections(title: str, ctx) -> list[str]:
     ))
 
     # Key Findings
-    if ctx.state.records:
-        findings = _extract_key_findings(ctx.state.records)
+    if records:
+        findings = _extract_key_findings(records)
         findings_md = "\n".join(f"> - {f}" for f in findings)
         sections.append(KEY_FINDINGS_BOX.format(findings=findings_md))
 
     # Executive Summary
-    if ctx.state.records:
-        n_analyses = len([r for r in ctx.state.records if r.skill != "think"])
+    if records:
+        n_analyses = len([r for r in records if r.skill != "think"])
         n_figs = len(ctx.state.figures)
         n_cohorts = len(ctx.state.cohorts)
         n_models = len(ctx.state.models)
@@ -387,7 +411,7 @@ def _build_report_sections(title: str, ctx) -> list[str]:
 
     # Analysis sections with interpretive text
     section_n = 0
-    for rec in ctx.state.records:
+    for rec in records:
         if rec.skill == "think":
             continue
         section_n += 1
@@ -462,6 +486,7 @@ def _build_report_sections(title: str, ctx) -> list[str]:
 
 def _build_paper_sections(title: str, ctx) -> list[str]:
     """Build IMRaD paper draft."""
+    records = _report_records(ctx)
     sections = []
     bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
     bank_desc = ctx.settings.biobank_description if ctx and hasattr(ctx, "settings") else "a large-scale prospective cohort study"
@@ -472,7 +497,7 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
     sections.append("*The Chinese University of Hong Kong*\n\n")
     sections.append("---\n\n")
 
-    findings = _extract_key_findings(ctx.state.records)
+    findings = _extract_key_findings(records)
 
     abstract = (
         f"**Background:** We analysed the {bank_name} cohort to identify "
@@ -537,7 +562,7 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
     ))
 
     results_parts = []
-    for rec in ctx.state.records:
+    for rec in records:
         interp = _interpret_skill(rec)
         if interp:
             results_parts.append(interp)
@@ -571,16 +596,17 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
 
 def _build_brief_sections(title: str, ctx) -> list[str]:
     """Build a brief summary report."""
+    records = _report_records(ctx)
     sections = []
     sections.append(f"# {title}\n\n")
     sections.append(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
 
-    findings = _extract_key_findings(ctx.state.records)
+    findings = _extract_key_findings(records)
     for f in findings:
         sections.append(f"- {f}\n")
     sections.append("\n")
 
-    for rec in ctx.state.records:
+    for rec in records:
         if rec.skill == "think":
             continue
         interp = _interpret_skill(rec)
@@ -602,7 +628,7 @@ def _add_figures_section(sections: list[str], ctx) -> None:
 
     # Build a map of figure paths to analysis records for captions
     fig_to_record = {}
-    for rec in ctx.state.records:
+    for rec in _report_records(ctx):
         for fp in rec.figure_paths:
             fig_to_record[fp] = rec
 

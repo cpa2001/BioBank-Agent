@@ -33,9 +33,11 @@ class RetrievalDecision:
     """Result of retrieval analysis."""
     should_retrieve: bool = False
     query: str = ""
-    source: str = ""          # "web_search" | "fetch_paper" | "recall_session"
+    source: str = ""          # "web_search" | "fetch_paper" | "recall_session" | "dual_channel"
     reason: str = ""
     confidence: float = 0.0
+    channels: list[str] = field(default_factory=list)
+    context_hits: list[dict] = field(default_factory=list)
 
 
 # ── Uncertainty signal patterns ────────────────────────────
@@ -126,6 +128,11 @@ class AgenticRAG:
 
         # ── Determine source and query ────────
         source, query = self._route_retrieval(thought, triggered_signals)
+        channels = ["semantic"]
+        context_hits: list[dict] = []
+        if source in {"recall_session", "dual_channel"}:
+            channels = ["semantic", "graph"]
+            context_hits = self.dual_channel_retrieve(query, limit=8)
 
         return RetrievalDecision(
             should_retrieve=True,
@@ -133,6 +140,8 @@ class AgenticRAG:
             source=source,
             reason=f"Signals: {', '.join(s[0] for s in triggered_signals)}",
             confidence=max_confidence,
+            channels=channels,
+            context_hits=context_hits,
         )
 
     def _route_retrieval(
@@ -156,11 +165,90 @@ class AgenticRAG:
         # Session recall
         if "explicit_gap" in signal_names and self.memory:
             query = self._extract_key_terms(thought)
-            return "recall_session", query
+            return "dual_channel", query
 
         # Default: web search with extracted terms
         query = self._extract_key_terms(thought)
         return "web_search", query
+
+    def dual_channel_retrieve(self, query: str, limit: int = 8) -> list[dict]:
+        """Dual-channel retrieval: semantic recall + graph walk + sufficiency rerank."""
+        if not self.memory:
+            return []
+
+        semantic_hits = []
+        graph_hits = []
+        try:
+            if hasattr(self.memory, "sessions"):
+                semantic_hits = self.memory.sessions.search(query, limit=max(3, limit // 2))
+        except Exception as e:
+            logger.debug("Semantic retrieval failed: %s", e)
+
+        try:
+            if hasattr(self.memory, "action_graph"):
+                graph_hits = self.memory.action_graph.search_nodes(
+                    query=query,
+                    node_types=["claim", "paper", "result", "field", "figure"],
+                    limit=max(3, limit // 2),
+                )
+        except Exception as e:
+            logger.debug("Graph retrieval failed: %s", e)
+
+        merged = []
+        for hit in semantic_hits:
+            merged.append({
+                "channel": "semantic",
+                "id": hit.get("session_id", ""),
+                "text": f"{hit.get('user_query', '')} {hit.get('key_findings', '')}",
+                "payload": hit,
+            })
+        for hit in graph_hits:
+            payload = hit.get("payload", {}) if isinstance(hit, dict) else {}
+            merged.append({
+                "channel": "graph",
+                "id": f"{hit.get('node_type', '')}:{hit.get('node_id', '')}",
+                "text": f"{hit.get('node_id', '')} {payload.get('text', '')} {payload.get('title', '')}",
+                "payload": hit,
+            })
+
+        if not merged:
+            return []
+
+        query_terms = set(re.findall(r"[a-zA-Z]{3,}", query.lower()))
+        scored = []
+        for item in merged:
+            text = str(item.get("text", "")).lower()
+            overlap = sum(1 for t in query_terms if t in text)
+            semantic_score = overlap / max(1, len(query_terms))
+            sufficiency = self._statistical_sufficiency(item.get("payload", {}))
+            score = 0.65 * semantic_score + 0.35 * sufficiency
+            scored.append({**item, "score": round(score, 4), "semantic_score": semantic_score, "sufficiency": sufficiency})
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:limit]
+
+    def _statistical_sufficiency(self, payload: dict) -> float:
+        """Heuristic sufficiency signal used for retrieval reranking."""
+        if not isinstance(payload, dict):
+            return 0.0
+        checks = 0
+        passed = 0
+        for key in ("n_cases", "n_controls", "n_subjects"):
+            if key in payload:
+                checks += 1
+                if isinstance(payload.get(key), (int, float)) and payload.get(key, 0) >= 100:
+                    passed += 1
+        if "key_findings" in payload:
+            checks += 1
+            if str(payload["key_findings"]).strip():
+                passed += 1
+        if "payload" in payload:
+            checks += 1
+            if isinstance(payload["payload"], dict) and payload["payload"]:
+                passed += 1
+        if checks == 0:
+            return 0.3
+        return min(1.0, passed / checks)
 
     def _extract_academic_query(self, thought: str) -> str:
         """Extract a search query for academic literature."""

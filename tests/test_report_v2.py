@@ -268,5 +268,28 @@ class TestReportInterpretiveText:
         assert text == ""
 
 
+class TestReportDeduping:
+    """Repeated adjacent tool calls should not bloat report sections."""
+
+    @patch("biobank_agent.skills.report._write_html", return_value=None)
+    def test_generate_report_dedupes_consecutive_same_skill_args(self, mock_html, tmp_path):
+        from biobank_agent.skills.report import generate_report
+
+        records = [
+            _make_record("evaluate_model", args={"model_key": "I21_xgb"}, key_results={"auc": 0.78}),
+            _make_record("evaluate_model", args={"model_key": "I21_xgb"}, key_results={"auc": 0.79}),
+            _make_record("calibration", args={"model_key": "I21_xgb"}, key_results={"ece": 0.03}),
+            _make_record("calibration", args={"model_key": "I21_xgb"}, key_results={"ece": 0.02}),
+        ]
+        ctx = _make_ctx(tmp_path, records=records)
+        result = generate_report(title="Dedup Report", format="report", ctx=ctx)
+
+        md_text = Path(result["markdown"]).read_text()
+        # Only one section title per deduped skill should remain.
+        assert md_text.count("## 1. Evaluate Model") == 1
+        assert md_text.count("## 2. Calibration") == 1
+        assert result["n_sections"] == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

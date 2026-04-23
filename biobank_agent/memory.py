@@ -7,6 +7,7 @@ Tier 4 (error catalog): Error patterns + suggested fixes — this file
 Tier 5 (domain): Accumulated biobank knowledge — domain.md (prose)
 Tier 6 (user): Researcher preferences — user.md (prose)
 Tier 7 (episodic): Cross-session recall — sessions.db (SQLite FTS5)
+Tier 8 (action graph): claim/evidence graph — action_graph.db (SQLite)
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ class LongTermMemory:
         self.domain = DomainMemory(self.memory_dir / "domain.md")
         self.user = UserMemory(self.memory_dir / "user.md")
         self.sessions = SessionSearch(self.memory_dir / "sessions.db")
+        self.action_graph = ActionGraph(self.memory_dir / "action_graph.db")
 
     def _load(self) -> dict:
         if self._path.exists():
@@ -134,6 +136,12 @@ class LongTermMemory:
         if fields > 0:
             top = self.most_used_fields(5)
             parts.append(f"top fields: {', '.join(f[0] for f in top)}")
+        try:
+            graph_hits = self.action_graph.search_nodes("", limit=1)
+            if graph_hits is not None:
+                parts.append("action graph enabled")
+        except Exception:
+            pass
         return "Long-term memory: " + "; ".join(parts)
 
     # ── Tier 4: Error Catalog & Suggestions ───────────────
@@ -218,6 +226,47 @@ class LongTermMemory:
             })
         
         return sorted(errors, key=lambda x: x["count"], reverse=True)[:top_n]
+
+    # ── Tier 8: Action Graph (Implicit KG MVP) ───────────────
+
+    def upsert_node(
+        self,
+        node_type: str,
+        node_id: str,
+        payload: Optional[dict] = None,
+        score: float = 1.0,
+    ) -> str:
+        """Insert/update a node in the action graph."""
+        return self.action_graph.upsert_node(node_type, node_id, payload=payload, score=score)
+
+    def link_nodes(
+        self,
+        src_type: str,
+        src_id: str,
+        dst_type: str,
+        dst_id: str,
+        relation: str,
+        weight: float = 1.0,
+        evidence: Optional[dict] = None,
+    ) -> None:
+        """Create/update a directed edge in the action graph."""
+        self.action_graph.link_nodes(
+            src_type=src_type,
+            src_id=src_id,
+            dst_type=dst_type,
+            dst_id=dst_id,
+            relation=relation,
+            weight=weight,
+            evidence=evidence,
+        )
+
+    def retrieve_claim_evidence(self, claim_id: str, limit: int = 10) -> list[dict]:
+        """Return evidence nodes linked to a claim."""
+        return self.action_graph.retrieve_claim_evidence(claim_id, limit=limit)
+
+    def explain_claim(self, claim_id: str, limit: int = 10) -> str:
+        """Render a concise claim→evidence explanation."""
+        return self.action_graph.explain_claim(claim_id, limit=limit)
 
 
 # ── Tier 5: Domain Knowledge Memory ──────────────────────────
@@ -400,6 +449,210 @@ class SessionSearch:
         except Exception as e:
             logger.warning("Session search failed: %s", e)
             return []
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class ActionGraph:
+    """SQLite-backed implicit action graph.
+
+    Node types include: query, field, paper, claim, figure, result, tool, table.
+    Edges capture soft links produced during agent execution.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        import sqlite3
+
+        self._db_path = db_path
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._setup()
+
+    def _setup(self) -> None:
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS graph_nodes (
+                node_key    TEXT PRIMARY KEY,
+                node_type   TEXT NOT NULL,
+                node_id     TEXT NOT NULL,
+                score       REAL DEFAULT 1.0,
+                payload     TEXT DEFAULT '{}',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                src_key     TEXT NOT NULL,
+                dst_key     TEXT NOT NULL,
+                relation    TEXT NOT NULL,
+                weight      REAL DEFAULT 1.0,
+                evidence    TEXT DEFAULT '{}',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (src_key, dst_key, relation)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_graph_nodes_type_id ON graph_nodes(node_type, node_id);
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_src ON graph_edges(src_key);
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_dst ON graph_edges(dst_key);
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_relation ON graph_edges(relation);
+        """)
+        self._conn.commit()
+
+    @staticmethod
+    def _node_key(node_type: str, node_id: str) -> str:
+        return f"{node_type}:{node_id}"
+
+    def upsert_node(
+        self,
+        node_type: str,
+        node_id: str,
+        payload: Optional[dict] = None,
+        score: float = 1.0,
+    ) -> str:
+        node_key = self._node_key(node_type, node_id)
+        now = datetime.now().isoformat()
+        payload_json = json.dumps(payload or {}, default=str, ensure_ascii=False)
+        self._conn.execute(
+            """
+            INSERT INTO graph_nodes(node_key, node_type, node_id, score, payload, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(node_key) DO UPDATE SET
+                score=excluded.score,
+                payload=excluded.payload,
+                updated_at=excluded.updated_at
+            """,
+            (node_key, node_type, node_id, float(score), payload_json, now, now),
+        )
+        self._conn.commit()
+        return node_key
+
+    def link_nodes(
+        self,
+        src_type: str,
+        src_id: str,
+        dst_type: str,
+        dst_id: str,
+        relation: str,
+        weight: float = 1.0,
+        evidence: Optional[dict] = None,
+    ) -> None:
+        src_key = self._node_key(src_type, src_id)
+        dst_key = self._node_key(dst_type, dst_id)
+        # Ensure endpoint nodes exist.
+        self.upsert_node(src_type, src_id)
+        self.upsert_node(dst_type, dst_id)
+        now = datetime.now().isoformat()
+        evidence_json = json.dumps(evidence or {}, default=str, ensure_ascii=False)
+        self._conn.execute(
+            """
+            INSERT INTO graph_edges(src_key, dst_key, relation, weight, evidence, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(src_key, dst_key, relation) DO UPDATE SET
+                weight=excluded.weight,
+                evidence=excluded.evidence,
+                updated_at=excluded.updated_at
+            """,
+            (src_key, dst_key, relation, float(weight), evidence_json, now, now),
+        )
+        self._conn.commit()
+
+    def retrieve_claim_evidence(self, claim_id: str, limit: int = 10) -> list[dict]:
+        """Retrieve direct and one-hop evidence for a claim."""
+        claim_key = self._node_key("claim", claim_id)
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    e.relation,
+                    e.weight,
+                    e.evidence,
+                    n.node_type,
+                    n.node_id,
+                    n.payload
+                FROM graph_edges e
+                JOIN graph_nodes n ON n.node_key = e.dst_key
+                WHERE e.src_key = ?
+                ORDER BY e.weight DESC, n.updated_at DESC
+                LIMIT ?
+                """,
+                (claim_key, limit),
+            ).fetchall()
+        except Exception as err:
+            logger.warning("ActionGraph retrieve_claim_evidence failed: %s", err)
+            return []
+
+        out = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"]) if r["payload"] else {}
+            except Exception:
+                payload = {}
+            try:
+                ev = json.loads(r["evidence"]) if r["evidence"] else {}
+            except Exception:
+                ev = {}
+            out.append({
+                "claim_id": claim_id,
+                "relation": r["relation"],
+                "weight": float(r["weight"] or 0.0),
+                "node_type": r["node_type"],
+                "node_id": r["node_id"],
+                "payload": payload,
+                "edge_evidence": ev,
+            })
+        return out
+
+    def explain_claim(self, claim_id: str, limit: int = 10) -> str:
+        """Generate a concise textual explanation for a claim."""
+        evidence = self.retrieve_claim_evidence(claim_id, limit=limit)
+        if not evidence:
+            return f"Claim `{claim_id}` has no linked evidence."
+
+        lines = [f"Claim `{claim_id}` evidence chain:"]
+        for i, ev in enumerate(evidence[:limit], 1):
+            label = ev["payload"].get("title") or ev["payload"].get("text") or ev["node_id"]
+            lines.append(
+                f"{i}. [{ev['relation']}] {ev['node_type']}:{ev['node_id']} "
+                f"(w={ev['weight']:.2f}) — {str(label)[:140]}"
+            )
+        return "\n".join(lines)
+
+    def search_nodes(self, query: str, node_types: Optional[list[str]] = None, limit: int = 10) -> list[dict]:
+        """Simple lexical node search over IDs and payload text."""
+        q = f"%{query.lower()}%"
+        params: list[Any] = []
+        sql = """
+            SELECT node_type, node_id, score, payload, updated_at
+            FROM graph_nodes
+            WHERE (LOWER(node_id) LIKE ? OR LOWER(payload) LIKE ?)
+        """
+        params.extend([q, q])
+        if node_types:
+            placeholders = ",".join("?" for _ in node_types)
+            sql += f" AND node_type IN ({placeholders})"
+            params.extend(node_types)
+        sql += " ORDER BY score DESC, updated_at DESC LIMIT ?"
+        params.append(limit)
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+        except Exception as err:
+            logger.warning("ActionGraph search_nodes failed: %s", err)
+            return []
+        out = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"]) if r["payload"] else {}
+            except Exception:
+                payload = {}
+            out.append({
+                "node_type": r["node_type"],
+                "node_id": r["node_id"],
+                "score": float(r["score"] or 0.0),
+                "payload": payload,
+                "updated_at": r["updated_at"],
+            })
+        return out
 
     def close(self) -> None:
         self._conn.close()

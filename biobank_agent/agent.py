@@ -26,12 +26,13 @@ from .state import AnalysisRecord, Provenance, SessionState
 
 # Multi-model & reasoning imports (lazy-friendly)
 from .complexity import Strategy
-from .orchestrator import MultiModelOrchestrator, ModelSpec
+from .orchestrator import MultiModelOrchestrator, ModelSpec, OrchestrationResult
 from .reflexion import ReflexionEngine
 from .verdict import VerdictEngine
 from .guardrails import DelegationGuardrails
 from .retrieval import AgenticRAG
 from .tool_learner import ToolLearner
+from .interfaces.multimodal import SimpleMultimodalGrounder
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,7 @@ class Agent:
 
         # Tool learner (skill performance tracking)
         self.tool_learner = ToolLearner(memory=self.memory)
+        self.multimodal_grounder = SimpleMultimodalGrounder()
 
         # Skills
         autodiscover_skills()
@@ -120,6 +122,7 @@ class Agent:
 
         # Conversation
         self.messages: list[dict] = []
+        self._active_query_id: str | None = None
 
         # Background review
         self._review_lock = threading.Lock()
@@ -284,6 +287,16 @@ class Agent:
         text-only response (no more tool calls).
         """
         self.messages.append({"role": "user", "content": user_query})
+        self._active_query_id = f"q_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{abs(hash(user_query)) % 1000000}"
+        try:
+            self.memory.upsert_node(
+                node_type="query",
+                node_id=self._active_query_id,
+                payload={"text": user_query, "timestamp": datetime.now().isoformat()},
+                score=1.0,
+            )
+        except Exception:
+            pass
 
         # Compute report_dir once per run() call for consistency
         _report_dir = self.settings.reports_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -295,21 +308,47 @@ class Agent:
 
             # Call LLM (with optional multi-model routing)
             all_messages = [self._system_message()] + self.messages
+            orchestration_result: OrchestrationResult | None = None
 
             force_strategy = self._forced_strategy(user_query)
-            if self.settings.multi_model_enabled and len(self.orchestrator.model_pool) > 1:
-                response = self.orchestrator.route(
+            # Stability guard: use heavy multi-model orchestration primarily on the first turn.
+            # Subsequent tool rounds run on a single model to prevent repeated supervisor fan-out,
+            # timeout cascades, and context bloat on long workflows.
+            if (
+                self.settings.multi_model_enabled
+                and len(self.orchestrator.model_pool) > 1
+                and round_n == 0
+            ):
+                orchestration_result = self.orchestrator.route(
                     query=user_query,
                     messages=all_messages,
                     tools=self.registry.tool_schemas() or None,
                     records=self.state.records,
                     force_strategy=force_strategy,
                 )
+                response = orchestration_result
             else:
-                response = self.llm.chat(
+                llm_raw = self.llm.chat(
                     messages=all_messages,
                     tools=self.registry.tool_schemas() or None,
                 )
+                orchestration_result = self.orchestrator._wrap_llm_response(
+                    raw=llm_raw,
+                    strategy=Strategy.SINGLE,
+                    model_id=self.settings.llm_model,
+                )
+                try:
+                    self.orchestrator._attach_execution_evidence(orchestration_result, records=self.state.records)
+                    self.orchestrator._apply_execution_judge(orchestration_result, records=self.state.records)
+                except Exception:
+                    pass
+                response = orchestration_result
+
+            # Expose current routing status for CLI diagnostics/eval harness.
+            try:
+                self.state.last_orchestration = orchestration_result.to_dict() if orchestration_result else {}
+            except Exception:
+                self.state.last_orchestration = {}
 
             # Track token usage
             if response.usage:
@@ -318,6 +357,11 @@ class Agent:
             # If no tool calls → final answer
             if not response.has_tool_calls:
                 self.messages.append({"role": "assistant", "content": response.text})
+                try:
+                    if orchestration_result:
+                        self._record_orchestration_graph(orchestration_result)
+                except Exception:
+                    pass
                 self._post_run(user_query)
                 return response.text
 
@@ -460,6 +504,16 @@ class Agent:
                     key_results=key_res,
                     figure_paths=new_figs,
                 ))
+                try:
+                    self._record_tool_graph(
+                        skill=tc.name,
+                        args=clean_args,
+                        key_results=key_res,
+                        figure_paths=new_figs,
+                        timestamp=ts,
+                    )
+                except Exception:
+                    pass
 
                 # Record provenance for reproducibility
                 if not is_error:
@@ -507,6 +561,218 @@ class Agent:
         if n > 0 and n % self._review_interval == 0:
             t = threading.Thread(target=self._background_review, daemon=True)
             t.start()
+
+    def _record_orchestration_graph(self, result: OrchestrationResult) -> None:
+        """Persist orchestration-level claim/evidence structure into Action Graph."""
+        if not self._active_query_id:
+            return
+        query_id = self._active_query_id
+
+        # Record claims.
+        for claim in result.claims:
+            self.memory.upsert_node(
+                node_type="claim",
+                node_id=claim.claim_id,
+                payload={
+                    "text": claim.text,
+                    "source_model": claim.source_model,
+                    "confidence": claim.confidence,
+                    "tags": claim.tags,
+                    "safety_status": result.safety_status,
+                },
+                score=float(claim.confidence or 0.5),
+            )
+            self.memory.link_nodes(
+                src_type="query",
+                src_id=query_id,
+                dst_type="claim",
+                dst_id=claim.claim_id,
+                relation="produced_claim",
+                weight=float(claim.confidence or 0.5),
+            )
+
+        # Record claim→evidence links from orchestrator trace.
+        for ev in result.evidence_links:
+            self.memory.upsert_node(
+                node_type=ev.evidence_type,
+                node_id=ev.evidence_id,
+                payload={"snippet": ev.snippet, "source_model": ev.source_model},
+                score=float(ev.score or 0.3),
+            )
+            self.memory.link_nodes(
+                src_type="claim",
+                src_id=ev.claim_id,
+                dst_type=ev.evidence_type,
+                dst_id=ev.evidence_id,
+                relation=ev.relation or "supports",
+                weight=float(ev.score or 0.3),
+                evidence={"snippet": ev.snippet, "source_model": ev.source_model},
+            )
+
+        # Keep routing trace as a result node for reproducibility.
+        trace_id = f"trace_{datetime.now().strftime('%H%M%S')}"
+        self.memory.upsert_node(
+            node_type="result",
+            node_id=trace_id,
+            payload={
+                "strategy": result.debate_trace.get("strategy", "single"),
+                "safety_status": result.safety_status,
+                "debate_trace": result.debate_trace,
+            },
+            score=1.0,
+        )
+        self.memory.link_nodes(
+            src_type="query",
+            src_id=query_id,
+            dst_type="result",
+            dst_id=trace_id,
+            relation="has_orchestration_trace",
+            weight=1.0,
+        )
+
+    def _record_tool_graph(
+        self,
+        skill: str,
+        args: dict,
+        key_results: dict,
+        figure_paths: list[str],
+        timestamp: str,
+    ) -> None:
+        """Persist tool execution artifacts into Action Graph."""
+        if not self._active_query_id:
+            return
+        query_id = self._active_query_id
+        result_id = f"{timestamp}:{skill}"
+
+        self.memory.upsert_node(
+            node_type="result",
+            node_id=result_id,
+            payload={
+                "skill": skill,
+                "args": args,
+                "key_results": key_results,
+                "timestamp": timestamp,
+            },
+            score=1.0,
+        )
+        self.memory.link_nodes(
+            src_type="query",
+            src_id=query_id,
+            dst_type="result",
+            dst_id=result_id,
+            relation="executed",
+            weight=1.0,
+        )
+
+        self.memory.upsert_node(
+            node_type="tool",
+            node_id=skill,
+            payload={"name": skill},
+            score=1.0,
+        )
+        self.memory.link_nodes(
+            src_type="result",
+            src_id=result_id,
+            dst_type="tool",
+            dst_id=skill,
+            relation="produced_by",
+            weight=1.0,
+        )
+
+        # Link field references.
+        for v in args.values():
+            if isinstance(v, str) and v.replace("-", "").replace(".", "").isdigit():
+                field_id = v.strip()
+                self.memory.upsert_node("field", field_id, payload={"field_id": field_id}, score=0.8)
+                self.memory.link_nodes(
+                    src_type="result",
+                    src_id=result_id,
+                    dst_type="field",
+                    dst_id=field_id,
+                    relation="uses_field",
+                    weight=0.7,
+                )
+
+        # Link figures.
+        for fig in figure_paths:
+            fig_id = Path(fig).name
+            self.memory.upsert_node(
+                node_type="figure",
+                node_id=fig_id,
+                payload={"path": fig, "timestamp": timestamp},
+                score=0.9,
+            )
+            self.memory.link_nodes(
+                src_type="result",
+                src_id=result_id,
+                dst_type="figure",
+                dst_id=fig_id,
+                relation="renders",
+                weight=0.9,
+            )
+            # Cross-modal grounding MVP: extract lightweight structural signals.
+            try:
+                tensor = self.multimodal_grounder.figure_to_tensor(fig)
+                signals = self.multimodal_grounder.extract_structural_signals(
+                    table=None,
+                    modality_tensors={"figure": tensor},
+                )
+                for s in signals[:4]:
+                    signal_id = f"{fig_id}:{s.signal_type}"
+                    self.memory.upsert_node(
+                        node_type="signal",
+                        node_id=signal_id,
+                        payload={
+                            "modality": s.modality,
+                            "signal_type": s.signal_type,
+                            "value": s.value,
+                            "detail": s.detail,
+                            "figure": fig_id,
+                        },
+                        score=float(min(1.0, abs(s.value))),
+                    )
+                    self.memory.link_nodes(
+                        src_type="figure",
+                        src_id=fig_id,
+                        dst_type="signal",
+                        dst_id=signal_id,
+                        relation="has_structure_signal",
+                        weight=0.6,
+                    )
+            except Exception:
+                pass
+
+        # Auto-create soft claim nodes for interpretable scalar findings.
+        scalar_items = []
+        for k, v in key_results.items():
+            if isinstance(v, (int, float, str)) and k != "error":
+                scalar_items.append((k, v))
+        for key, val in scalar_items[:3]:
+            claim_text = f"{skill}.{key}={val}"
+            claim_id = f"auto_{abs(hash(claim_text)) % 10_000_000}"
+            self.memory.upsert_node(
+                node_type="claim",
+                node_id=claim_id,
+                payload={"text": claim_text, "source": "tool_result"},
+                score=0.4,
+            )
+            self.memory.link_nodes(
+                src_type="query",
+                src_id=query_id,
+                dst_type="claim",
+                dst_id=claim_id,
+                relation="derived_claim",
+                weight=0.4,
+            )
+            self.memory.link_nodes(
+                src_type="claim",
+                src_id=claim_id,
+                dst_type="result",
+                dst_id=result_id,
+                relation="supports",
+                weight=0.8,
+                evidence={"key": key, "value": str(val)},
+            )
 
     def _background_review(self) -> None:
         """Background sweep: extract findings, detect patterns, update memory."""

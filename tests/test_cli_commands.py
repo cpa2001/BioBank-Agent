@@ -17,6 +17,7 @@ def mock_agent():
     agent.settings = MagicMock()
     agent.settings.llm_model = "test-model"
     agent.settings.multi_model_enabled = True
+    agent.settings.llm_base_url = "http://relay.local"
     agent.settings.data_dir = "/fake/data"
     agent.settings.biobank_name = "Test Biobank"
     agent.settings.reports_dir = MagicMock()
@@ -34,12 +35,14 @@ def mock_agent():
     agent.state.models = {}
     agent.state.model_metadata = {}
     agent.state.token_usage = MagicMock(prompt_tokens=100, completion_tokens=50)
+    agent.state.last_orchestration = {}
     agent.messages = []
     agent.memory = MagicMock()
     agent.memory.summary.return_value = "1 saved pipeline"
     agent.memory.list_pipelines.return_value = ["test_pipe"]
     agent.memory.get_pipeline.return_value = [{"skill": "prevalence", "args": {}}]
     agent.memory.most_common_errors.return_value = []
+    agent.memory.explain_claim.return_value = "Claim `c1` evidence chain:\n1. supports result:r1"
     agent.orchestrator = MagicMock()
     agent.orchestrator.model_pool = [
         SimpleNamespace(model_id="test-model", role="generalist", priority=10),
@@ -186,6 +189,21 @@ class TestSlashCommands:
         from biobank_agent.cli import _handle_command
         _handle_command("/strategy single", mock_agent, mock_planner, {})
         assert mock_agent.settings.multi_model_enabled is False
+
+    def test_routing_status(self, mock_agent, mock_planner):
+        from biobank_agent.cli import _handle_command
+        mock_agent.state.last_orchestration = {
+            "safety_status": "PASS",
+            "claims": [{"claim_id": "c1"}],
+            "evidence_links": [{"claim_id": "c1"}],
+            "debate_trace": {"strategy": "debate", "disagreement": False},
+        }
+        _handle_command("/routing-status", mock_agent, mock_planner, {})
+
+    def test_evidence(self, mock_agent, mock_planner):
+        from biobank_agent.cli import _handle_command
+        _handle_command("/evidence c1", mock_agent, mock_planner, {})
+        mock_agent.memory.explain_claim.assert_called_once_with("c1", limit=10)
 
 
 class TestSlashAutocomplete:

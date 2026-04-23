@@ -28,6 +28,11 @@ _DEPRECATED_PARAM_PATTERNS = (
     re.compile(r"parameter\s+['`\"]?([a-zA-Z_][a-zA-Z0-9_]*)['`\"]?\s+is\s+deprecated", re.I),
     re.compile(r"does\s+not\s+support\s+(?:parameter\s+)?['`\"]?([a-zA-Z_][a-zA-Z0-9_]*)['`\"]?", re.I),
 )
+_UNAVAILABLE_CHANNEL_PATTERNS = (
+    re.compile(r"no available channel for model", re.I),
+    re.compile(r"model_not_found", re.I),
+    re.compile(r"无可用渠道", re.I),
+)
 
 
 @dataclass
@@ -56,17 +61,29 @@ class LLMClient:
         base_url: str = "http://api.shubiaobiao.cn",
         api_key: str = "",
         model: str = "claude-opus-4-7",
+        request_timeout_s: float = 60.0,
     ) -> None:
         # Ensure base URL has /v1 suffix for OpenAI SDK
         if not base_url.rstrip("/").endswith("/v1"):
             base_url = base_url.rstrip("/") + "/v1"
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
+        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=request_timeout_s)
         self.model = model
         self.tool_call_content_mode = "null"  # "null" | "empty"
         self._model_cache: list[str] = []
         self._model_cache_ts: float = 0.0
         self._model_cache_ttl_s: float = 600.0
         self._deprecated_params: set[str] = set()
+
+    @staticmethod
+    def _usage_int(value: Any) -> int:
+        """Normalize provider token counts to safe non-negative ints."""
+        if value is None:
+            return 0
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, n)
 
     @staticmethod
     def sanitize_messages(
@@ -127,8 +144,8 @@ class LLMClient:
             logger.info(
                 "LLM [%s] %d prompt + %d completion tokens (%.1fs)",
                 self.model,
-                result.usage.get("prompt_tokens", 0),
-                result.usage.get("completion_tokens", 0),
+                self._usage_int(result.usage.get("prompt_tokens", 0)),
+                self._usage_int(result.usage.get("completion_tokens", 0)),
                 elapsed,
             )
         return result
@@ -302,6 +319,14 @@ class LLMClient:
                 # If a model deprecates a parameter, drop it and retry immediately.
                 if self._adapt_deprecated_params(e, kwargs):
                     continue
+                # Relay says this model has no active channel right now: fail fast.
+                if self._is_unavailable_channel_error(e):
+                    logger.error(
+                        "LLM [%s] unavailable on relay (no channel/model_not_found): %s",
+                        self.model,
+                        e,
+                    )
+                    raise
                 # Server errors (500/502/503) are retryable.
                 if e.status_code and e.status_code >= 500:
                     last_error = e
@@ -322,6 +347,14 @@ class LLMClient:
                     continue
                 raise
         raise last_error  # type: ignore[misc]
+
+    @staticmethod
+    def _is_unavailable_channel_error(error: Exception) -> bool:
+        """Return True if relay reports model has no serving channel."""
+        text = str(error or "")
+        if not text:
+            return False
+        return any(p.search(text) for p in _UNAVAILABLE_CHANNEL_PATTERNS)
 
     def _adapt_deprecated_params(self, error: Exception, kwargs: dict[str, Any]) -> bool:
         """Detect deprecated parameter errors and mutate kwargs in place."""
@@ -383,9 +416,9 @@ class LLMClient:
         usage = {}
         if response.usage:
             usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
+                "prompt_tokens": self._usage_int(getattr(response.usage, "prompt_tokens", 0)),
+                "completion_tokens": self._usage_int(getattr(response.usage, "completion_tokens", 0)),
+                "total_tokens": self._usage_int(getattr(response.usage, "total_tokens", 0)),
             }
 
         return LLMResponse(text=text, tool_calls=tool_calls, usage=usage)

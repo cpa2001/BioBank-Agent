@@ -4,7 +4,8 @@ Entry point: `biobank` command (configured in pyproject.toml).
 Subcommands: `biobank rebuild-parquet` for batch parquet rebuild.
 Slash commands: /skills, /status, /history, /plan, /compact, /clear, /cost,
                 /model, /export, /help, /figures, /cohorts, /models,
-                /record, /pipelines, /errors, /memory, /models-available
+                /record, /pipelines, /errors, /memory, /models-available,
+                /routing-status, /evidence
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ HELP_SECTIONS = [
     ("Session", [
         ("/help", "Show this help message"),
         ("/status", "Session state, platform info, memory summary"),
+        ("/routing-status", "Show latest orchestration trace, claims, and safety status"),
         ("/cost", "Show token usage and estimated cost"),
         ("/compact", "Compress conversation history (keep last 10 turns)"),
         ("/clear", "Reset session state (cohorts, models, figures)"),
@@ -63,6 +65,7 @@ HELP_SECTIONS = [
         ("/figures", "List all generated figures"),
         ("/cohorts", "List active cohorts with summary stats"),
         ("/models", "List trained models with AUC"),
+        ("/evidence <claim_id>", "Show evidence chain for a claim from Action Graph"),
     ]),
     ("Planning", [
         ("/plan <task>", "Enter plan mode for complex tasks"),
@@ -313,11 +316,156 @@ def rebuild_parquet_cmd() -> None:
             )
 
 
+def eval_cmd() -> None:
+    """Subcommand: run benchmark suites with reliability observability metrics.
+
+    Usage:
+      biobank eval --suite research_eval_v1 --mode baseline|mas_v2 [--enforce-gate]
+    """
+    from .eval.benchmarks import (
+        BiomedQABenchmark,
+        ResearchEvalV1,
+        SkillCallBenchmark,
+        SkillSchemaBenchmark,
+    )
+    from .eval.harness import EvalHarness
+
+    suite = "research_eval_v1"
+    mode = "baseline"
+    enforce_gate = False
+    ab_compare = False
+    baseline_report = ""
+    for arg in sys.argv[2:]:
+        if arg.startswith("--suite="):
+            suite = arg.split("=", 1)[1].strip().lower()
+        elif arg.startswith("--mode="):
+            mode = arg.split("=", 1)[1].strip().lower()
+        elif arg.startswith("--baseline-report="):
+            baseline_report = arg.split("=", 1)[1].strip()
+        elif arg == "--ab":
+            ab_compare = True
+        elif arg == "--enforce-gate":
+            enforce_gate = True
+
+    settings = get_settings()
+    settings.ensure_dirs()
+    if mode == "baseline":
+        settings.multi_model_enabled = False
+    elif mode == "mas_v2":
+        settings.multi_model_enabled = True
+    else:
+        console.print(f"[red]Unknown mode: {mode}. Use baseline or mas_v2.[/]")
+        raise SystemExit(2)
+
+    benchmarks = {
+        "research_eval_v1": ResearchEvalV1,
+        "skill_schemas": SkillSchemaBenchmark,
+        "biomedical_qa": BiomedQABenchmark,
+        "skill_calls": SkillCallBenchmark,
+    }
+    if suite not in benchmarks:
+        console.print(f"[red]Unknown suite: {suite}.[/]")
+        console.print(f"[dim]Available: {', '.join(sorted(benchmarks))}[/]")
+        raise SystemExit(2)
+
+    benchmark = benchmarks[suite]()
+    harness = EvalHarness()
+    baseline_obs = {}
+
+    # Optional A/B baseline run or load from report.
+    if baseline_report:
+        p = Path(baseline_report)
+        if p.exists():
+            try:
+                data = json.loads(p.read_text())
+                baseline_obs = data.get("observability", {}) or {}
+            except Exception as e:
+                console.print(f"[yellow]Failed to parse baseline report ({p}): {e}[/]")
+    elif ab_compare and mode == "mas_v2":
+        baseline_settings = get_settings()
+        baseline_settings.ensure_dirs()
+        baseline_settings.multi_model_enabled = False
+        with console.status("[bold green]Running baseline for A/B..."):
+            baseline_agent = Agent(baseline_settings)
+            baseline_result = harness.run(
+                benchmark=benchmark,
+                agent=baseline_agent,
+                mode="baseline",
+                enforce_gate=False,
+            )
+            baseline_obs = baseline_result.observability
+
+    with console.status("[bold green]Loading agent for evaluation..."):
+        agent = Agent(settings)
+
+    with console.status(f"[bold green]Running {suite} ({mode}) ..."):
+        result = harness.run(
+            benchmark=benchmark,
+            agent=agent,
+            mode=mode,
+            enforce_gate=enforce_gate,
+            baseline_observability=baseline_obs,
+        )
+
+    console.print(Panel(result.summary(), title="Evaluation Summary"))
+    obs = result.observability
+    table = Table(title="Reliability Dashboard")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green", justify="right")
+    table.add_row("success_rate", f"{obs.get('success_rate', 0.0):.2%}")
+    table.add_row("evidence_coverage", f"{obs.get('evidence_coverage', 0.0):.2%}")
+    table.add_row("stat_guardrail_violation", f"{obs.get('stat_guardrail_violation', 0.0):.2%}")
+    table.add_row("wrong_consensus_rate", f"{obs.get('wrong_consensus_rate', 0.0):.2%}")
+    table.add_row("complex_task_success", f"{obs.get('complex_task_success', 0.0):.2%}")
+    table.add_row("token_cost(tokens)", f"{obs.get('token_cost', 0.0):,.0f}")
+    table.add_row("p95_latency_s", f"{obs.get('p95_latency_s', 0.0):.2f}")
+    console.print(table)
+    if result.comparative:
+        cmp = result.comparative
+        cmp_table = Table(title="A/B Delta vs Baseline")
+        cmp_table.add_column("Metric", style="cyan")
+        cmp_table.add_column("Value", style="green", justify="right")
+        cmp_table.add_row(
+            "complex_task_success_uplift",
+            f"{cmp.get('complex_task_success_uplift', 0.0):+.2%}",
+        )
+        cmp_table.add_row(
+            "wrong_consensus_reduction_ratio",
+            f"{cmp.get('wrong_consensus_reduction_ratio', 0.0):+.2%}",
+        )
+        console.print(cmp_table)
+
+    out_dir = settings.reports_dir / "eval"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{suite}_{mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    payload = {
+        "suite": suite,
+        "mode": mode,
+        "summary": result.summary(),
+        "observability": obs,
+        "baseline_observability": result.baseline_observability,
+        "comparative": result.comparative,
+        "gate_passed": result.gate_passed,
+        "gate_failures": result.gate_failures,
+        "n_total": result.n_total,
+        "n_passed": result.n_passed,
+        "timestamp": result.timestamp,
+    }
+    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    console.print(f"[green]Saved report:[/] {out_path}")
+
+    if enforce_gate and not result.gate_passed:
+        raise SystemExit(3)
+
+
 def main() -> None:
     """CLI entry point."""
     # Check for subcommands
     if len(sys.argv) > 1 and sys.argv[1] == "rebuild-parquet":
         rebuild_parquet_cmd()
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "eval":
+        eval_cmd()
         return
 
     # Parse optional args
@@ -467,6 +615,9 @@ def _handle_command(
     elif cmd == "/status":
         _show_status(agent, planner, token_usage)
 
+    elif cmd == "/routing-status":
+        _show_routing_status(agent)
+
     elif cmd == "/cost":
         _show_cost(token_usage, agent)
 
@@ -495,6 +646,12 @@ def _handle_command(
 
     elif cmd == "/models":
         _show_models(agent)
+
+    elif cmd == "/evidence":
+        if not arg:
+            console.print("[yellow]Usage: /evidence <claim_id>[/]")
+        else:
+            _show_evidence(agent, arg)
 
     # ── Plan commands ───────────────────────────────────
     elif cmd == "/plan":
@@ -641,6 +798,46 @@ def _show_status(agent: Agent, planner: PlanMode, token_usage: dict) -> None:
     if mem_summary:
         lines.append(mem_summary)
     console.print(Panel("\n".join(lines), title="Session Status"))
+
+
+def _show_routing_status(agent: Agent) -> None:
+    """Display the latest orchestration trace and safety summary."""
+    trace = getattr(agent.state, "last_orchestration", {}) or {}
+    if not trace:
+        console.print("[dim]No routing trace yet. Run one query first.[/]")
+        return
+    claims = trace.get("claims", []) if isinstance(trace, dict) else []
+    evidence_links = trace.get("evidence_links", []) if isinstance(trace, dict) else []
+    debate_trace = trace.get("debate_trace", {}) if isinstance(trace, dict) else {}
+    safety_status = trace.get("safety_status", "PASS") if isinstance(trace, dict) else "PASS"
+    strategy = debate_trace.get("strategy", "single") if isinstance(debate_trace, dict) else "single"
+    disagreement = bool(debate_trace.get("disagreement", False)) if isinstance(debate_trace, dict) else False
+
+    table = Table(title="Routing Status")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("strategy", str(strategy))
+    table.add_row("safety_status", str(safety_status))
+    table.add_row("claims", str(len(claims)))
+    table.add_row("evidence_links", str(len(evidence_links)))
+    table.add_row("disagreement", "yes" if disagreement else "no")
+    if claims:
+        claim_ids = ", ".join(str(c.get("claim_id", "")) for c in claims[:4] if isinstance(c, dict))
+        if claim_ids:
+            table.add_row("claim_ids", claim_ids)
+    if isinstance(debate_trace, dict) and debate_trace.get("participants"):
+        table.add_row("participants", ", ".join(str(x) for x in debate_trace.get("participants", [])[:6]))
+    console.print(table)
+
+
+def _show_evidence(agent: Agent, claim_id: str) -> None:
+    """Display claim evidence chain from Action Graph."""
+    claim_id = claim_id.strip()
+    text = agent.memory.explain_claim(claim_id, limit=10)
+    if "no linked evidence" in text.lower():
+        console.print(f"[yellow]{text}[/]")
+        return
+    console.print(Panel(text, title=f"Evidence: {claim_id}"))
 
 
 def _show_cost(token_usage: dict, agent: Agent) -> None:
@@ -899,17 +1096,21 @@ def _show_available_llm_models(agent: Agent) -> None:
     """Fetch and display model IDs available from relay /v1/models."""
     models: list[str] = []
     fetch_fn = getattr(agent, "refresh_available_models", None)
+    health = "unknown"
     try:
         if callable(fetch_fn):
             models = fetch_fn()
+            health = "ok"
         else:
             llm = getattr(agent, "llm", None)
             if llm and hasattr(llm, "list_models"):
                 models = llm.list_models(refresh=True)
+                health = "ok"
             else:
                 models = list(getattr(agent, "available_models", []))
     except Exception as e:
         console.print(f"[red]Failed to fetch model list: {e}[/]")
+        health = "degraded"
         return
 
     if not models:
@@ -918,6 +1119,25 @@ def _show_available_llm_models(agent: Agent) -> None:
         return
 
     pool_ids = {spec.model_id for spec in getattr(agent.orchestrator, "model_pool", [])}
+    llm = getattr(agent, "llm", None)
+    cached_count = len(getattr(llm, "_model_cache", []) or []) if llm else 0
+    cache_ts = float(getattr(llm, "_model_cache_ts", 0.0) or 0.0) if llm else 0.0
+    cache_age_s = 0.0
+    if cache_ts > 0:
+        import time as _time
+        cache_age_s = max(0.0, _time.time() - cache_ts)
+
+    console.print(
+        Panel(
+            f"Endpoint: {getattr(agent.settings, 'llm_base_url', '(unknown)')}\n"
+            f"Health: {health}\n"
+            f"Returned models: {len(models)}\n"
+            f"Cached models: {cached_count}\n"
+            f"Cache age: {cache_age_s:.1f}s",
+            title="Relay Health",
+        )
+    )
+
     table = Table(title=f"Relay Models ({len(models)})")
     table.add_column("#", style="dim", justify="right")
     table.add_column("Model ID", style="cyan")
@@ -971,11 +1191,14 @@ def _force_debate(agent: Agent, query: str, token_usage: dict) -> None:
         ]
         with console.status("[bold green]Models debating..."):
             response = agent.orchestrator.debate(
+                query=query,
                 messages=messages,
                 tools=agent.registry.tool_schemas() or None,
             )
         console.print()
         console.print(Markdown(response.text))
+        if getattr(response, "safety_status", "PASS") != "PASS":
+            console.print(f"[yellow]safety_status={response.safety_status}[/]")
     except Exception as e:
         console.print(f"[red]Debate failed: {e}[/]")
 

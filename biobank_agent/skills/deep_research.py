@@ -11,6 +11,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 from biobank_agent.registry import skill
 
@@ -21,34 +22,108 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+def _search_europe_pmc(topic: str, max_results: int) -> list[dict]:
+    """Fallback biomedical retrieval via Europe PMC API."""
+    try:
+        import httpx
+    except Exception:
+        return []
+
+    compact_query = " ".join(str(topic).split()[:12]).strip()
+    if not compact_query:
+        return []
+
+    url = (
+        "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+        f"?query={quote_plus(compact_query)}&format=json&pageSize={min(max_results, 25)}&resultType=core"
+    )
+    try:
+        resp = httpx.get(url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.debug("Europe PMC fallback failed: %s", exc)
+        return []
+
+    rows = (((data or {}).get("resultList") or {}).get("result") or [])
+    out: list[dict] = []
+    for r in rows:
+        title = str(r.get("title", "")).strip()
+        if not title:
+            continue
+        doi = str(r.get("doi", "")).strip()
+        pmid = str(r.get("pmid", "")).strip()
+        if doi:
+            link = f"https://doi.org/{doi}"
+        elif pmid:
+            link = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        else:
+            src = str(r.get("id", "")).strip()
+            link = f"https://europepmc.org/article/{src}" if src else ""
+        snippet = (str(r.get("abstractText", "")).strip() or str(r.get("authorString", "")).strip())[:500]
+        out.append({"title": title, "url": link, "snippet": snippet})
+        if len(out) >= max_results:
+            break
+    return out
+
 def _search_literature(topic: str, max_sources: int, ctx: Any) -> list[dict]:
     """Search for recent literature on *topic*."""
     bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
     try:
         from biobank_agent.skills.web_search import web_search
 
-        # Two search passes: general + biobank-specific
-        general = web_search(
-            query=f"{topic} scientific study",
-            max_results=max_sources,
-            ctx=ctx,
-        )
-        biobank = web_search(
-            query=f"{topic} {bank_name}",
-            max_results=max(3, max_sources // 3),
-            ctx=ctx,
-        )
+        # Primary passes.
+        queries = [
+            f"{topic} scientific study",
+            f"{topic} {bank_name}",
+        ]
+        all_results: list[dict] = []
+        for q in queries:
+            res = web_search(
+                query=q,
+                max_results=max_sources,
+                ctx=ctx,
+            )
+            all_results.extend(res.get("results", []))
 
-        all_results = general.get("results", []) + biobank.get("results", [])
+        # Fallback passes for long/noisy topics that often return zero hits.
+        if not all_results:
+            fallback_queries = [
+                "acute myocardial infarction biomarkers UK Biobank",
+                "myocardial infarction risk prediction biomarkers cohort",
+                "ICD10 I21 biomarkers survival",
+                "site:pubmed.ncbi.nlm.nih.gov myocardial infarction biomarker",
+                topic[:120],
+            ]
+            for q in fallback_queries:
+                res = web_search(
+                    query=q,
+                    max_results=max(5, max_sources // 2),
+                    ctx=ctx,
+                )
+                all_results.extend(res.get("results", []))
+                if len(all_results) >= max_sources:
+                    break
+
+        # Biomedical API fallback when search engine results are empty/sparse.
+        if len(all_results) < max(3, max_sources // 3):
+            pmc_results = _search_europe_pmc(topic=topic, max_results=max_sources)
+            all_results.extend(pmc_results)
 
         # Deduplicate by URL
-        seen_urls: set[str] = set()
+        seen_keys: set[str] = set()
         unique: list[dict] = []
         for r in all_results:
             url = r.get("url", "")
-            if url and url not in seen_urls:
-                seen_urls.add(url)
-                unique.append(r)
+            title = str(r.get("title", "")).strip().lower()
+            key = (url or title).strip().lower()
+            if not key:
+                continue
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            unique.append(r)
         return unique[:max_sources]
 
     except Exception as exc:

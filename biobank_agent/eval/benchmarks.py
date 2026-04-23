@@ -180,3 +180,85 @@ class SkillCallBenchmark(Benchmark):
         if expected.issubset(called):
             return 1.0
         return len(expected & called) / len(expected)
+
+
+class ResearchEvalV1(Benchmark):
+    """120-case reliability suite for biobank scientific agent evaluation.
+
+    Four categories × 30 each:
+    - complexity: complex planning/routing
+    - evidence: evidence-chain and provenance prompts
+    - statistics: guardrail-sensitive statistical prompts
+    - execution: concrete skill-invocation tasks
+    """
+
+    name = "research_eval_v1"
+
+    def __init__(self) -> None:
+        self.cases = []
+        self._build_cases()
+
+    def _build_cases(self) -> None:
+        diseases = ["E11", "I10", "I21", "N18", "C34", "J44", "F32", "K76", "G20", "M81"]
+        biomarkers = ["HbA1c", "CRP", "LDL", "HDL", "BMI", "ALT", "AST", "Creatinine", "Triglycerides", "eGFR"]
+
+        # Category 1: complex route/decomposition tasks.
+        for i in range(30):
+            d = diseases[i % len(diseases)]
+            b = biomarkers[i % len(biomarkers)]
+            self.cases.append(TestCase(
+                id=f"complex_{i+1:03d}",
+                query=(
+                    f"Comprehensive multi-step analysis for {d}: prevalence baseline, "
+                    f"train prediction model, check calibration, and critique confounders involving {b}. "
+                    "Provide uncertainty and verification plan."
+                ),
+                expected_contains=["uncertainty"],
+                tags=["complex", "routing", "planning"],
+            ))
+
+        # Category 2: evidence/provenance tasks.
+        for i in range(30):
+            d = diseases[i % len(diseases)]
+            self.cases.append(TestCase(
+                id=f"evidence_{i+1:03d}",
+                query=(
+                    f"For disease {d}, provide claim-evidence chain with at least two evidence links "
+                    "and explain what additional retrieval would falsify your conclusion."
+                ),
+                expected_contains=["evidence"],
+                tags=["evidence", "provenance"],
+            ))
+
+        # Category 3: statistical guardrail tasks.
+        for i in range(30):
+            d = diseases[i % len(diseases)]
+            self.cases.append(TestCase(
+                id=f"statistics_{i+1:03d}",
+                query=(
+                    f"Assess {d} cardiovascular risk with explicit multiple-testing considerations, "
+                    "95% confidence intervals, and confounder adjustment rationale."
+                ),
+                expected_contains=["95", "confidence"],
+                tags=["statistics", "guardrail"],
+            ))
+
+        # Category 4: execution-centric tasks.
+        for i in range(30):
+            d = diseases[i % len(diseases)]
+            self.cases.append(TestCase(
+                id=f"execution_{i+1:03d}",
+                query=f"Run prevalence and then a predictive modeling workflow for ICD10 {d}.",
+                expected_skills=["prevalence"],
+                tags=["execution"],
+            ))
+
+    def score(self, result: TestResult, case: TestCase) -> float:
+        """Composite score: pass/fail plus evidence metadata bonus."""
+        base = 1.0 if result.passed else 0.0
+        claim_count = int(result.metadata.get("claim_count", 0))
+        evidence_count = int(result.metadata.get("evidence_count", 0))
+        if claim_count <= 0:
+            return base * 0.8
+        evidence_ratio = min(1.0, evidence_count / claim_count)
+        return max(0.0, 0.7 * base + 0.3 * evidence_ratio)

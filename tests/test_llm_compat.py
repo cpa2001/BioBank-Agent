@@ -28,6 +28,13 @@ def _fake_response(text: str = "ok"):
     return SimpleNamespace(choices=[choice], usage=usage)
 
 
+def _fake_response_with_none_usage(text: str = "ok"):
+    message = SimpleNamespace(content=text, tool_calls=None)
+    choice = SimpleNamespace(message=message)
+    usage = SimpleNamespace(prompt_tokens=None, completion_tokens=None, total_tokens=None)
+    return SimpleNamespace(choices=[choice], usage=usage)
+
+
 def _fake_stream(chunks: list[str]):
     out = []
     for content in chunks:
@@ -123,3 +130,16 @@ class TestDeprecatedParamCompat:
 
         with pytest.raises(Exception, match="invalid API key"):
             llm.chat(messages=[{"role": "user", "content": "hello"}])
+
+    def test_usage_none_values_are_normalized_to_zero(self):
+        fake_create = _FakeCreate([
+            _fake_response_with_none_usage("ok"),
+        ])
+        llm = _build_client(fake_create)
+
+        resp = llm.chat(messages=[{"role": "user", "content": "hello"}])
+
+        assert resp.text == "ok"
+        assert resp.usage["prompt_tokens"] == 0
+        assert resp.usage["completion_tokens"] == 0
+        assert resp.usage["total_tokens"] == 0
