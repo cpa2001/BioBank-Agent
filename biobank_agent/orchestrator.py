@@ -73,7 +73,7 @@ _ROLE_SYSTEM_PROMPTS = {
 @dataclass
 class ModelSpec:
     """A model available in the pool."""
-    model_id: str              # e.g. "claude-sonnet-4-6", "gpt-4o", "gemini-2.5-pro"
+    model_id: str              # e.g. "claude-opus-4-7", "gpt-4o", "gemini-2.5-pro"
     role: str = "generalist"   # generalist | reasoning | coding | judge
     strengths: list[str] = field(default_factory=list)
     priority: int = 0          # higher = preferred for tiebreaks
@@ -93,7 +93,7 @@ class MultiModelOrchestrator:
 
     Usage::
 
-        orch = MultiModelOrchestrator(base_url, api_key, "claude-sonnet-4-6", pool)
+        orch = MultiModelOrchestrator(base_url, api_key, "claude-opus-4-7", pool)
         result = orch.route(query, messages, tools, records)
         # result is an LLMResponse (same interface as single-model)
     """

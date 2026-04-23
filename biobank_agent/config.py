@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # ── LLM ──────────────────────────────────────────────────────
     llm_base_url: str = "http://api.shubiaobiao.cn"
     llm_api_key: str = ""
-    llm_model: str = "claude-sonnet-4-6"
+    llm_model: str = "claude-opus-4-7"
 
     # ── Data Paths ───────────────────────────────────────────────
     # Accept both new (DATA_DIR/RAW_DIR) and legacy (UKB_PARQUET_DIR/UKB_RAW_DIR) env var names
@@ -92,9 +92,9 @@ class Settings(BaseSettings):
 
     # ── Multi-Model Orchestration ────────────────────────────────
     multi_model_enabled: bool = True
-    model_pool: str = ""       # comma-separated model IDs, e.g. "claude-sonnet-4-6,gpt-4o"
+    model_pool: str = ""       # comma-separated model IDs, e.g. "claude-opus-4-7,gpt-4o"
     auto_discover_models: bool = True
-    preferred_multi_models: str = "gpt-5.4,gemini-3.1-pro-preview"
+    preferred_multi_models: str = "gpt-5.4-pro,gemini-3.1-pro-preview"
     max_auto_model_pool: int = 3
     debate_rounds: int = 2
     complexity_threshold: float = 0.7   # score above this triggers multi-model

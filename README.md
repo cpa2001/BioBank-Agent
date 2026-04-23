@@ -181,6 +181,7 @@ If you use Biobank Agent in your research, please cite:
 
 ## Author
 
-**CHEN Pengan** · AIH Group, The Chinese University of Hong Kong
+AIH Group, Department of Computer Science and Engineering (CSE), The Chinese University of Hong Kong (CUHK)
+Shanghai Academy of AI for Science (SAIS)
 
-chenpengan@link.cuhk.edu.hk
+**CHEN Pengan** · chenpengan@link.cuhk.edu.hk

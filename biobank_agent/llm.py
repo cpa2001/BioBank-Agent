@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Generator, Optional
@@ -21,6 +22,12 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_ERRORS = (APIConnectionError, RateLimitError, APITimeoutError)
 _MAX_RETRIES = 3
 _BASE_DELAY = 2.0  # seconds
+_COMPAT_OPTIONAL_PARAMS = ("temperature", "max_tokens")
+_DEPRECATED_PARAM_PATTERNS = (
+    re.compile(r"`([a-zA-Z_][a-zA-Z0-9_]*)`\s+is\s+deprecated", re.I),
+    re.compile(r"parameter\s+['`\"]?([a-zA-Z_][a-zA-Z0-9_]*)['`\"]?\s+is\s+deprecated", re.I),
+    re.compile(r"does\s+not\s+support\s+(?:parameter\s+)?['`\"]?([a-zA-Z_][a-zA-Z0-9_]*)['`\"]?", re.I),
+)
 
 
 @dataclass
@@ -48,7 +55,7 @@ class LLMClient:
         self,
         base_url: str = "http://api.shubiaobiao.cn",
         api_key: str = "",
-        model: str = "claude-sonnet-4-6",
+        model: str = "claude-opus-4-7",
     ) -> None:
         # Ensure base URL has /v1 suffix for OpenAI SDK
         if not base_url.rstrip("/").endswith("/v1"):
@@ -59,6 +66,7 @@ class LLMClient:
         self._model_cache: list[str] = []
         self._model_cache_ts: float = 0.0
         self._model_cache_ttl_s: float = 600.0
+        self._deprecated_params: set[str] = set()
 
     @staticmethod
     def sanitize_messages(
@@ -103,60 +111,27 @@ class LLMClient:
         Retries on transient errors (rate limit, connection, timeout) with
         exponential backoff up to _MAX_RETRIES times.
         """
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": self.sanitize_messages(messages, self.tool_call_content_mode),
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+        kwargs = self._build_chat_kwargs(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=False,
+        )
 
-        last_error = None
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                t0 = time.time()
-                response = self.client.chat.completions.create(**kwargs)
-                elapsed = time.time() - t0
-                result = self._parse_response(response)
-                if result.usage:
-                    logger.info(
-                        "LLM [%s] %d prompt + %d completion tokens (%.1fs)",
-                        self.model,
-                        result.usage.get("prompt_tokens", 0),
-                        result.usage.get("completion_tokens", 0),
-                        elapsed,
-                    )
-                return result
-            except _RETRYABLE_ERRORS as e:
-                last_error = e
-                if attempt < _MAX_RETRIES:
-                    delay = _BASE_DELAY * (2 ** attempt)
-                    logger.warning(
-                        "LLM call failed (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, _MAX_RETRIES + 1, e, delay,
-                    )
-                    time.sleep(delay)
-                else:
-                    logger.error("LLM call failed after %d attempts: %s", _MAX_RETRIES + 1, e)
-            except APIError as e:
-                # Server errors (500/502/503) are retryable
-                if e.status_code and e.status_code >= 500:
-                    last_error = e
-                    if attempt < _MAX_RETRIES:
-                        delay = _BASE_DELAY * (2 ** attempt)
-                        logger.warning(
-                            "LLM server error %d (attempt %d/%d): %s. Retrying in %.1fs...",
-                            e.status_code, attempt + 1, _MAX_RETRIES + 1, e, delay,
-                        )
-                        time.sleep(delay)
-                    else:
-                        logger.error("LLM server error after %d attempts: %s", _MAX_RETRIES + 1, e)
-                else:
-                    raise  # Non-retryable API errors (400, 401, 403, etc.)
-
-        raise last_error  # type: ignore[misc]
+        t0 = time.time()
+        response = self._create_chat_completion_with_compat(kwargs)
+        elapsed = time.time() - t0
+        result = self._parse_response(response)
+        if result.usage:
+            logger.info(
+                "LLM [%s] %d prompt + %d completion tokens (%.1fs)",
+                self.model,
+                result.usage.get("prompt_tokens", 0),
+                result.usage.get("completion_tokens", 0),
+                elapsed,
+            )
+        return result
 
     def list_models(self, refresh: bool = False) -> list[str]:
         """List models supported by the OpenAI-compatible relay.
@@ -231,21 +206,18 @@ class LLMClient:
         Returns the final LLMResponse (with tool_calls if any) at the end.
         Tool calls are accumulated from streamed deltas.
         """
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True,
-        }
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+        kwargs = self._build_chat_kwargs(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
 
         text_parts: list[str] = []
         tool_call_deltas: dict[int, dict] = {}  # index → {id, name, args_str}
 
-        stream = self.client.chat.completions.create(**kwargs)
+        stream = self._create_chat_completion_with_compat(kwargs)
         for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta is None:
@@ -284,6 +256,111 @@ class LLMClient:
             text="".join(text_parts),
             tool_calls=tool_calls,
         )
+
+    def _build_chat_kwargs(
+        self,
+        messages: list[dict],
+        tools: Optional[list[dict]],
+        temperature: float,
+        max_tokens: int,
+        stream: bool,
+    ) -> dict[str, Any]:
+        """Build chat completion kwargs with per-model compatibility guards."""
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": self.sanitize_messages(messages, self.tool_call_content_mode),
+        }
+        if stream:
+            kwargs["stream"] = True
+        if "temperature" not in self._deprecated_params:
+            kwargs["temperature"] = temperature
+        if "max_tokens" not in self._deprecated_params:
+            kwargs["max_tokens"] = max_tokens
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        return kwargs
+
+    def _create_chat_completion_with_compat(self, kwargs: dict[str, Any]):
+        """Create completion with retries + deprecated-parameter adaptation."""
+        last_error = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return self.client.chat.completions.create(**kwargs)
+            except _RETRYABLE_ERRORS as e:
+                last_error = e
+                if attempt < _MAX_RETRIES:
+                    delay = _BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        "LLM call failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, _MAX_RETRIES + 1, e, delay,
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error("LLM call failed after %d attempts: %s", _MAX_RETRIES + 1, e)
+            except APIError as e:
+                # If a model deprecates a parameter, drop it and retry immediately.
+                if self._adapt_deprecated_params(e, kwargs):
+                    continue
+                # Server errors (500/502/503) are retryable.
+                if e.status_code and e.status_code >= 500:
+                    last_error = e
+                    if attempt < _MAX_RETRIES:
+                        delay = _BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            "LLM server error %d (attempt %d/%d): %s. Retrying in %.1fs...",
+                            e.status_code, attempt + 1, _MAX_RETRIES + 1, e, delay,
+                        )
+                        time.sleep(delay)
+                    else:
+                        logger.error("LLM server error after %d attempts: %s", _MAX_RETRIES + 1, e)
+                else:
+                    raise  # Non-retryable API errors (400, 401, 403, etc.)
+            except Exception as e:
+                # Some relays may wrap 400s in non-APIError exception types.
+                if self._adapt_deprecated_params(e, kwargs):
+                    continue
+                raise
+        raise last_error  # type: ignore[misc]
+
+    def _adapt_deprecated_params(self, error: Exception, kwargs: dict[str, Any]) -> bool:
+        """Detect deprecated parameter errors and mutate kwargs in place."""
+        text = str(error)
+        if not text:
+            return False
+        lower_text = text.lower()
+
+        matched_param = None
+        for pattern in _DEPRECATED_PARAM_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                matched_param = match.group(1)
+                break
+
+        if not matched_param:
+            for param in _COMPAT_OPTIONAL_PARAMS:
+                if param in lower_text and "deprecated" in lower_text:
+                    matched_param = param
+                    break
+
+        if not matched_param:
+            return False
+
+        param = matched_param.strip().lower()
+        if param not in _COMPAT_OPTIONAL_PARAMS:
+            return False
+        if param not in kwargs:
+            self._deprecated_params.add(param)
+            return False
+
+        kwargs.pop(param, None)
+        self._deprecated_params.add(param)
+        logger.warning(
+            "LLM [%s] relay reports `%s` deprecated; retrying without it.",
+            self.model,
+            param,
+        )
+        return True
 
     def _parse_response(self, response) -> LLMResponse:
         """Parse a non-streaming response."""
