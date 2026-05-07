@@ -301,6 +301,7 @@ class Agent:
         # Compute report_dir once per run() call for consistency
         _report_dir = self.settings.reports_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
         _report_dir.mkdir(parents=True, exist_ok=True)
+        turn_orchestrations: list[dict] = []
 
         for round_n in range(self.settings.max_tool_rounds):
             if self.state.interrupted:
@@ -346,7 +347,16 @@ class Agent:
 
             # Expose current routing status for CLI diagnostics/eval harness.
             try:
-                self.state.last_orchestration = orchestration_result.to_dict() if orchestration_result else {}
+                trace_payload = orchestration_result.to_dict() if orchestration_result else {}
+                if trace_payload:
+                    turn_orchestrations.append(trace_payload)
+                    trace_payload = dict(trace_payload)
+                    trace_payload["turn_orchestrations"] = list(turn_orchestrations)
+                    first_trace = turn_orchestrations[0].get("debate_trace", {}) if turn_orchestrations else {}
+                    last_trace = turn_orchestrations[-1].get("debate_trace", {}) if turn_orchestrations else {}
+                    trace_payload["initial_strategy"] = first_trace.get("strategy", "single")
+                    trace_payload["final_strategy"] = last_trace.get("strategy", "single")
+                self.state.last_orchestration = trace_payload
             except Exception:
                 self.state.last_orchestration = {}
 

@@ -118,6 +118,10 @@ class Benchmark:
     name: str = "base"
     cases: list[TestCase] = []
 
+    def run_case(self, case: TestCase, agent: Agent) -> TestResult | None:
+        """Optionally run a case without going through ``agent.run``."""
+        return None
+
     def score(self, result: TestResult, case: TestCase) -> float:
         """Score a test result against its case. Override in subclasses."""
         return 1.0 if result.passed else 0.0
@@ -146,7 +150,9 @@ class EvalHarness:
         results = []
 
         for case in benchmark.cases:
-            result = self._run_case(case, agent)
+            result = benchmark.run_case(case, agent)
+            if result is None:
+                result = self._run_case(case, agent)
             result.score = benchmark.score(result, case)
             results.append(result)
 

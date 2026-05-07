@@ -1,0 +1,54 @@
+# Human Phenotype Project configuration.
+# Schema-first placeholder: concrete table names can be overridden by deployment env.
+
+bank_id: hpp
+display_name: Human Phenotype Project
+description: "deeply phenotyped, longitudinal multi-visit cohort with dense physiology, CGM, sleep, microbiome, omics, wearable and behavioural measurements"
+caveats: "deep phenotyping cohort with protocol-specific ascertainment; intervention simulations are associational unless externally calibrated"
+coding_system: ICD10
+
+patient_id_column: participant_id
+diagnoses_code_column: diag_icd10
+deaths_code_column: cause_icd10
+field_column_pattern: "{field_id}"
+default_instance: 0
+default_array: 0
+
+biomarker_parquet_name: "hpp_biomarkers.parquet"
+diagnoses_parquet_name: "hpp_diagnoses.parquet"
+deaths_parquet_name: "hpp_deaths.parquet"
+catalog_fields_file: "hpp_field.txt"
+catalog_categories_file: "hpp_category.txt"
+
+feature_groups:
+  blood_biochemistry:
+    hpp_glucose: Glucose
+    hpp_hba1c: Glycated haemoglobin (HbA1c)
+    hpp_ldl: LDL cholesterol
+    hpp_hdl: HDL cholesterol
+    hpp_total_cholesterol: Total cholesterol
+    hpp_triglycerides: Triglycerides
+    hpp_creatinine: Creatinine
+    hpp_crp: C-reactive protein
+    hpp_alt: Alanine aminotransferase
+    hpp_ast: Aspartate aminotransferase
+
+  anthropometric:
+    hpp_bmi: Body mass index (BMI)
+    hpp_weight: Weight
+    hpp_waist: Waist circumference
+    hpp_hip: Hip circumference
+    hpp_body_fat: Body fat percentage
+
+  blood_pressure:
+    hpp_sbp: Systolic blood pressure
+    hpp_dbp: Diastolic blood pressure
+    hpp_pulse: Pulse rate
+
+  longitudinal_deep_phenotyping:
+    hpp_cgm_glucose: Continuous glucose monitoring
+    hpp_sleep_efficiency: Sleep efficiency
+    hpp_ahi: Apnea-hypopnea index
+    hpp_microbiome_shannon: Gut microbiome Shannon diversity
+    hpp_diet_fiber: Dietary fibre intake
+    hpp_activity_minutes: Wearable-derived activity minutes

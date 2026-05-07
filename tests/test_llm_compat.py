@@ -35,6 +35,17 @@ def _fake_response_with_none_usage(text: str = "ok"):
     return SimpleNamespace(choices=[choice], usage=usage)
 
 
+def _fake_reasoning_only_response():
+    message = SimpleNamespace(
+        content=None,
+        tool_calls=None,
+        reasoning="internal reasoning should not become visible answer",
+    )
+    choice = SimpleNamespace(message=message)
+    usage = SimpleNamespace(prompt_tokens=3, completion_tokens=128, total_tokens=131)
+    return SimpleNamespace(choices=[choice], usage=usage)
+
+
 def _fake_stream(chunks: list[str]):
     out = []
     for content in chunks:
@@ -143,3 +154,18 @@ class TestDeprecatedParamCompat:
         assert resp.usage["prompt_tokens"] == 0
         assert resp.usage["completion_tokens"] == 0
         assert resp.usage["total_tokens"] == 0
+
+    def test_reasoning_only_response_retries_without_leaking_reasoning(self):
+        fake_create = _FakeCreate([
+            _fake_reasoning_only_response(),
+            _fake_response("final"),
+        ])
+        llm = _build_client(fake_create)
+
+        resp = llm.chat(messages=[{"role": "user", "content": "short answer"}], max_tokens=32)
+
+        assert resp.text == "final"
+        assert "internal reasoning" not in resp.text
+        assert resp.diagnostics["retried_empty_reasoning_response"] is True
+        assert fake_create.calls[0]["max_tokens"] == 32
+        assert fake_create.calls[1]["max_tokens"] == 1024

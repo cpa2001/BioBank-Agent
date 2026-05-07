@@ -133,32 +133,21 @@ def gwas_proxy(
         for i, r in enumerate(results):
             r["p_corrected"] = min(r["p_value"] * len(p_values), 1.0)
             r["significant"] = r["p_value"] < threshold
-    else:  # FDR
-        from scipy.stats import false_discovery_control
-        try:
-            # scipy >= 1.11
-            rejected = false_discovery_control(p_values, axis=0)
-            for i, r in enumerate(results):
-                r["significant"] = bool(rejected[i])
-                r["p_corrected"] = r["p_value"]  # FDR doesn't produce adjusted p
-        except (ImportError, AttributeError):
-            # Fallback: Benjamini-Hochberg manual
-            sorted_idx = np.argsort(p_values)
-            n = len(p_values)
-            threshold_arr = np.arange(1, n + 1) / n * 0.05
-            sorted_p = p_values[sorted_idx]
-            rejected = sorted_p <= threshold_arr
-            # Find largest k where p[k] <= k/n * alpha
-            if rejected.any():
-                max_k = np.max(np.where(rejected))
-                for i, r in enumerate(results):
-                    rank = np.searchsorted(sorted_idx, i)
-                    r["significant"] = rank <= max_k
-                    r["p_corrected"] = r["p_value"]
-            else:
-                for r in results:
-                    r["significant"] = False
-                    r["p_corrected"] = r["p_value"]
+    else:  # FDR via Benjamini-Hochberg adjusted p-values
+        n = len(p_values)
+        order = np.argsort(p_values)
+        ranked_p = p_values[order]
+        adjusted_ranked = np.empty(n, dtype=float)
+        running_min = 1.0
+        for rank in range(n, 0, -1):
+            raw_adj = ranked_p[rank - 1] * n / rank
+            running_min = min(running_min, raw_adj)
+            adjusted_ranked[rank - 1] = min(running_min, 1.0)
+        adjusted = np.empty(n, dtype=float)
+        adjusted[order] = adjusted_ranked
+        for i, r in enumerate(results):
+            r["p_corrected"] = float(adjusted[i])
+            r["significant"] = bool(adjusted[i] <= 0.05)
 
     # Sort by significance and effect size
     results.sort(key=lambda r: (-r["significant"], r["p_value"]))

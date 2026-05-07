@@ -49,6 +49,7 @@ reports/
 plans/
 custom_skills/
 brainstorm/
+data_insights/
 
 # Serialized models
 *.pkl

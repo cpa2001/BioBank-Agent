@@ -245,3 +245,46 @@ class TestSlashAutocomplete:
         doc = Document("/plan ", cursor_position=6)
         completions = list(completer.get_completions(doc, CompleteEvent(completion_requested=True)))
         assert completions == []
+
+
+class TestEvalArgParsing:
+    """Eval CLI should accept common argparse-style flag forms."""
+
+    def test_parse_eval_args_supports_equals_form(self):
+        from biobank_agent.cli import _parse_eval_args
+
+        parsed = _parse_eval_args([
+            "--suite=skill_schemas",
+            "--mode=mas_v2",
+            "--ab",
+            "--enforce-gate",
+            "--baseline-report=reports/eval/baseline.json",
+        ])
+
+        assert parsed == (
+            "skill_schemas",
+            "mas_v2",
+            True,
+            True,
+            "reports/eval/baseline.json",
+        )
+
+    def test_parse_eval_args_supports_space_form(self):
+        from biobank_agent.cli import _parse_eval_args
+
+        parsed = _parse_eval_args([
+            "--suite",
+            "skill_schemas",
+            "--mode",
+            "baseline",
+            "--baseline-report",
+            "reports/eval/baseline.json",
+        ])
+
+        assert parsed == (
+            "skill_schemas",
+            "baseline",
+            False,
+            False,
+            "reports/eval/baseline.json",
+        )

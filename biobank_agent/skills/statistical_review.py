@@ -135,6 +135,70 @@ def statistical_review(scope: str = "session", *, ctx=None) -> dict:
                                       "before regression or check VIF.",
                 })
 
+        # Check 7: Agentic cross-cohort cohort card readiness
+        if r.skill == "cohort_card":
+            status = str(r.key_results.get("status", "")).upper()
+            n_cases = r.key_results.get("n_cases")
+            if status in {"PARTIAL", "FAIL"}:
+                issues.append({
+                    "severity": "WARNING",
+                    "type": "cohort_card_partial",
+                    "skill": r.skill,
+                    "message": "Cohort card is not fully execution-ready.",
+                    "recommendation": "Run phenotype_harmonize, cohort construction, statistical_review, and safety_check before final synthesis.",
+                })
+            if isinstance(n_cases, (int, float)) and n_cases < 100:
+                issues.append({
+                    "severity": "CRITICAL",
+                    "type": "small_cross_cohort_case_count",
+                    "skill": r.skill,
+                    "message": f"Only {int(n_cases)} cases in cohort card.",
+                    "recommendation": "Treat as exploratory or broaden phenotype definition before confirmatory analysis.",
+                })
+            for flag in r.key_results.get("bias_flags", []) or []:
+                if "target" in str(flag).lower() or "immortal" in str(flag).lower():
+                    issues.append({
+                        "severity": "INFO",
+                        "type": "design_bias_check_required",
+                        "skill": r.skill,
+                        "message": str(flag),
+                        "recommendation": "Document index date, lookback window, follow-up window, censoring and adjustment strategy.",
+                    })
+
+        # Check 8: Trajectory datasets are preparatory unless there are tokens and participants
+        if r.skill == "trajectory_tokenize":
+            n_tokens = r.key_results.get("n_tokens", 0)
+            n_participants = r.key_results.get("n_participants", 0)
+            if n_tokens == 0 or n_participants == 0:
+                issues.append({
+                    "severity": "CRITICAL",
+                    "type": "empty_trajectory_dataset",
+                    "skill": r.skill,
+                    "message": "Trajectory tokenization produced no usable participant tokens.",
+                    "recommendation": "Check required columns, timestamps, missingness and modality mappings.",
+                })
+
+        # Check 9: World-model outputs need calibration/external validation before strong claims
+        if r.skill == "world_model_audit":
+            safety = str(r.key_results.get("safety_status", "PARTIAL")).upper()
+            allowed = str(r.key_results.get("allowed_claim_type", ""))
+            if safety == "FAIL":
+                issues.append({
+                    "severity": "CRITICAL",
+                    "type": "unsupported_world_model_claim",
+                    "skill": r.skill,
+                    "message": "World-model audit blocked the requested scientific claim.",
+                    "recommendation": "Downgrade to association-conditioned forecast or provide target-trial/RCT calibration evidence.",
+                })
+            elif safety == "PARTIAL":
+                issues.append({
+                    "severity": "WARNING",
+                    "type": "partial_world_model_evidence",
+                    "skill": r.skill,
+                    "message": f"World-model output may only support `{allowed}`.",
+                    "recommendation": "Report calibration, OOD coverage and external validation status.",
+                })
+
     # Sort issues by severity: CRITICAL > WARNING > INFO
     severity_order = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
     issues.sort(key=lambda x: severity_order.get(x["severity"], 9))

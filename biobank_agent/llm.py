@@ -47,6 +47,7 @@ class LLMResponse:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: dict = field(default_factory=dict)
+    diagnostics: dict = field(default_factory=dict)
 
     @property
     def has_tool_calls(self) -> bool:
@@ -64,9 +65,21 @@ class LLMClient:
         request_timeout_s: float = 60.0,
     ) -> None:
         # Ensure base URL has /v1 suffix for OpenAI SDK
+        is_openrouter = "openrouter.ai" in base_url.lower()
         if not base_url.rstrip("/").endswith("/v1"):
             base_url = base_url.rstrip("/") + "/v1"
-        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=request_timeout_s)
+        default_headers = None
+        if is_openrouter:
+            default_headers = {
+                "HTTP-Referer": "http://localhost/biobank-agent",
+                "X-Title": "Biobank Agent",
+            }
+        self.client = OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=request_timeout_s,
+            default_headers=default_headers,
+        )
         self.model = model
         self.tool_call_content_mode = "null"  # "null" | "empty"
         self._model_cache: list[str] = []
@@ -140,6 +153,22 @@ class LLMClient:
         response = self._create_chat_completion_with_compat(kwargs)
         elapsed = time.time() - t0
         result = self._parse_response(response)
+        if self._should_retry_empty_reasoning_response(result, tools=tools):
+            retry_kwargs = dict(kwargs)
+            if "max_tokens" in retry_kwargs:
+                retry_kwargs["max_tokens"] = max(
+                    int(retry_kwargs.get("max_tokens") or 0) * 4,
+                    1024,
+                )
+            logger.info(
+                "LLM [%s] returned reasoning without final content; retrying once with more output budget.",
+                self.model,
+            )
+            response = self._create_chat_completion_with_compat(retry_kwargs)
+            retry_result = self._parse_response(response)
+            retry_result.diagnostics["retried_empty_reasoning_response"] = True
+            retry_result.diagnostics["initial_empty_reasoning_response"] = result.diagnostics
+            result = retry_result
         if result.usage:
             logger.info(
                 "LLM [%s] %d prompt + %d completion tokens (%.1fs)",
@@ -356,6 +385,18 @@ class LLMClient:
             return False
         return any(p.search(text) for p in _UNAVAILABLE_CHANNEL_PATTERNS)
 
+    @staticmethod
+    def _should_retry_empty_reasoning_response(
+        result: LLMResponse,
+        tools: Optional[list[dict]] = None,
+    ) -> bool:
+        """Retry reasoning-only responses once, without exposing reasoning text."""
+        if result.text or result.has_tool_calls:
+            return False
+        if tools:
+            return False
+        return bool(result.diagnostics.get("empty_content_with_reasoning"))
+
     def _adapt_deprecated_params(self, error: Exception, kwargs: dict[str, Any]) -> bool:
         """Detect deprecated parameter errors and mutate kwargs in place."""
         text = str(error)
@@ -399,6 +440,14 @@ class LLMClient:
         """Parse a non-streaming response."""
         msg = response.choices[0].message
         text = msg.content or ""
+        reasoning = getattr(msg, "reasoning", None)
+        diagnostics = {}
+        if reasoning:
+            diagnostics = {
+                "reasoning_present": True,
+                "reasoning_chars": len(str(reasoning)),
+                "empty_content_with_reasoning": not bool(msg.content),
+            }
 
         tool_calls = []
         if msg.tool_calls:
@@ -421,4 +470,9 @@ class LLMClient:
                 "total_tokens": self._usage_int(getattr(response.usage, "total_tokens", 0)),
             }
 
-        return LLMResponse(text=text, tool_calls=tool_calls, usage=usage)
+        return LLMResponse(
+            text=text,
+            tool_calls=tool_calls,
+            usage=usage,
+            diagnostics=diagnostics,
+        )

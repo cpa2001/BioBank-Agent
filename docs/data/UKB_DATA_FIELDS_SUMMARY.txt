@@ -1,0 +1,270 @@
+================================================================================
+UK BIOBANK DATA MODALITIES - CONCRETE FILESYSTEM INVENTORY
+================================================================================
+Date: 2026-04-23
+Verified by: Actual filesystem checks on /Users/chenpengan/Projects/CUHK/
+
+================================================================================
+1. MAIN DATA STORES
+================================================================================
+
+Location: /Users/chenpengan/Projects/CUHK/milton_data/
+
+KEY PARQUET FILES/DIRECTORIES:
+├── ukb.parquet/                    (Main dataset, 4 parts × ~125K rows each)
+│   ├── part-0.parquet              ~2,031 columns total across all parts
+│   ├── part-1.parquet
+│   ├── part-2.parquet
+│   └── part-3.parquet
+│
+├── olink.parquet/                  (Proteomics data - CURRENTLY EMPTY)
+│   └── part-0.parquet              Only contains 'eid' column (no data yet)
+│
+├── categories/                     (Curated data by topic)
+│   ├── Population_Characteristics.parquet    (30 cols, 502K rows, 10 MB)
+│   ├── Biological_Samples.parquet            (806 cols, 502K rows, 207 MB) ⭐
+│   ├── Genomics.parquet                      (194 cols, 502K rows, 371 MB) ⭐
+│   ├── Health_Related_Outcomes.parquet       (3,991 cols, 502K rows, 153 MB)
+│   ├── Additional_Exposures.parquet          (274 cols, 502K rows, 127 MB)
+│   └── Online_Follow_up.parquet              (5,452 cols, 502K rows, 609 MB)
+│
+└── Supporting files:
+    ├── field.txt                   (11,822 lines - field catalog)
+    ├── category.txt                (field category definitions)
+    ├── ehierint.txt, esimpint.txt  (encoding info)
+    ├── sample_lists/               (participant sample lists)
+    ├── death_cause.parquet/
+    ├── gp_clinical.parquet/        (GP records)
+    ├── gp_scripts.parquet/         (Prescription data)
+    ├── hesin_diag.parquet/         (Hospital diagnoses)
+    └── hesin_oper.parquet/         (Hospital operations)
+
+================================================================================
+2. OMICS DATA CURRENTLY AVAILABLE
+================================================================================
+
+A) METABOLOMICS (NMR SPECTROSCOPY) ✅ CONFIRMED IN DISK
+─────────────────────────────────────
+Location: milton_data/categories/Biological_Samples.parquet
+Platform: Nightingale Health 1H NMR spectroscopy
+Format: Column-based in parquet
+
+Field Range: 20280-23948 (1,712 fields total)
+Field ID Examples:
+  • 20280: Glucose-lactate (487,279 participants)
+  • 20281: Alanine (488,326 participants)
+  • Coverage: ~97% (487,000-488,000 participants for most metabolites)
+
+Metabolite Categories:
+  • Amino acids (alanine, glutamine, glycine, histidine, leucine, etc.)
+  • Lipoproteins (HDL, LDL, VLDL, particle sizes/concentrations)
+  • Fluid balance (lactate, pyruvate)
+  • Fatty acids (various chain lengths)
+  • Glucose and glycerol metabolism markers
+
+Data Format: Numeric measurements (likely log-transformed NPX or similar)
+
+B) PROTEOMICS (OLINK EXPLORE) ⚠️ FIELD DEFINITIONS EXIST BUT DATA NOT IN PARQUET
+─────────────────────────────────────────────────────────
+Fields Defined: 30860-30903 (33 fields in catalog)
+Location: milton_data/olink.parquet/ (CURRENTLY EMPTY - only 'eid' column)
+Platform: Olink Explore 1536 (mentioned in documentation)
+
+Available Protein Field IDs:
+  • 30860: Total protein (431,390 participants)
+  • 30870: Triglycerides (469,945 participants)  [Note: lipid, not protein]
+  • 30880: Urate (469,765 participants)         [Note: metabolite, not protein]
+  • 30890: (likely more proteins/metabolites)
+
+STATUS: ❌ Fields exist in catalog but actual protein abundance data (1,400+ 
+proteins from Olink) not found in milton_data. May be in separate location or 
+raw data directory.
+
+C) GENOMICS (EXOME SEQUENCING) ✅ FIELDS DOCUMENTED
+──────────────────────────────────
+Location: milton_data/categories/Genomics.parquet
+Field Range: 23141-23172 (28 fields, 194 columns in Genomics.parquet)
+Coverage: 200,000-469,000 participants depending on data type
+
+Field Categories:
+  • 23141-23144: OQFE CRAM/VCF files (Final release, 469K participants)
+  • 23145-23150: Population-level variants (PLINK, VCF, BGEN formats)
+    - 23145-23147: 300K interim release
+    - 23148-23150: 450K interim release
+  • 23151-23156: 200K interim release variants
+  • 23157-23159: Final exome release (PLINK, VCF, BGEN - 469K)
+  • 23160-23164: Initial 50K release (FE protocol - 49K participants)
+  • 23165: Blood-type haplotype (487K participants)
+  
+⚠️ NOTE: These appear to be FILE REFERENCES, not actual genotype arrays.
+         Actual VCF/CRAM/PLINK files likely stored elsewhere (not in parquet).
+
+D) NEUROBIOMARKERS (PLASMA BIOMARKERS) ✅ DOCUMENTED
+──────────────────────────────────
+Category 163: Neurobiomarkers
+Field IDs: 31040-31049 (10 fields)
+Participants: 1,273
+
+Biomarkers:
+  • 31040: Plasma Amyloid beta-40
+  • 31041: Plasma Amyloid beta-42
+  • 31042: Plasma GFAP (glial fibrillary acidic protein)
+  • 31043: Plasma NeuroFilament Light
+  • 31044: Plasma pTau-181
+  • 31045-31049: Sample metadata (batch, plate, well, sample state)
+
+Status: Limited sample size from COVID-19 re-imaging study participants
+
+================================================================================
+3. IMAGING DATA CONFIRMED IN FIELD CATALOG
+================================================================================
+
+Note: Imaging files are typically raw images (NIFTI, DICOM) not in parquet.
+      Field IDs reference these data but point to external file storage.
+
+A) BRAIN MRI
+─────────────
+Category 100: General brain MRI info (17 fields)
+Categories 106-112, 119: Specific brain MRI types
+
+Sub-types & Field Counts:
+  • 106: Task functional brain MRI (fMRI) - 26 fields
+  • 107: Diffusion brain MRI (dMRI) - 16 fields
+  • 109: Susceptibility weighted brain MRI - 36 fields
+  • 110: T1 structural brain MRI - 20 fields ⭐ (82,234 avg participants)
+  • 111: Resting functional brain MRI - 45 fields ⭐ (82,105 avg participants)
+  • 112: T2-weighted brain MRI - 5 fields
+  • 119: Arterial spin labelling brain MRI - 51 fields
+  
+Total Brain MRI Fields: ~215 fields across categories
+
+B) CARDIAC IMAGING
+────────────────
+  • 102: Heart MRI - 10 fields (~79,940 participants)
+  • 157: Cardiac and aortic function #1 - 83 fields
+  • 162: Cardiac and aortic function #2 - 72 fields
+  • 128: Pulse wave analysis - 23 fields
+
+C) ABDOMINAL IMAGING
+──────────────────
+  • 105: Abdominal MRI - 5 fields (~79,524 participants)
+  • 126: Liver MRI - 11 fields
+  • 131: Pancreas MRI - 4 fields
+  • 149: Abdominal composition (AMRA) - 32 fields
+  • 156: Kidney MRI - 4 fields
+  • 158: Abdominal organ composition (Calico) - 19 fields
+  • 159: Kidney derived measures - 5 fields
+
+D) BONE DENSITY (DXA)
+─────────────────────
+  • 103: DXA assessment - 6 fields (~66,856 participants)
+  • 124: Body composition by DXA - 72 fields
+  • 125: Bone size, mineral and density by DXA - 120 fields
+
+E) CARDIAC FUNCTION (ECG)
+─────────────────────────
+  • 104: ECG at rest, 12-lead - 18 fields (~95,000-101,000 participants)
+    - Field 12323: ECG measuring method
+    - Field 12336: Ventricular rate (95,178 participants)
+    - Field 12338: P duration
+    - Field 12340: QRS duration
+    - Field 12653: ECG automated diagnoses
+    - Field 20205: ECG datasets
+
+F) DIFFUSION MRI DERIVED
+───────────────────────
+  • 134: dMRI skeleton - 432 fields
+  • 135: dMRI weighted means - 243 fields
+
+G) OTHER IMAGING
+────────────────
+  • 198: Surface-based analysis of resting and task fMRI - 23 fields
+  • 200-204: Native and MNI atlases and brain parcellations
+
+================================================================================
+4. ACTIVITY/ACCELEROMETER DATA
+================================================================================
+
+Location: Scattered across main ukb.parquet fields
+Format: Self-reported questionnaire + accelerometer (wrist-worn device)
+
+Field Examples:
+  • 884: Days/week moderate physical activity (501,099 participants)
+  • 894: Duration of moderate activity (423,529 participants)
+  • 904: Days/week vigorous physical activity (501,099 participants)
+  • 914: Duration of vigorous activity (312,663 participants)
+  • 90002-90100: Likely accelerometer time series (need verification)
+
+Status: ✅ Self-reported activity in main dataset, accelerometer data 
+        availability needs verification in raw files.
+
+================================================================================
+5. OTHER BIOMARKERS IN BIOLOGICAL_SAMPLES PARQUET
+================================================================================
+
+The Biological_Samples.parquet (806 columns) contains:
+  • Blood counts (RBC, WBC, hemoglobin, etc.)
+  • Biochemistry (albumin, creatinine, glucose, bilirubin, etc.)
+  • Lipids (cholesterol, triglycerides, HDL, LDL)
+  • Immunoglobulins and proteins
+  • Vitamins and mineral levels
+
+⭐ This is the primary repository for bloodwork data
+
+================================================================================
+6. FILES NOT YET FOUND / VERIFICATION NEEDED
+================================================================================
+
+❓ Full Olink proteomics data (1,400+ proteins)
+   - Fields 30860-30903 defined but data not in olink.parquet
+   - May be stored separately or in raw UKB directory
+
+❓ Full genotype data (PLINK/VCF/BGEN files)
+   - Fields 23141-23172 reference these but actual files likely in 
+     /Users/chenpengan/Projects/CUHK/UKB/genotypes/ or similar
+
+❓ Raw imaging files (NIFTI, DICOM)
+   - Field IDs exist but actual images in separate file system
+   - Check /Users/chenpengan/Projects/CUHK/UKB/ directory
+
+❓ Accelerometer time series data
+   - Check for .csv or .parquet files in activity data
+
+❓ Retinal imaging data
+   - Not found in current inventory but mentioned in categories
+
+================================================================================
+7. FIELD ID MAPPING REFERENCE
+================================================================================
+
+METABOLOMICS:       20280-23948 (1,712 fields)
+EXOME/GENOMICS:     23141-23172 (28 fields) + Genomics.parquet (194 cols)
+BLOOD BIOMARKERS:   Various in 20000-31000 range
+NEUROBIOMARKERS:    31040-31049 (10 fields)
+PROTEOMICS/OLINK:   30860-30903 (33 fields, but data empty)
+BRAIN MRI:          Multiple categories (100, 106-112, 119)
+CARDIAC MRI:        Categories 102, 157, 162
+BONE DENSITY (DXA): Categories 103, 124, 125
+ECG:                Category 104
+IMAGING GENERAL:    Categories 100-200 (various)
+dMRI DERIVED:       Categories 134-135
+ACTIVITY:           Field 884, 894, 904, 914, etc.
+
+================================================================================
+8. KEY STATISTICS
+================================================================================
+
+Total Participants: ~502,000-503,000
+Total Unique Fields in Catalog: 11,822
+Total Columns in Processed Parquets: ~10,000+ (across all files)
+
+Data Coverage by Modality:
+  ✅ Metabolomics (NMR):    97% (~487K/502K)
+  ✅ Genomics:              93% (~469K/502K exome, other genotypes vary)
+  ✅ Brain MRI:             16-17% (~82K/502K)
+  ✅ Blood biomarkers:      85-95% (varies by test)
+  ⚠️ Proteomics (Olink):    Data structure empty (need raw files)
+  ? Activity/Accelerometer: 85%+ (need full verification)
+  ? Retinal imaging:        Not found yet
+  
+================================================================================

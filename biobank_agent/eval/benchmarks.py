@@ -16,7 +16,14 @@ class SkillSchemaBenchmark(Benchmark):
     name = "skill_schemas"
 
     def __init__(self) -> None:
-        from ..registry import get_registry
+        from ..registry import autodiscover_skills, discover_custom_skills, get_registry
+        try:
+            from ..config import get_settings
+            settings = get_settings()
+            autodiscover_skills()
+            discover_custom_skills(settings.custom_skills_dir)
+        except Exception:
+            autodiscover_skills()
         reg = get_registry()
         self.cases = []
         for skill_info in reg.list_skills():
@@ -26,6 +33,15 @@ class SkillSchemaBenchmark(Benchmark):
                 tags=["schema"],
             ))
         self._registry = reg
+
+    def run_case(self, case: TestCase, agent) -> TestResult:
+        """Inspect registry schemas directly without calling the LLM agent."""
+        return TestResult(
+            case_id=case.id,
+            passed=True,
+            actual_text="schema inspection only",
+            metadata={"tags": case.tags, "direct_schema_check": True},
+        )
 
     def score(self, result: TestResult, case: TestCase) -> float:
         """Check schema validity — not through agent.run(), just schema inspection."""

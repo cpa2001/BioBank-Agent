@@ -7,6 +7,28 @@ from unittest.mock import MagicMock
 class TestModelDiscovery:
     """Model list fetching should be cached and resilient."""
 
+    def test_openrouter_client_adds_default_headers(self, monkeypatch):
+        import biobank_agent.llm as llm_mod
+        from biobank_agent.llm import LLMClient
+
+        captured = {}
+
+        def fake_openai(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace()
+
+        monkeypatch.setattr(llm_mod, "OpenAI", fake_openai)
+
+        LLMClient(
+            base_url="https://openrouter.ai/api/v1",
+            api_key="test",
+            model="deepseek/deepseek-chat",
+        )
+
+        assert captured["base_url"] == "https://openrouter.ai/api/v1"
+        assert captured["default_headers"]["HTTP-Referer"] == "http://localhost/biobank-agent"
+        assert captured["default_headers"]["X-Title"] == "Biobank Agent"
+
     def test_list_models_uses_cache(self):
         from biobank_agent.llm import LLMClient
 

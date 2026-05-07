@@ -22,9 +22,9 @@ class Settings(BaseSettings):
     )
 
     # ── LLM ──────────────────────────────────────────────────────
-    llm_base_url: str = "http://api.shubiaobiao.cn"
+    llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: str = ""
-    llm_model: str = "claude-opus-4-7"
+    llm_model: str = "deepseek/deepseek-v4-pro"
 
     # ── Data Paths ───────────────────────────────────────────────
     # Accept both new (DATA_DIR/RAW_DIR) and legacy (UKB_PARQUET_DIR/UKB_RAW_DIR) env var names
@@ -92,9 +92,9 @@ class Settings(BaseSettings):
 
     # ── Multi-Model Orchestration ────────────────────────────────
     multi_model_enabled: bool = True
-    model_pool: str = ""       # comma-separated model IDs, e.g. "claude-opus-4-7,gpt-4o"
+    model_pool: str = ""       # comma-separated model IDs, e.g. "model-a,model-b"
     auto_discover_models: bool = True
-    preferred_multi_models: str = "gpt-5.4-pro,gemini-3.1-pro-preview"
+    preferred_multi_models: str = "deepseek/deepseek-v4-pro,moonshotai/kimi-k2.6,z-ai/glm-5.1"
     max_auto_model_pool: int = 3
     debate_rounds: int = 2
     complexity_threshold: float = 0.7   # score above this triggers multi-model

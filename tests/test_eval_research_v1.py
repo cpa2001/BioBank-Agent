@@ -1,6 +1,8 @@
 """Tests for research_eval_v1 benchmark and observability metrics."""
 
-from biobank_agent.eval.benchmarks import ResearchEvalV1
+from unittest.mock import MagicMock
+
+from biobank_agent.eval.benchmarks import ResearchEvalV1, SkillSchemaBenchmark
 from biobank_agent.eval.harness import EvalHarness, TestResult as HarnessCaseResult
 
 
@@ -68,3 +70,18 @@ def test_reliability_gate_with_baseline_comparison():
     ok, failures = harness._check_reliability_gate(obs, baseline_observability=baseline)
     assert ok is True
     assert failures == []
+
+
+def test_skill_schema_benchmark_does_not_call_agent_run():
+    harness = EvalHarness()
+    suite = SkillSchemaBenchmark()
+    suite.cases = suite.cases[:3]
+    agent = MagicMock()
+    agent.run.side_effect = AssertionError("schema benchmark must not call LLM")
+
+    result = harness.run(suite, agent, mode="baseline")
+
+    assert result.n_total == 3
+    assert result.n_passed == 3
+    agent.run.assert_not_called()
+    assert all(r.metadata.get("direct_schema_check") for r in result.results)

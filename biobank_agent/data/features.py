@@ -117,6 +117,13 @@ ALL_BIOMARKERS = {
     **BLOOD_PRESSURE,
 }
 
+BIOMARKER_GROUPS = {
+    "blood_biochemistry": BLOOD_BIOCHEMISTRY,
+    "blood_count": BLOOD_COUNT,
+    "anthropometric": ANTHROPOMETRIC,
+    "blood_pressure": BLOOD_PRESSURE,
+}
+
 # All features including demographics and lifestyle
 ALL_FEATURES = {
     **ALL_BIOMARKERS,

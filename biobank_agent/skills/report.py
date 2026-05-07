@@ -235,6 +235,39 @@ def _interpret_skill(rec) -> str:
             pct = results.get("mean_missing_pct", results.get("overall_missing", "?"))
             return f"Missing data analysis: mean missingness = {pct}%. See pattern matrix."
 
+        elif skill_name == "phenotype_harmonize":
+            label = results.get("label", args.get("concept", "phenotype"))
+            status = results.get("harmonisation_status", "PARTIAL")
+            n_maps = len(results.get("mappings", []) or [])
+            risks = ", ".join((results.get("drift_risks", []) or [])[:3])
+            return (
+                f"Phenotype harmonisation for {label}: {n_maps} cohort-specific mappings "
+                f"generated with status {status}. Key drift risks: {risks or 'not reported'}."
+            )
+
+        elif skill_name == "cohort_card":
+            endpoint = results.get("endpoint", args.get("endpoint", "?"))
+            ctype = results.get("cohort_type", "?")
+            status = results.get("status", "PARTIAL")
+            return (
+                f"Cohort card for {endpoint}: selected {ctype} design with status {status}. "
+                "This records index date, lookback/follow-up windows, missingness and bias flags."
+            )
+
+        elif skill_name == "trajectory_tokenize":
+            return (
+                f"Trajectory tokenization prepared {results.get('n_tokens', 0)} tokens across "
+                f"{results.get('n_participants', 0)} participants and {len(results.get('modalities', []) or [])} modalities. "
+                "This is a HealthFormer-style evaluation layer, not a trained world model."
+            )
+
+        elif skill_name == "world_model_audit":
+            return (
+                f"World-model audit returned safety={results.get('safety_status', 'PARTIAL')} "
+                f"and allowed claim type `{results.get('allowed_claim_type', 'association_conditioned_forecast')}`. "
+                "Intervention simulations must not be interpreted as causal without external or target-trial evidence."
+            )
+
     except Exception:
         pass
 
@@ -289,6 +322,29 @@ def _extract_key_findings(records) -> list[str]:
             if p is not None:
                 p = _format_value(p)
                 findings.append(f"Survival analysis: log-rank P={float(p):.2e}")
+
+        elif rec.skill == "phenotype_harmonize":
+            label = results.get("label")
+            status = results.get("harmonisation_status")
+            if label:
+                findings.append(f"Phenotype harmonisation: {label} ({status})")
+
+        elif rec.skill == "cohort_card":
+            endpoint = results.get("endpoint")
+            ctype = results.get("cohort_type")
+            if endpoint and ctype:
+                findings.append(f"Cohort design: {endpoint} mapped to {ctype}")
+
+        elif rec.skill == "trajectory_tokenize":
+            n_tokens = results.get("n_tokens")
+            if n_tokens:
+                findings.append(f"Trajectory layer: {n_tokens:,} HealthFormer-style tokens prepared")
+
+        elif rec.skill == "world_model_audit":
+            safety = results.get("safety_status")
+            allowed = results.get("allowed_claim_type")
+            if safety:
+                findings.append(f"World-model audit: {safety}, claims limited to {allowed}")
 
     return findings[:5] if findings else ["Analysis completed -- see details below"]
 

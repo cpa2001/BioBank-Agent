@@ -316,6 +316,42 @@ def rebuild_parquet_cmd() -> None:
             )
 
 
+def _parse_eval_args(args: list[str]) -> tuple[str, str, bool, bool, str]:
+    """Parse eval args in both --flag=value and --flag value forms."""
+    suite = "research_eval_v1"
+    mode = "baseline"
+    enforce_gate = False
+    ab_compare = False
+    baseline_report = ""
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        next_value = args[i + 1].strip() if i + 1 < len(args) else ""
+        if arg.startswith("--suite="):
+            suite = arg.split("=", 1)[1].strip().lower()
+        elif arg == "--suite" and next_value:
+            suite = next_value.lower()
+            i += 1
+        elif arg.startswith("--mode="):
+            mode = arg.split("=", 1)[1].strip().lower()
+        elif arg == "--mode" and next_value:
+            mode = next_value.lower()
+            i += 1
+        elif arg.startswith("--baseline-report="):
+            baseline_report = arg.split("=", 1)[1].strip()
+        elif arg == "--baseline-report" and next_value:
+            baseline_report = next_value
+            i += 1
+        elif arg == "--ab":
+            ab_compare = True
+        elif arg == "--enforce-gate":
+            enforce_gate = True
+        i += 1
+
+    return suite, mode, enforce_gate, ab_compare, baseline_report
+
+
 def eval_cmd() -> None:
     """Subcommand: run benchmark suites with reliability observability metrics.
 
@@ -330,22 +366,7 @@ def eval_cmd() -> None:
     )
     from .eval.harness import EvalHarness
 
-    suite = "research_eval_v1"
-    mode = "baseline"
-    enforce_gate = False
-    ab_compare = False
-    baseline_report = ""
-    for arg in sys.argv[2:]:
-        if arg.startswith("--suite="):
-            suite = arg.split("=", 1)[1].strip().lower()
-        elif arg.startswith("--mode="):
-            mode = arg.split("=", 1)[1].strip().lower()
-        elif arg.startswith("--baseline-report="):
-            baseline_report = arg.split("=", 1)[1].strip()
-        elif arg == "--ab":
-            ab_compare = True
-        elif arg == "--enforce-gate":
-            enforce_gate = True
+    suite, mode, enforce_gate, ab_compare, baseline_report = _parse_eval_args(sys.argv[2:])
 
     settings = get_settings()
     settings.ensure_dirs()
@@ -397,6 +418,24 @@ def eval_cmd() -> None:
 
     with console.status("[bold green]Loading agent for evaluation..."):
         agent = Agent(settings)
+    model_pool_ids = [spec.model_id for spec in getattr(agent.orchestrator, "model_pool", [])]
+    available_models = list(getattr(agent, "available_models", []) or [])
+    missing_pool_models = [
+        {
+            "model": model_id,
+            "reason": "not_returned_by_relay_models_endpoint",
+        }
+        for model_id in model_pool_ids
+        if available_models and model_id not in set(available_models)
+    ]
+    if not available_models:
+        missing_pool_models = [
+            {
+                "model": model_id,
+                "reason": "model_list_unavailable_or_not_configured",
+            }
+            for model_id in model_pool_ids
+        ]
 
     with console.status(f"[bold green]Running {suite} ({mode}) ..."):
         result = harness.run(
@@ -420,6 +459,17 @@ def eval_cmd() -> None:
     table.add_row("token_cost(tokens)", f"{obs.get('token_cost', 0.0):,.0f}")
     table.add_row("p95_latency_s", f"{obs.get('p95_latency_s', 0.0):.2f}")
     console.print(table)
+    model_table = Table(title="Model Diagnostics")
+    model_table.add_column("Field", style="cyan")
+    model_table.add_column("Value", style="green")
+    model_table.add_row("default_model", agent.settings.llm_model)
+    model_table.add_row("model_pool", ", ".join(model_pool_ids))
+    model_table.add_row("relay_model_count", str(len(available_models)))
+    model_table.add_row(
+        "pool_model_failures",
+        json.dumps(missing_pool_models, ensure_ascii=False) if missing_pool_models else "[]",
+    )
+    console.print(model_table)
     if result.comparative:
         cmp = result.comparative
         cmp_table = Table(title="A/B Delta vs Baseline")
@@ -450,6 +500,13 @@ def eval_cmd() -> None:
         "n_total": result.n_total,
         "n_passed": result.n_passed,
         "timestamp": result.timestamp,
+        "model_diagnostics": {
+            "base_url": settings.llm_base_url,
+            "default_model": agent.settings.llm_model,
+            "model_pool": model_pool_ids,
+            "available_model_count": len(available_models),
+            "pool_model_failures": missing_pool_models,
+        },
     }
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
     console.print(f"[green]Saved report:[/] {out_path}")
@@ -812,11 +869,19 @@ def _show_routing_status(agent: Agent) -> None:
     safety_status = trace.get("safety_status", "PASS") if isinstance(trace, dict) else "PASS"
     strategy = debate_trace.get("strategy", "single") if isinstance(debate_trace, dict) else "single"
     disagreement = bool(debate_trace.get("disagreement", False)) if isinstance(debate_trace, dict) else False
+    initial_strategy = trace.get("initial_strategy") if isinstance(trace, dict) else None
+    final_strategy = trace.get("final_strategy") if isinstance(trace, dict) else None
+    turn_orchestrations = trace.get("turn_orchestrations", []) if isinstance(trace, dict) else []
 
     table = Table(title="Routing Status")
     table.add_column("Field", style="cyan")
     table.add_column("Value", style="white")
     table.add_row("strategy", str(strategy))
+    if initial_strategy or final_strategy:
+        table.add_row("initial_strategy", str(initial_strategy or strategy))
+        table.add_row("final_strategy", str(final_strategy or strategy))
+    if turn_orchestrations:
+        table.add_row("turn_rounds", str(len(turn_orchestrations)))
     table.add_row("safety_status", str(safety_status))
     table.add_row("claims", str(len(claims)))
     table.add_row("evidence_links", str(len(evidence_links)))
