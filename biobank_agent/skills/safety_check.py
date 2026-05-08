@@ -149,6 +149,57 @@ def safety_check(scope: str = "last", k: int = 5, *, ctx=None) -> dict:
                     "recommendation": "Do not release as a final scientific conclusion without execution-grounded validation.",
                 })
 
+        # ── Genetic target hypothesis release review ──────
+        if r.skill == "genetic_target_hypothesis":
+            if r.key_results.get("source_data_type") == "rare_variant_burden_summary_statistics":
+                issues.append({
+                    "severity": "INFO",
+                    "type": "summary_statistic_release_review",
+                    "skill": r.skill,
+                    "message": (
+                        "Genetic target hypotheses are derived from aggregate burden summary statistics "
+                        "and must not be framed as treatment recommendations."
+                    ),
+                    "recommendation": (
+                        "Confirm redistribution terms for supplied summary statistics, avoid individual-level "
+                        "variant disclosure, and label outputs as therapeutic hypotheses requiring validation."
+                    ),
+                })
+
+        # ── External target annotation release review ─────
+        if r.skill == "target_annotation_context":
+            issues.append({
+                "severity": "INFO",
+                "type": "external_annotation_license_review",
+                "skill": r.skill,
+                "message": (
+                    "Target annotations come from external aggregate databases and should be "
+                    "reported with source provenance and redistribution terms."
+                ),
+                "recommendation": (
+                    "Archive source names, query dates and cache files; avoid presenting "
+                    "trial or tractability context as treatment recommendations."
+                ),
+            })
+            if any(t.get("cell_type_context") for t in r.key_results.get("targets", []) or []):
+                issues.append({
+                    "severity": "INFO",
+                    "type": "single_cell_context_release_review",
+                    "skill": r.skill,
+                    "message": "CELLxGENE context is aggregate reference expression and not participant-level evidence.",
+                    "recommendation": "Keep single-cell context separate from individual-level biobank inference.",
+                })
+
+        # ── Enrichment release review ─────────────────────
+        if r.skill == "target_enrichment":
+            issues.append({
+                "severity": "INFO",
+                "type": "enrichment_context_release_review",
+                "skill": r.skill,
+                "message": "Gene-set enrichment is aggregate pathway context and does not establish biological mechanism.",
+                "recommendation": "Report the GMT source, universe, overlap genes and FDR method with any released table.",
+            })
+
     # ── Sort by severity ──────────────────────────────────
     severity_order = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
     issues.sort(key=lambda x: severity_order.get(x["severity"], 9))

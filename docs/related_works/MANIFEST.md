@@ -7,6 +7,7 @@ Maps each concept integrated into the Biobank Agent to its source paper/repo.
 | File | Paper | Integrated In | Status |
 |------|-------|---------------|--------|
 | `2026.04.11.717929v1.full.pdf` | GraphPop: Graph-Native Population Genomics | `biobank_agent/mcp/graphpop_client.py` | Integrated |
+| `TARGET_ANNOTATION_ENRICHMENT.md` | Official target annotation and enrichment APIs | `biobank_agent/data/target_context.py` | Integrated |
 
 ## External References (Not Downloaded — Available Online)
 
@@ -19,6 +20,8 @@ Maps each concept integrated into the Biobank Agent to its source paper/repo.
 | PaperQA2 | github.com/Future-House/paper-qa | Language Agents Achieve Superhuman Synthesis | `biobank_agent/skills/literature_qa.py` |
 | Instructor | github.com/jxnl/instructor | Structured Output Enforcement | `biobank_agent/structured.py` |
 | StudySpec Pattern | "El Agente Gráfico" + "Talk Freely, Execute Strictly" | Schema-Gated Execution | `biobank_agent/study_spec.py` |
+| Rare-Variant Burden Target Prioritization | GeneBass-like burden summary statistics | Genetics-First Target Prioritization | `biobank_agent/data/genetic_targets.py`, `biobank_agent/skills/genetic_target_hypothesis.py` |
+| External Target Annotation APIs | Open Targets, UniProt, GTEx, ClinicalTrials.gov, CELLxGENE, GSEApy | Biobank Target Interpretation Context | `biobank_agent/data/target_context.py`, `biobank_agent/skills/target_annotation_context.py`, `biobank_agent/skills/target_enrichment.py` |
 | Evidence Lattice | Internal architecture synthesis | Claim-Evidence Provenance | `biobank_agent/evidence.py` |
 | Verifier Mesh | Internal architecture synthesis | Multi-Strategy Verification | `biobank_agent/verifier_mesh.py` |
 | Progressive Disclosure | Internal architecture synthesis | 3-Layer Context Architecture | `biobank_agent/disclosure.py` |

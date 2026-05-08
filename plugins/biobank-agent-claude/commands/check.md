@@ -23,6 +23,10 @@ Review dimensions:
 - agent-callable skill integration,
 - statistical validity and impossible metric/cohort checks,
 - privacy and small-count safeguards,
+- rare-variant burden target-prioritization caveats when
+  `genetic_target_hypothesis` appears,
+- annotation/enrichment context caveats when `target_annotation_context` or
+  `target_enrichment` appears,
 - report structure, scientific style, caveats, and reproducibility,
 - curated Markdown and plugin docs remain visible through `project_doc`,
 - failure behavior when external CLIs or optional dependencies are absent.

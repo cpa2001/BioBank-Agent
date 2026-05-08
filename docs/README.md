@@ -12,6 +12,8 @@
 | [guides/PLUGIN_INTEGRATION.md](guides/PLUGIN_INTEGRATION.md) | External agent and plugin integration |
 | [design/TECH_WHITEPAPER.md](design/TECH_WHITEPAPER.md) | Technical whitepaper — design philosophy and roadmap (Chinese) |
 | [data/UKB_DATA_REFERENCE.md](data/UKB_DATA_REFERENCE.md) | UK Biobank data modalities — coverage, field IDs, file layout |
+| [related_works/GENETIC_TARGET_PRIORITIZATION.md](related_works/GENETIC_TARGET_PRIORITIZATION.md) | Rare-variant burden target-prioritization workflow mapping |
+| [related_works/TARGET_ANNOTATION_ENRICHMENT.md](related_works/TARGET_ANNOTATION_ENRICHMENT.md) | Target annotation and enrichment context boundaries |
 
 ## Directory Structure
 
@@ -30,7 +32,9 @@ docs/
 ├── data/               UK Biobank data documentation
 │   └── UKB_DATA_REFERENCE.md  All modalities in one file
 └── related_works/      Paper traceability
-    └── MANIFEST.md     Concept → paper → integration mapping
+    ├── MANIFEST.md     Concept → paper → integration mapping
+    ├── GENETIC_TARGET_PRIORITIZATION.md
+    └── TARGET_ANNOTATION_ENRICHMENT.md
 ```
 
 ## Agent-Visible Docs

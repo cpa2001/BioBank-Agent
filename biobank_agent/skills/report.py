@@ -268,6 +268,66 @@ def _interpret_skill(rec) -> str:
                 "Intervention simulations must not be interpreted as causal without external or target-trial evidence."
             )
 
+        elif skill_name == "genetic_target_hypothesis":
+            phenotype = results.get("phenotype", args.get("phenotype", "phenotype"))
+            n_genes = results.get("n_discovery_genes", 0)
+            targets = results.get("targets", []) or []
+            top = targets[0] if isinstance(targets, list) and targets else {}
+            status = results.get("status", "UNKNOWN")
+            scope = results.get("multiple_testing_scope", "unknown")
+            tier_note = results.get("tier_interpretation", "")
+            if top:
+                return (
+                    f"Genetic target hypothesis prioritization for {phenotype} found "
+                    f"{n_genes} discovery gene(s). Top target: {top.get('gene')} "
+                    f"({top.get('therapeutic_direction')}, score={top.get('score')}, "
+                    f"{top.get('tier')}). Multiple-testing scope is `{scope}`. "
+                    "Ranking is driven by rare-variant burden evidence; annotations "
+                    f"are translational context. {tier_note}"
+                )
+            return (
+                f"Genetic target hypothesis prioritization for {phenotype} returned "
+                f"status={status} and found no candidate genes suitable for ranking. "
+                f"Multiple-testing scope is `{scope}`."
+            )
+
+        elif skill_name == "target_annotation_context":
+            phenotype = results.get("phenotype", args.get("phenotype", "target set")) or "target set"
+            targets = results.get("targets", []) or []
+            status = results.get("status", "UNKNOWN")
+            source_counts = results.get("source_status_counts", {}) or {}
+            source_text = ", ".join(
+                f"{source}:{sum(counts.values())}" for source, counts in sorted(source_counts.items())
+                if isinstance(counts, dict)
+            )
+            top = targets[0] if isinstance(targets, list) and targets else {}
+            if top:
+                trials = len(top.get("clinical_trials") or [])
+                tissues = ", ".join(t.get("tissue", "") for t in (top.get("tissue_expression") or [])[:3])
+                return (
+                    f"Target annotation context for {phenotype} returned status={status} across "
+                    f"{len(targets)} target(s). Top annotated gene: {top.get('gene')} "
+                    f"({top.get('protein_name') or top.get('approved_name') or 'protein context pending'}). "
+                    f"Trial records: {trials}; top tissues: {tissues or 'not available'}. "
+                    f"Source coverage: {source_text or 'not reported'}. These annotations are context only."
+                )
+            return f"Target annotation context for {phenotype} returned status={status} with no target annotations."
+
+        elif skill_name == "target_enrichment":
+            phenotype = results.get("phenotype", args.get("phenotype", "target set")) or "target set"
+            terms = results.get("terms", []) or []
+            status = results.get("status", "UNKNOWN")
+            method = results.get("method", "unknown")
+            if terms:
+                top = terms[0]
+                return (
+                    f"Target enrichment for {phenotype} used {method} and returned "
+                    f"{len(terms)} term(s). Top term: {top.get('term')} "
+                    f"(q={float(top.get('q_value', 1.0)):.3g}, overlap={top.get('overlap')}). "
+                    "Enrichment is exploratory pathway context and does not establish mechanism."
+                )
+            return f"Target enrichment for {phenotype} returned status={status} with no enriched terms."
+
     except Exception:
         pass
 
@@ -345,6 +405,32 @@ def _extract_key_findings(records) -> list[str]:
             allowed = results.get("allowed_claim_type")
             if safety:
                 findings.append(f"World-model audit: {safety}, claims limited to {allowed}")
+
+        elif rec.skill == "genetic_target_hypothesis":
+            targets = results.get("targets", []) or []
+            top = targets[0] if isinstance(targets, list) and targets else {}
+            if top:
+                findings.append(
+                    f"Genetic target hypothesis: {top.get('gene')} ranked first "
+                    f"for {results.get('phenotype')} ({top.get('therapeutic_direction')})"
+                )
+
+        elif rec.skill == "target_annotation_context":
+            targets = results.get("targets", []) or []
+            annotated = [t for t in targets if t.get("source_status")]
+            if annotated:
+                findings.append(
+                    f"Target annotation context: {len(annotated)} target(s) annotated "
+                    f"for {results.get('phenotype') or 'target set'}"
+                )
+
+        elif rec.skill == "target_enrichment":
+            terms = results.get("terms", []) or []
+            if terms:
+                findings.append(
+                    f"Target enrichment: {terms[0].get('term')} ranked first "
+                    f"for {results.get('phenotype') or 'target set'}"
+                )
 
     return findings[:5] if findings else ["Analysis completed -- see details below"]
 
@@ -574,8 +660,13 @@ def _build_report_sections(title: str, ctx) -> list[str]:
             sections.append(f"{interp}\n\n")
 
         if rec.key_results and "error" not in rec.key_results:
+            exclude_keys = {"figure", "figures", "_retried_with"}
+            if rec.skill == "target_annotation_context":
+                exclude_keys.update({"targets", "sources", "warnings", "caveats", "source_results"})
+            elif rec.skill == "target_enrichment":
+                exclude_keys.update({"terms", "sources", "warnings", "caveats"})
             metrics = {k: _format_value(v) for k, v in rec.key_results.items()
-                       if k not in ("figure", "figures", "_retried_with")}
+                       if k not in exclude_keys}
             if metrics:
                 sections.append("| Metric | Value |\n|--------|-------|\n")
                 for k, v in metrics.items():

@@ -273,7 +273,7 @@ biobank_agent/
 ├── config.py              # ← custom_skills_dir defined here (line 87)
 ├── registry.py            # ← @skill decorator & discovery functions
 ├── agent.py               # ← Calls autodiscover_skills() & discover_custom_skills()
-├── skills/                # ← Built-in skills (55 registered tools)
+├── skills/                # ← Built-in skills (58 registered tools)
 │   ├── __init__.py
 │   ├── prevalence.py
 │   ├── think.py

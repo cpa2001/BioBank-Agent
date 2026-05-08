@@ -13,6 +13,10 @@ Check code and generated artifacts for:
 - missing prevalence/cohort checks before modelling,
 - impossible cohort or metric values,
 - missing confidence intervals or uncertainty,
+- genetic target hypotheses that let annotation richness outrank direct
+  rare-variant evidence,
+- target annotation or enrichment outputs presented as causal, therapeutic, or
+  ranking evidence rather than biobank interpretation context,
 - small-count/privacy risks,
 - report prose that would not satisfy a strong human biobank researcher,
 - missing tests for unavailable optional dependencies or external CLI failure.

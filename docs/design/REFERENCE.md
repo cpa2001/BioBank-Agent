@@ -95,7 +95,7 @@ DEBATE_ROUNDS=2
 
 ---
 
-## 7. Skills Inventory (55 registered)
+## 7. Skills Inventory (58 registered)
 
 ### Cohort, Data, and Descriptive Analysis
 field_search, prevalence, cohort_summary, cohort_card, phenotype_harmonize,
@@ -104,7 +104,8 @@ comorbidity, phewas
 
 ### Modelling and Discovery
 train_model, evaluate_model, feature_importance, calibration, predict,
-survival, gwas_proxy, discover, embedding, smart_plot
+survival, gwas_proxy, genetic_target_hypothesis, target_annotation_context,
+target_enrichment, discover, embedding, smart_plot
 
 ### Literature, Documentation, and Writing
 web_search, web_fetch, read_pdf, read_paper, fetch_paper, deep_research,
@@ -143,7 +144,7 @@ claude_check_execution, git_clean_push
 
 | Principle | Implementation |
 |-----------|---------------|
-| Skill-first | `@skill` decorator, hot-reloadable, 55 composable units |
+| Skill-first | `@skill` decorator, hot-reloadable, 58 composable units |
 | Memory-driven | 8-tier persistent system, cross-session learning |
 | Verified outputs | Reflexion → Verdict → Guardrails → VerifierMesh |
 | Schema-gated | `StudySpec` typed boundary before execution |

@@ -213,7 +213,7 @@ def _render_startup_dashboard(
         model_pool_preview += f" (+{len(model_pool) - 3})"
 
     left = Table.grid(padding=(0, 1))
-    left.add_row("[bold #56d4dd]Biobank Agent[/] [bold #94a3b8]v2.1[/]")
+    left.add_row("[bold #56d4dd]Biobank Agent[/] [bold #94a3b8]v2.3[/]")
     left.add_row("[#cbd5e1]Autonomous Scientific Discovery[/]")
     left.add_row(f"[#7dd3fc]Data source[/]: [bold]{settings.biobank_name}[/]")
     left.add_row("")

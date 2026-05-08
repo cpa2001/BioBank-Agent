@@ -34,6 +34,14 @@ agent tooling and relevant open-source skill/plugin ecosystems.
   data reference, architecture, guide, and plugin Markdown so the agent can
   inspect repository documentation without opening raw notes or generated
   outputs.
+- `biobank_agent/skills/genetic_target_hypothesis.py`: genetics-first
+  rare-variant burden target prioritization exposed as a normal agent skill.
+- `biobank_agent/skills/target_annotation_context.py`: biobank target-context
+  annotation from Open Targets, UniProt, GTEx, ClinicalTrials.gov, and optional
+  CELLxGENE snapshots. These annotations support interpretation only and do not
+  change target ranking.
+- `biobank_agent/skills/target_enrichment.py`: local GMT target enrichment with
+  optional GSEApy support when installed.
 - CLI commands: `/external-agents`, `/codex-plan`, `/codex-check`,
   `/claude-plan`, and `/claude-check`.
 - Codex plugin bundle: `plugins/biobank-agent` plus

@@ -16,6 +16,14 @@ delegation, or tests in this repository.
   inspection.
 - Preserve causal-language guardrails. Unsupported intervention or causal claims
   must be downgraded, blocked, or reported with explicit caveats.
+- For therapeutic target prioritization, use `genetic_target_hypothesis` with
+  GeneBass-like burden statistics and keep annotation-rich context separate
+  from the genetics-first rank. Use `prefiltered=true` only when every supplied
+  row has already been filtered to the requested phenotype.
+- For target interpretation, use `target_annotation_context` and
+  `target_enrichment` only as biobank evidence-context layers. They may explain
+  target biology, expression, trials, and pathways, but must not alter a GWAS or
+  burden-derived ranking.
 - Prefer the repository extension path: helper module, `@skill` wrapper, CLI or
   agent integration, targeted tests, then report/safety verification.
 - For report work, check scientific content, uncertainty, cohort provenance,
@@ -40,8 +48,11 @@ biobank eval --suite research_eval_v1 --mode baseline
 
 - `README.md`: public overview, install path, CLI commands, verification.
 - `docs/data/UKB_DATA_REFERENCE.md`: local UKB modality and field coverage.
+- `docs/related_works/GENETIC_TARGET_PRIORITIZATION.md`: rare-variant burden
+  target-prioritization design mapping.
+- `docs/guides/PLUGIN_INTEGRATION.md`: target annotation, enrichment, and
+  external-agent integration boundaries.
 - `docs/architecture/SKILLS.md`: skill registration and invocation rules.
-- `docs/guides/PLUGIN_INTEGRATION.md`: Codex/Claude bridge behavior.
 
 ## Review Checklist
 

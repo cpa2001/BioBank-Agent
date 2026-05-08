@@ -61,10 +61,11 @@ def autodiscover_skills(package_path: str = "biobank_agent.skills") -> None:
 2. Skips modules starting with `_` (private modules)
 3. Dynamically imports each module with `importlib.import_module()`
 4. As each module is imported, the `@skill` decorators automatically register skills in the global registry
-5. **55 skills** are currently available in the project
+5. **58 skills** are currently available in the project
 
-**Current Skills:** 55 total, including data analysis, modelling, literature,
-reporting, guardrail, memory, project documentation, and external review tools.
+**Current Skills:** 58 total, including data analysis, modelling, genetic target
+interpretation, literature, reporting, guardrail, memory, project documentation,
+and external review tools.
 
 ---
 

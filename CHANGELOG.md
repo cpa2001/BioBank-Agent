@@ -2,6 +2,33 @@
 
 All notable changes to Biobank Agent are documented here.
 
+## [2.3.0] — 2026-05-08
+
+### Added
+- **Target Annotation Context Skill**: `target_annotation_context` adds biobank-scoped translational context from Open Targets, UniProt, GTEx, ClinicalTrials.gov, and optional CELLxGENE snapshots
+- **Target Enrichment Skill**: `target_enrichment` runs local GMT over-representation analysis, with optional GSEApy support when installed
+- **External Context Cache**: Source-level JSON caching, cache-only mode, and source-specific failure isolation keep annotation calls reproducible and non-blocking
+- **Agent Governance Integration**: `generate_report`, `statistical_review`, and `safety_check` now distinguish annotation/enrichment context from genetic or causal evidence
+- **Action Graph Provenance**: Annotation sources, target context, enrichment terms, and overlap genes are recorded as typed graph evidence
+- 12 new tests (1098 total tests passing)
+
+### Changed
+- External annotation and enrichment are now first-class biobank target interpretation workflows; they do not alter rare-variant or GWAS-derived target rankings
+
+## [2.2.0] — 2026-05-08
+
+### Added
+- **Genetic Target Hypothesis Skill**: `genetic_target_hypothesis` ranks therapeutic target hypotheses from GeneBass-like rare-variant burden summary statistics
+- **Genetics-First Target Prioritization**: Composite scoring with loss-of-function therapeutic direction, pLoF/missense concordance, pathway convergence, Bonferroni and Benjamini-Yekutieli tiers
+- **Target Hypothesis Artifacts**: Companion Markdown and CSV outputs for ranked gene cards, validation caveats, and next-step triage
+- **Agent Governance Integration**: `generate_report`, `statistical_review`, and `safety_check` now understand genetic target hypothesis records
+- **Target Hypothesis Hardening**: labelled burden tables now block phenotype mismatches, unlabelled rows require explicit `prefiltered=true`, and multiple-testing scope is reported
+- **Burden Evidence Provenance**: Action Graph now records row-level rare-variant burden evidence linked to each target hypothesis
+- 12 new tests (1086 total tests passing)
+
+### Changed
+- Documentation and plugin guidance now expose rare-variant burden target prioritization as a first-class workflow
+
 ## [2.1.0] — 2026-05-08
 
 ### Added

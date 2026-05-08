@@ -199,6 +199,165 @@ def statistical_review(scope: str = "session", *, ctx=None) -> dict:
                     "recommendation": "Report calibration, OOD coverage and external validation status.",
                 })
 
+        # Check 10: Genetic target hypotheses must be treated as discovery signals
+        if r.skill == "genetic_target_hypothesis":
+            status = str(r.key_results.get("status", "")).upper()
+            n_family = r.key_results.get("n_family_tests", 0)
+            n_rows = r.key_results.get("n_matched_rows", 0)
+            targets = r.key_results.get("targets", []) or []
+            scope = str(r.key_results.get("multiple_testing_scope", "provided_rows_only"))
+            if status == "NEEDS_INPUT":
+                issues.append({
+                    "severity": "CRITICAL",
+                    "type": "genetic_target_missing_burden_stats",
+                    "skill": r.skill,
+                    "message": "Genetic target hypothesis run did not include burden summary statistics.",
+                    "recommendation": "Provide GeneBass-like rows with gene, phenotype, annotation, beta and P-value columns.",
+                })
+            if status == "INVALID_INPUT":
+                issues.append({
+                    "severity": "CRITICAL",
+                    "type": "genetic_target_invalid_input",
+                    "skill": r.skill,
+                    "message": "No valid rare-variant burden rows were available for target prioritization.",
+                    "recommendation": "Fix row parsing errors before interpreting or reporting any target hypotheses.",
+                })
+            if status == "NO_MATCH":
+                issues.append({
+                    "severity": "CRITICAL",
+                    "type": "genetic_target_phenotype_no_match",
+                    "skill": r.skill,
+                    "message": "Requested phenotype did not match any labelled burden rows.",
+                    "recommendation": "Correct the phenotype query or explicitly provide a pre-filtered table with prefiltered=true.",
+                })
+            if status == "NEEDS_PREFILTERED_DECLARATION":
+                issues.append({
+                    "severity": "CRITICAL",
+                    "type": "genetic_target_prefilter_required",
+                    "skill": r.skill,
+                    "message": "Burden rows lacked phenotype labels and were not explicitly declared pre-filtered.",
+                    "recommendation": "Set prefiltered=true only after confirming every supplied row belongs to the requested phenotype.",
+                })
+            if scope == "filtered_with_family_size":
+                issues.append({
+                    "severity": "WARNING",
+                    "type": "filtered_burden_family",
+                    "skill": r.skill,
+                    "message": f"FDR/Bonferroni tiers use family_size={int(n_family)} with {int(n_rows)} matched rows supplied.",
+                    "recommendation": "Treat BY-FDR q-values as conservative approximations unless the full phenotype-family table is supplied.",
+                })
+            elif scope == "provided_rows_only":
+                issues.append({
+                    "severity": "WARNING",
+                    "type": "provided_rows_multiple_testing_scope",
+                    "skill": r.skill,
+                    "message": "Multiple-testing tiers were computed only over supplied rows.",
+                    "recommendation": "Provide family_size or the full phenotype-family table before using tiers in publication-grade prioritization.",
+                })
+            if targets and all(str(t.get("tier", "")).lower() == "exploratory" for t in targets):
+                issues.append({
+                    "severity": "WARNING",
+                    "type": "exploratory_genetic_targets_only",
+                    "skill": r.skill,
+                    "message": "All genetic target hypotheses are exploratory-tier signals.",
+                    "recommendation": "Do not prioritize for therapeutic programs without replication or orthogonal validation.",
+                })
+            if targets and not any("concordant" in str(t.get("variant_support", "")).lower() for t in targets):
+                issues.append({
+                    "severity": "INFO",
+                    "type": "single_variant_class_support",
+                    "skill": r.skill,
+                    "message": "No target has pLoF plus missense|LC concordant support.",
+                    "recommendation": "Review variant-class specificity and seek independent support before strong claims.",
+                })
+            if targets and any(str(t.get("therapeutic_direction", "")).lower() == "uncertain" for t in targets):
+                issues.append({
+                    "severity": "WARNING",
+                    "type": "uncertain_therapeutic_direction",
+                    "skill": r.skill,
+                    "message": "At least one genetic target has no inferable inhibit/activate direction.",
+                    "recommendation": "Do not use direction-uncertain targets for therapeutic strategy without additional functional evidence.",
+                })
+
+        # Check 11: External target annotations are context only
+        if r.skill == "target_annotation_context":
+            status = str(r.key_results.get("status", "")).upper()
+            targets = r.key_results.get("targets", []) or []
+            source_counts = r.key_results.get("source_status_counts", {}) or {}
+            if status == "NEEDS_INPUT":
+                issues.append({
+                    "severity": "CRITICAL",
+                    "type": "target_annotation_missing_targets",
+                    "skill": r.skill,
+                    "message": "Target annotation context was requested without usable target genes.",
+                    "recommendation": "Provide target rows from a biobank GWAS, burden, or target-hypothesis result.",
+                })
+            if status == "INVALID_INPUT":
+                issues.append({
+                    "severity": "CRITICAL",
+                    "type": "target_annotation_invalid_input",
+                    "skill": r.skill,
+                    "message": "Target annotation context received unsupported sources or malformed inputs.",
+                    "recommendation": "Use supported sources: opentargets, uniprot, gtex, clinicaltrials, or cellxgene.",
+                })
+            if status == "PARTIAL" or any(
+                any(key in counts for key in {"ERROR", "PARTIAL", "SKIPPED"})
+                for counts in source_counts.values()
+                if isinstance(counts, dict)
+            ):
+                issues.append({
+                    "severity": "WARNING",
+                    "type": "target_annotation_partial_sources",
+                    "skill": r.skill,
+                    "message": "One or more annotation sources were unavailable, skipped, or returned errors.",
+                    "recommendation": "Inspect per-source status before using annotation context in a report.",
+                })
+            if any(not t.get("ensembl_id") for t in targets):
+                issues.append({
+                    "severity": "INFO",
+                    "type": "target_annotation_missing_gene_id",
+                    "skill": r.skill,
+                    "message": "At least one target lacks an Ensembl gene ID, limiting GTEx/Open Targets context.",
+                    "recommendation": "Provide Ensembl IDs from the upstream target table or a validated gene resolver.",
+                })
+            if targets:
+                issues.append({
+                    "severity": "INFO",
+                    "type": "annotation_context_not_rank_evidence",
+                    "skill": r.skill,
+                    "message": "External annotations are translational context and should not replace direct biobank evidence.",
+                    "recommendation": "Keep target ranking tied to GWAS or rare-variant burden evidence.",
+                })
+
+        # Check 12: Enrichment depends on gene-set universe and provenance
+        if r.skill == "target_enrichment":
+            status = str(r.key_results.get("status", "")).upper()
+            method = str(r.key_results.get("method", ""))
+            if status in {"NEEDS_INPUT", "INVALID_INPUT"}:
+                issues.append({
+                    "severity": "CRITICAL",
+                    "type": "target_enrichment_missing_gene_sets",
+                    "skill": r.skill,
+                    "message": "Target enrichment did not have a usable target list and local gene-set file.",
+                    "recommendation": "Provide gene_list or ranked_genes plus a provenance-tracked GMT file.",
+                })
+            if not r.key_results.get("explicit_universe", False) and method == "local_ora":
+                issues.append({
+                    "severity": "WARNING",
+                    "type": "target_enrichment_missing_universe",
+                    "skill": r.skill,
+                    "message": "ORA used the union of GMT genes rather than an explicit test universe.",
+                    "recommendation": "Use the assayed or tested gene universe from the upstream biobank analysis.",
+                })
+            if "gseapy" in method or "enrichr" in method:
+                issues.append({
+                    "severity": "INFO",
+                    "type": "target_enrichment_online_context",
+                    "skill": r.skill,
+                    "message": "GSEApy/Enrichr-style enrichment should be treated as exploratory context.",
+                    "recommendation": "Archive gene-set version, query date, and result table with the analysis.",
+                })
+
     # Sort issues by severity: CRITICAL > WARNING > INFO
     severity_order = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
     issues.sort(key=lambda x: severity_order.get(x["severity"], 9))

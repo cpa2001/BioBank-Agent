@@ -6,7 +6,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1074%20passed-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1098%20passed-brightgreen.svg)](#testing)
 
 *Natural language interface to large-scale biobank cohorts — from hypothesis to publication-quality report.*
 
@@ -16,10 +16,12 @@
 
 ## Overview
 
-Biobank Agent is an LLM-powered scientific discovery system designed for population-scale biobank data analysis. It combines a **ReAct agent loop** with **55 registered analysis, documentation, and review skills** to enable end-to-end research workflows: cohort construction, biomarker discovery, predictive modelling, survival analysis, literature review, cross-agent review, and publication-quality reporting.
+Biobank Agent is an LLM-powered scientific discovery system designed for population-scale biobank data analysis. It combines a **ReAct agent loop** with **58 registered analysis, documentation, and review skills** to enable end-to-end research workflows: cohort construction, biomarker discovery, therapeutic target prioritization, target annotation, predictive modelling, survival analysis, literature review, cross-agent review, and publication-quality reporting.
 
 **Key capabilities:**
 - **Hypothesis-driven discovery** — automated pipelines from cohort building through feature importance to PheWAS
+- **Genetic target hypotheses** — genetics-first rare-variant burden ranking from GeneBass-like summary statistics, with therapeutic direction, pathway convergence, and validation caveats
+- **Target annotation and enrichment** — biobank target lists can be interpreted with Open Targets, UniProt, GTEx, ClinicalTrials.gov, optional CELLxGENE snapshots, and local GMT enrichment without changing the genetic ranking
 - **Predictive modelling** — XGBoost/LightGBM/CatBoost with cross-validation, calibration, and SHAP explanations
 - **Literature integration** — search papers, read PDFs, cross-reference findings with biobank data
 - **Publication-quality output** — Nature/ICML-style SVG+PDF figures, dual-format reports (technical & IMRaD)
@@ -55,6 +57,9 @@ biobank> Discover disease-specific biomarkers for Type 2 Diabetes
 biobank> Train an XGBoost model to predict E11 and show feature importance
 biobank> Show Kaplan-Meier survival curves for acute MI (I21)
 biobank> Search for recent CKD biomarker studies and summarize findings
+biobank> Rank therapeutic target hypotheses for BMI from GeneBass burden statistics
+biobank> Annotate LDL target genes with Open Targets, UniProt, GTEx and clinical trial context
+biobank> Run local GMT enrichment for the top LDL target genes
 biobank> Read this paper and compare with our cohort data
 biobank> /plan Comprehensive cardiovascular risk analysis
 biobank> Generate a Nature-quality report for all analyses
@@ -86,11 +91,13 @@ biobank_agent/
 │   ├── features.py          # Biomarker group definitions
 │   └── parquet_builder.py   # Batch CSV → Parquet rebuild
 │
-├── skills/                  # 55 registered skills (auto-discovered)
+├── skills/                  # 58 registered skills (auto-discovered)
 │   ├── Analysis (17)        # prevalence, cohort, biomarker_dist, correlation,
 │   │                        # train_model, evaluate_model, feature_importance,
 │   │                        # calibration, survival, phewas, comorbidity, ...
-│   ├── Discovery (4)        # predict, discover, gwas_proxy, smart_plot
+│   ├── Discovery (7)        # predict, discover, gwas_proxy,
+│   │                        # genetic_target_hypothesis, target_annotation_context,
+│   │                        # target_enrichment, smart_plot
 │   ├── Research (7)         # web_search, web_fetch, read_pdf, fetch_paper,
 │   │                        # read_paper, deep_research, nature_writer
 │   ├── Ideation (2)         # brainstorm, critical_thinking

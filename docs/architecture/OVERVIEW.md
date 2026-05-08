@@ -22,7 +22,7 @@
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │ 1. Build system message (inject memory, cohort context)         │   │
-│  │ 2. Call LLM with tool schemas (55 skills)                       │   │
+│  │ 2. Call LLM with tool schemas (58 skills)                       │   │
 │  │ 3. Execute tool calls via SkillRegistry                         │   │
 │  │ 4. Record results → AnalysisRecord                              │   │
 │  │ 5. Loop until final text response (max 30 rounds)               │   │
@@ -183,7 +183,7 @@ Skill Result
 
 | Principle | Implementation |
 |-----------|---------------|
-| Skill-first | 55 self-contained skills + `@skill` decorator, hot-reloadable |
+| Skill-first | 58 self-contained skills + `@skill` decorator, hot-reloadable |
 | Memory-driven | 8-tier persistent memory, cross-session learning |
 | Verified outputs | Multi-layer: Reflexion → Verdict → Guardrails → VerifierMesh |
 | Schema-gated | Natural language → StudySpec before execution |

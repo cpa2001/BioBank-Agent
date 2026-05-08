@@ -48,7 +48,7 @@ biobank> /plan Comprehensive cardiovascular risk factor analysis
 | Command | Purpose |
 |---------|---------|
 | `/help` | Show all commands |
-| `/skills` | List registered skills (55) |
+| `/skills` | List registered skills (58) |
 | `/plan <goal>` | Enter plan mode (DAG decomposition) |
 | `/show_plan` | Display current plan |
 | `/execute_plan` | Execute planned steps |
@@ -72,7 +72,7 @@ pytest tests/ --cov=biobank_agent
 
 ## Key Features
 
-- **55 registered skills** — prevalence, GWAS proxy, survival, predictive modeling, deep research, project docs, and external review
+- **58 registered skills** — prevalence, GWAS proxy, genetic target hypotheses, target annotation, target enrichment, survival, predictive modeling, deep research, project docs, and external review
 - **8-tier memory** — cross-session learning, error catalog, episodic recall
 - **Multi-model orchestration** — single/ensemble/debate/supervisor strategies
 - **Schema-gated execution** — natural language → typed StudySpec before running

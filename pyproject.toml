@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "biobank-agent"
-version = "2.1.0"
+version = "2.3.0"
 description = "Autonomous scientific discovery agent for population-scale biobank research"
 readme = "README.md"
 license = {text = "MIT"}
@@ -71,6 +71,12 @@ literature = [
 structured = [
     "instructor>=1.0",
 ]
+enrichment = [
+    "gseapy>=1.1",
+]
+single-cell = [
+    "cellxgene-census>=1.15; python_version < '3.13'",
+]
 dev = [
     "coverage>=7.6",
 ]
@@ -82,6 +88,8 @@ all = [
     "neo4j>=5.0",
     "paper-qa>=5.0",
     "instructor>=1.0",
+    "gseapy>=1.1",
+    "cellxgene-census>=1.15; python_version < '3.13'",
     "coverage>=7.6",
 ]
 

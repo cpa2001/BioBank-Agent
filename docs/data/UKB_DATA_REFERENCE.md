@@ -703,4 +703,7 @@ Some fields have multiple measurements per instance:
 | `embedding` | skills/embedding.py | Tabular + imaging |
 | `survival` | skills/survival.py | Outcomes + exposures |
 | `gwas_proxy` | skills/gwas_proxy.py | Genomics |
+| `genetic_target_hypothesis` | skills/genetic_target_hypothesis.py | Rare-variant burden summary statistics |
+| `target_annotation_context` | skills/target_annotation_context.py | Target lists + external aggregate annotations |
+| `target_enrichment` | skills/target_enrichment.py | Target gene lists + local GMT gene sets |
 | `phewas` | skills/phewas.py | All phenotypes |
