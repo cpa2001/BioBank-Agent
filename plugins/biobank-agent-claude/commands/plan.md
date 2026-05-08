@@ -1,0 +1,29 @@
+---
+description: Build a guarded Biobank Agent research or implementation plan
+argument-hint: "<research or implementation goal>"
+allowed-tools: Read, Glob, Grep, Bash(python:*), Bash(git:*)
+---
+
+Plan the requested Biobank Agent work.
+
+Raw request:
+$ARGUMENTS
+
+Rules:
+
+- Start by running the bridge status command:
+
+```bash
+python "${CLAUDE_PLUGIN_ROOT}/../biobank-agent/scripts/biobank_agent_bridge.py" status
+```
+
+- Inspect only files needed to build a concrete plan.
+- Do not edit files.
+- Include a skill/command sequence, data/privacy assumptions, statistical
+  guardrails, report-quality gates, and the tests that should prove the work.
+- Use `project_doc` as the Biobank Agent path for reading curated README,
+  data-reference, architecture, guide, and plugin Markdown.
+- If the request involves Codex or Claude Code delegation, include the
+  `external_agent_status`, `codex_plan`, `claude_plan`,
+  `codex_check_execution`, and `claude_check_execution` Biobank Agent skills
+  as candidate execution steps.

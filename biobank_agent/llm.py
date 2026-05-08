@@ -236,7 +236,8 @@ class LLMClient:
                 last_error = e
                 break
 
-        if last_error:
+        # Exhausting the retry loop always records an error before reaching here.
+        if last_error:  # pragma: no branch
             logger.warning("Unable to fetch model list from relay: %s", last_error)
         return list(self._model_cache)
 

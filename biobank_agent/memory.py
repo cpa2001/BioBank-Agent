@@ -342,8 +342,10 @@ class UserMemory:
         if marker in existing:
             # Replace the entire line containing the marker
             lines = existing.split("\n")
-            for i, line in enumerate(lines):
-                if marker in line:
+            # The enclosing marker check guarantees this loop exits via break.
+            for i, line in enumerate(lines):  # pragma: no branch
+                # The enclosing marker check guarantees one line will match.
+                if marker in line:  # pragma: no branch
                     lines[i] = new_line
                     break
             self._path.write_text("\n".join(lines), encoding="utf-8")
@@ -539,9 +541,11 @@ class ActionGraph:
     ) -> None:
         src_key = self._node_key(src_type, src_id)
         dst_key = self._node_key(dst_type, dst_id)
-        # Ensure endpoint nodes exist.
-        self.upsert_node(src_type, src_id)
-        self.upsert_node(dst_type, dst_id)
+        # Ensure endpoint nodes exist without overwriting previously stored payloads.
+        if self._conn.execute("SELECT 1 FROM graph_nodes WHERE node_key = ?", (src_key,)).fetchone() is None:
+            self.upsert_node(src_type, src_id)
+        if self._conn.execute("SELECT 1 FROM graph_nodes WHERE node_key = ?", (dst_key,)).fetchone() is None:
+            self.upsert_node(dst_type, dst_id)
         now = datetime.now().isoformat()
         evidence_json = json.dumps(evidence or {}, default=str, ensure_ascii=False)
         self._conn.execute(

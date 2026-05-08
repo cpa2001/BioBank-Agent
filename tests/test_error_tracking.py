@@ -8,7 +8,7 @@ import json
 
 from biobank_agent.memory import LongTermMemory
 from biobank_agent.skills.track_error import track_error, list_errors
-from biobank_agent.skills.error_suggestions import suggest_error_fix
+from biobank_agent.skills.error_suggestions import _suggest_fixes_for_error, suggest_error_fix
 
 
 class TestLongTermMemoryErrorCatalog:
@@ -167,6 +167,33 @@ class TestTrackErrorSkill:
         
         assert len(result["known_fixes"]) == 2
         assert "Try again" in result["known_fixes"]
+
+    def test_track_error_with_explicit_context_no_catalog_or_fixes(self):
+        """Explicit context should pass through when no prior error catalog exists."""
+        mock_ctx = MagicMock()
+        mock_memory = MagicMock()
+        mock_memory.get_error_suggestions.return_value = []
+        mock_memory._data = {}
+        mock_ctx.state.memory = mock_memory
+
+        result = track_error(
+            error_type="RuntimeError",
+            error_message="offline",
+            skill_name="web_search",
+            suggested_fix="",
+            context={"query": "diabetes"},
+            ctx=mock_ctx,
+        )
+
+        assert result["known_fixes"] == []
+        assert result["occurrence_count"] == 0
+        mock_memory.record_error.assert_called_once_with(
+            error_type="RuntimeError",
+            error_message="offline",
+            skill_name="web_search",
+            suggested_fix=None,
+            context={"query": "diabetes"},
+        )
     
     def test_list_errors_execution(self):
         """Test list_errors skill execution."""
@@ -314,6 +341,52 @@ class TestSuggestErrorFixSkill:
         suggestions = result["suggestions"]
         suggestion_texts = [s["suggestion"] for s in suggestions]
         assert len(suggestion_texts) == len(set(suggestion_texts))
+
+    def test_suggestion_categories_cover_remaining_error_types(self):
+        cases = [
+            ("TimeoutError", "timed out", "timeout duration"),
+            ("AttributeError", "missing attr", "expected method"),
+            ("OSError", "file missing", "file/directory"),
+            ("TypeError", "bad type", "parameter types"),
+            ("ImportError", "import failed", "Install missing package"),
+            ("MysteryError", "unexpected", "Review error message"),
+        ]
+
+        for error_type, message, expected in cases:
+            suggestions = _suggest_fixes_for_error(error_type, message, "skill")
+            assert any(expected in suggestion for suggestion in suggestions)
+
+    def test_suggest_memory_mutation_floor_values_and_empty_history_items(self):
+        mock_ctx = MagicMock()
+        mock_memory = MagicMock()
+        mock_memory.get_error_suggestions.return_value = ["", "Reduce sample size (pass lower value to sample_size parameter)"]
+        mock_ctx.state.memory = mock_memory
+
+        result = suggest_error_fix(
+            error_type="RuntimeError",
+            error_message="memory pressure",
+            skill_name="train_model",
+            current_parameters={"sample_size": 5, "n_repeats": 1, "top_n": 4},
+            ctx=mock_ctx,
+        )
+
+        assert result["suggested_parameter_mutations"] == {
+            "sample_size": 10,
+            "n_repeats": 1,
+            "top_n": 4,
+        }
+        suggestions = result["suggestions"]
+        assert suggestions[0]["source"] == "from_history"
+        assert all(s["suggestion"] for s in suggestions)
+
+        n_folds_only = suggest_error_fix(
+            error_type="MemoryError",
+            error_message="memory pressure",
+            skill_name="train_model",
+            current_parameters={"n_folds": 2},
+            ctx=mock_ctx,
+        )
+        assert n_folds_only["suggested_parameter_mutations"] == {"n_folds": 2}
 
 
 class TestErrorTrackingIntegration:

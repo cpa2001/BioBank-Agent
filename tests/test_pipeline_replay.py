@@ -100,6 +100,20 @@ class TestReplayPipeline:
         assert "error" in result
         assert "JSON" in result["error"]
 
+    def test_replay_pipeline_rejects_non_object_overrides(self):
+        """Overrides JSON must decode to an object, not a list or scalar."""
+        from biobank_agent.skills.replay_pipeline import replay_pipeline
+
+        ctx = MagicMock()
+        ctx.state.memory.get_pipeline.return_value = [
+            {"skill": "prevalence", "args": {"top_n": 10}},
+        ]
+
+        result = replay_pipeline("test", "[1, 2]", ctx=ctx)
+
+        assert result["error"] == "Overrides must be a JSON object (dict)"
+        assert result["received_type"] == "list"
+
     def test_replay_pipeline_execution_error_handling(self):
         """Test handling of errors during skill execution."""
         from biobank_agent.skills.replay_pipeline import replay_pipeline
@@ -213,6 +227,38 @@ class TestRecordMacro:
         assert "error" in result
         assert "No records" in result["error"]
 
+    def test_record_macro_no_executable_records(self):
+        """Meta, empty-arg, and missing-skill records should not be recorded."""
+        from biobank_agent.skills.record_macro import record_macro
+
+        ctx = MagicMock()
+        ctx.state.records = [
+            {"skill": "think", "args": {"query": "reasoning"}},
+            {"skill": "record_macro", "args": {"name": "self"}},
+            {"skill": "replay_pipeline", "args": {"pipeline_name": "x"}},
+            {"skill": "list_pipelines", "args": {}},
+            {"skill": "", "args": {"x": 1}},
+            {"skill": "prevalence", "args": {}},
+        ]
+        ctx.state.memory = MagicMock()
+
+        result = record_macro("empty", ctx=ctx)
+
+        assert result["error"] == "No executable skills found in records"
+        ctx.state.memory.save_pipeline.assert_not_called()
+
+    def test_record_macro_save_failure(self):
+        """Memory save errors should be returned as structured errors."""
+        from biobank_agent.skills.record_macro import record_macro
+
+        ctx = MagicMock()
+        ctx.state.records = [{"skill": "prevalence", "args": {"top_n": 20}}]
+        ctx.state.memory.save_pipeline.side_effect = RuntimeError("read-only")
+
+        result = record_macro("cannot_save", ctx=ctx)
+
+        assert result == {"error": "Failed to save macro: read-only", "name": "cannot_save"}
+
 
 class TestListPipelines:
     """Test list_pipelines skill."""
@@ -255,6 +301,10 @@ class TestListPipelines:
         assert "details" in result
         assert "pipeline1" in result["details"]
         assert result["details"]["pipeline1"]["steps"] == 2
+
+        ctx.state.memory.get_pipeline.return_value = None
+        missing_detail = list_pipelines(show_details="true", ctx=ctx)
+        assert missing_detail["details"] == {}
 
     def test_list_pipelines_empty(self):
         """Test handling when no pipelines exist."""

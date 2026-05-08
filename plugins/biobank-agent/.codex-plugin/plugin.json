@@ -1,0 +1,39 @@
+{
+  "name": "biobank-agent",
+  "version": "0.1.0",
+  "description": "Use Biobank Agent from Codex for biobank research planning, execution review, and report-quality verification.",
+  "author": {
+    "name": "CHEN Pengan",
+    "email": "chenpengan@link.cuhk.edu.hk"
+  },
+  "homepage": "https://github.com/cpa2001/BioBank-Agent",
+  "repository": "https://github.com/cpa2001/BioBank-Agent",
+  "license": "MIT",
+  "keywords": [
+    "biobank",
+    "scientific-computing",
+    "research-agent",
+    "codex",
+    "quality-review"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Biobank Agent",
+    "shortDescription": "Plan and review population-biobank analyses from Codex.",
+    "longDescription": "Codex plugin instructions and helper scripts for working with Biobank Agent: discover registered skills, run targeted tests and eval suites, review generated reports, and preserve statistical, privacy, and reproducibility guardrails.",
+    "developerName": "CUHK AIH Group",
+    "category": "AI & Agents",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Shell"
+    ],
+    "websiteURL": "https://github.com/cpa2001/BioBank-Agent",
+    "defaultPrompt": [
+      "Use the Biobank Agent plugin to plan a UKB/HPP/CKB cohort-discovery workflow and list verification gates.",
+      "Review the current Biobank Agent report path for statistical guardrails and Nature-style scientific writing quality.",
+      "Run the Biobank Agent bridge status command, then choose the narrowest tests for the changed modules."
+    ],
+    "brandColor": "#0F766E"
+  }
+}

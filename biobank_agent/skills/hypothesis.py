@@ -12,6 +12,8 @@ from biobank_agent.registry import skill
 
 logger = logging.getLogger(__name__)
 
+_VALID_STATUSES = {"testing", "supported", "refuted", "inconclusive"}
+
 
 def _generate_id(statement: str) -> str:
     """Short hash ID from hypothesis statement."""
@@ -62,6 +64,9 @@ def hypothesis(
     ctx=None,
 ) -> dict:
     """Manage scientific hypotheses through their lifecycle."""
+    if ctx is None or not hasattr(ctx, "state") or not hasattr(ctx.state, "custom_data"):
+        return {"error": "A session context with state.custom_data is required."}
+
     # Store hypotheses in session custom_data
     if "hypotheses" not in ctx.state.custom_data:
         ctx.state.custom_data["hypotheses"] = {}
@@ -113,6 +118,13 @@ def hypothesis(
 
         h = hypotheses[h_id]
         if status:
+            if status.lower() not in _VALID_STATUSES:
+                return {
+                    "error": (
+                        "Unknown status. Use 'testing', 'supported', "
+                        "'refuted', or 'inconclusive'."
+                    )
+                }
             h["status"] = status.upper()
         if evidence:
             h["evidence"].append({

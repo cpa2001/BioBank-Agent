@@ -20,10 +20,22 @@ from biobank_agent.registry import skill
             "type": "string",
             "description": "Your internal step-by-step reasoning",
         },
+        "thought": {
+            "type": "string",
+            "description": "Compatibility alias for reasoning",
+            "default": "",
+        },
+        "limit": {
+            "type": "integer",
+            "description": "Ignored compatibility hint when a model supplies a limit",
+            "default": 0,
+        },
     },
 )
-def think(reasoning: str, *, ctx=None) -> dict:
+def think(reasoning: str = "", thought: str = "", limit: int = 0, *, ctx=None, **kwargs) -> dict:
     """Process internal reasoning, optionally with Tree-of-Thought exploration."""
+    reasoning = str(reasoning or thought or kwargs.get("query") or kwargs.get("task") or "")
+
     # Check if ToT is enabled and the reasoning is a branching question
     enable_tot = False
     if ctx and hasattr(ctx, "settings"):

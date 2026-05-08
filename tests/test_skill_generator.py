@@ -124,6 +124,15 @@ class TestSkillGenerator:
         
         assert is_valid
 
+    def test_validate_code_forbidden_import_from(self):
+        """Test validation catches forbidden from-imports."""
+        from biobank_agent.skills.generator import SkillGenerator
+
+        is_valid, msg = SkillGenerator.validate_code("from os import path")
+
+        assert not is_valid
+        assert "from os" in msg
+
     def test_validate_code_allowed_builtins(self):
         """Test validation allows safe builtins."""
         from biobank_agent.skills.generator import SkillGenerator
@@ -154,6 +163,35 @@ exec('code')
         assert any("os" in e for e in errors)
         assert any("_private" in e for e in errors)
         assert any("exec" in e for e in errors)
+
+    def test_get_validation_errors_syntax_from_import_and_getattr(self):
+        """Test detailed validation errors cover syntax, from-imports, and getattr."""
+        from biobank_agent.skills.generator import SkillGenerator
+
+        assert "Syntax error" in SkillGenerator.get_validation_errors("if True\n  pass")[0]
+
+        errors = SkillGenerator.get_validation_errors(
+            "from os import path\nvalue = getattr(obj, '_secret')"
+        )
+
+        assert any("from os" in e for e in errors)
+        assert any("getattr" in e for e in errors)
+
+    def test_get_validation_errors_safe_branch_variants(self):
+        """Safe imports, calls, getattr forms, and public attributes should pass."""
+        from biobank_agent.skills.generator import SkillGenerator
+
+        code = """
+import numpy, pandas
+from sklearn import model_selection
+value = getattr(obj)
+name = getattr(obj, field_name)
+public = getattr(obj, 'public')
+result = public.method()
+clean = public.value
+"""
+
+        assert SkillGenerator.get_validation_errors(code) == []
 
     def test_template_generation(self):
         """Test skill template generation."""
@@ -282,6 +320,21 @@ class TestCreateSkill:
         assert result["status"] == "validation_failed"
         assert "JSON" in result["error"]
 
+    def test_create_skill_rejects_non_object_parameters(self):
+        """Parameters must decode to a JSON object, not a list/scalar."""
+        from biobank_agent.skills.create_skill import create_skill
+
+        result = create_skill(
+            name="test_skill",
+            description="Test",
+            parameters="[]",
+            code_body="return {}",
+            ctx=MagicMock(),
+        )
+
+        assert result["status"] == "validation_failed"
+        assert result["error"] == "Parameters must be a JSON object"
+
     def test_create_skill_code_validation(self):
         """Test create_skill validates code."""
         from biobank_agent.skills.create_skill import create_skill
@@ -334,6 +387,44 @@ class TestCreateSkill:
         skill_path = Path(result["generated_skill_path"])
         assert skill_path.exists()
         assert "@skill" in skill_path.read_text()
+
+    def test_create_skill_template_save_activation_paths(self, tmp_path, monkeypatch):
+        """Generation failures, save failures, activation success and activation fallback are reported."""
+        from biobank_agent.skills import create_skill as create_mod
+
+        params = json.dumps({"top_n": {"type": "integer", "description": "Count"}})
+        ctx = MagicMock()
+        ctx.settings.reports_dir = tmp_path / "reports"
+        ctx.settings.custom_skills_dir = tmp_path / "custom"
+
+        monkeypatch.setattr(create_mod.SkillGenerator, "template", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bad template")))
+        generated = create_mod.create_skill("broken_template", "Broken", params, "return {}", ctx=ctx)
+        assert generated["status"] == "validation_failed"
+        assert "Failed to generate skill code" in generated["error"]
+
+        monkeypatch.setattr(create_mod.SkillGenerator, "template", lambda *args, **kwargs: "from biobank_agent.registry import skill\n")
+        file_parent = tmp_path / "not_a_dir"
+        file_parent.write_text("file", encoding="utf-8")
+        ctx.settings.reports_dir = file_parent
+        save_failed = create_mod.create_skill("save_failed", "Save failed", params, "return {}", ctx=ctx)
+        assert save_failed["status"] == "validation_failed"
+        assert "Failed to save skill file" in save_failed["error"]
+
+        ctx.settings.reports_dir = tmp_path / "reports_ok"
+        ctx.settings.custom_skills_dir = tmp_path / "custom_ok"
+        monkeypatch.setattr("biobank_agent.registry.discover_custom_skills", lambda custom_dir: 1)
+        activated = create_mod.create_skill("activated_skill", "Activated", params, "return {}", ctx=ctx)
+        assert activated["status"] == "success"
+        assert activated["activated"] is True
+        assert "activated" in activated["message"]
+
+        blocked_custom = tmp_path / "custom_file"
+        blocked_custom.write_text("file", encoding="utf-8")
+        ctx.settings.custom_skills_dir = blocked_custom
+        fallback = create_mod.create_skill("manual_skill", "Manual", params, "return {}", ctx=ctx)
+        assert fallback["status"] == "success"
+        assert fallback["activated"] is False
+        assert "Generated skill is INACTIVE" in fallback["message"]
 
 
 class TestSkillGeneratorSecurity:

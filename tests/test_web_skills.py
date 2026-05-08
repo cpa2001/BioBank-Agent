@@ -216,6 +216,41 @@ class TestWebFetchSuccess:
         assert result["truncated"] is True
         assert "[... truncated ...]" in result["content"]
 
+    @patch("httpx.get")
+    def test_pubmed_and_plain_text_paths(self, mock_get):
+        """PubMed abstracts and non-HTML responses use their dedicated branches."""
+        from biobank_agent.skills.web_fetch import web_fetch
+
+        pubmed = MagicMock()
+        pubmed.text = '<html><title>PMID</title><div class="abstract-content selected"><p>Clinical abstract.</p></div></html>'
+        pubmed.headers = {"content-type": "text/html"}
+
+        plain = MagicMock()
+        plain.text = "plain text response"
+        plain.headers = {"content-type": "text/plain"}
+
+        mock_get.side_effect = [pubmed, plain]
+
+        pubmed_result = web_fetch(url="https://pubmed.ncbi.nlm.nih.gov/123", ctx=None)
+        plain_result = web_fetch(url="https://example.com/plain.txt", ctx=None)
+
+        assert "PubMed Abstract" in pubmed_result["content"]
+        assert "Clinical abstract" in pubmed_result["content"]
+        assert plain_result["content"] == "plain text response"
+
+    @patch("httpx.get")
+    def test_pubmed_empty_abstract_falls_back_to_html(self, mock_get):
+        from biobank_agent.skills.web_fetch import web_fetch
+
+        mock_resp = MagicMock()
+        mock_resp.text = '<html><title>PMID</title><div class="abstract-content selected"></div><p>Fallback.</p></html>'
+        mock_resp.headers = {"content-type": "text/html"}
+        mock_get.return_value = mock_resp
+
+        result = web_fetch(url="https://pubmed.ncbi.nlm.nih.gov/empty", ctx=None)
+
+        assert result["content"] == ""
+
 
 class TestWebFetchArxiv:
     """Test arXiv special handling."""
@@ -239,6 +274,19 @@ class TestWebFetchArxiv:
 
         assert "arXiv Abstract" in result["content"]
         assert "novel method" in result["content"]
+
+    @patch("httpx.get")
+    def test_arxiv_without_abstract_falls_back_to_html(self, mock_get):
+        from biobank_agent.skills.web_fetch import web_fetch
+
+        mock_resp = MagicMock()
+        mock_resp.text = "<html><head><title>No Abstract</title></head><body><p>Fallback body.</p></body></html>"
+        mock_resp.headers = {"content-type": "text/html"}
+        mock_get.return_value = mock_resp
+
+        result = web_fetch(url="https://arxiv.org/abs/0000.00000", ctx=None)
+
+        assert "Fallback body" in result["content"]
 
 
 class TestWebFetchErrors:
@@ -269,6 +317,27 @@ class TestWebFetchErrors:
         assert "error" in result
         assert "Fetch failed" in result["error"]
 
+    @patch("httpx.get")
+    def test_http_status_error(self, mock_get):
+        """HTTP errors report status code and reason phrase."""
+        import httpx as real_httpx
+        from biobank_agent.skills.web_fetch import web_fetch
+
+        response = MagicMock()
+        response.status_code = 404
+        response.reason_phrase = "Not Found"
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = real_httpx.HTTPStatusError(
+            "not found",
+            request=MagicMock(),
+            response=response,
+        )
+        mock_get.return_value = mock_resp
+
+        result = web_fetch(url="https://example.com/missing", ctx=None)
+
+        assert result["error"] == "HTTP 404: Not Found"
+
 
 class TestHTMLHelpers:
     """Test internal HTML extraction helpers."""
@@ -290,6 +359,7 @@ class TestHTMLHelpers:
         assert result is not None
         assert result == "This is the abstract."
         assert "Abstract:" not in result
+        assert _extract_arxiv_abstract("<html></html>") is None
 
     def test_extract_pubmed_abstract(self):
         """_extract_pubmed_abstract extracts from PubMed div."""
@@ -300,6 +370,24 @@ class TestHTMLHelpers:
 
         assert result is not None
         assert "Findings summary" in result
+        assert _extract_pubmed_abstract("<html></html>") is None
+
+    def test_html_to_text_import_fallback(self, monkeypatch):
+        import builtins
+        from biobank_agent.skills.web_fetch import _html_to_text
+
+        original_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "html2text":
+                raise ImportError("missing")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        text = _html_to_text("<html><style>x</style><script>bad()</script><body><p>Hello</p></body></html>")
+
+        assert text == "Hello"
 
 
 if __name__ == "__main__":

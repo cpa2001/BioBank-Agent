@@ -155,10 +155,32 @@ class VerdictEngine:
 
     Mirrors the verifier.toml adversarial mindset:
     "Assume every change has a bug until proven otherwise."
+
+    Enhanced with formal constraint verification (Z3/bounds checking)
+    that runs BEFORE the LLM-based check (per VERGE arXiv:2601.06181).
     """
 
     def __init__(self, llm: LLMClient) -> None:
         self.llm = llm
+        # Lazy-load formal verifier (zero cost if not used)
+        self._formal_verifier = None
+        self._mesh = None
+
+    @property
+    def formal_verifier(self):
+        """Lazy-init formal verifier to avoid import cost on startup."""
+        if self._formal_verifier is None:
+            from .verification import BiobankConstraintVerifier
+            self._formal_verifier = BiobankConstraintVerifier()
+        return self._formal_verifier
+
+    @property
+    def mesh(self):
+        """Lazy-init verifier mesh to avoid per-call allocation."""
+        if self._mesh is None:
+            from .verifier_mesh import VerifierMesh
+            self._mesh = VerifierMesh(llm=None)
+        return self._mesh
 
     def verify_skill_result(
         self,
@@ -167,9 +189,42 @@ class VerdictEngine:
         result: dict,
         context: str = "",
     ) -> VerdictResult:
-        """Verify a skill execution result for correctness."""
+        """Verify a skill execution result for correctness.
+
+        Pipeline: formal_check (Z3/bounds) → LLM-based checks → merge.
+        """
         checks = []
         issues = []
+
+        # ── Phase 0: Formal constraint verification ──────
+        # Runs Z3 or bounds checking BEFORE LLM (no API cost, deterministic)
+        try:
+            formal_result = self.formal_verifier.verify_skill_output(skill_name, result)
+            checks.extend(formal_result.checks)
+            issues.extend(formal_result.issues)
+        except Exception as e:
+            logger.debug("Formal verification skipped: %s", e)
+
+        # ── Phase 0.5: Verifier Mesh (metrics, URL/DOI, entailment) ──
+        # Skip sample-size checks (already covered by Phase 0 formal_check)
+        try:
+            mesh_result = self.mesh.verify_result(result, skip_sample_sizes=True)
+            for idx, vc in enumerate(mesh_result.checks):
+                if not vc.passed and vc.severity == "error":
+                    issues.append(Issue(
+                        file=f"skills/{skill_name}.py",
+                        severity=Severity.BLOCKER,
+                        description=f"[VerifierMesh/{vc.verifier}] {vc.claim}: {vc.detail}",
+                    ))
+                    checks.append(Check(f"mesh_{vc.verifier}_{idx}", passed=False, output=vc.detail))
+                elif not vc.passed and vc.severity == "warning":
+                    issues.append(Issue(
+                        file=f"skills/{skill_name}.py",
+                        severity=Severity.WARNING,
+                        description=f"[VerifierMesh/{vc.verifier}] {vc.claim}: {vc.detail}",
+                    ))
+        except Exception as e:
+            logger.debug("VerifierMesh skipped: %s", e)
 
         # ── Check 1: Output schema ────────────
         if isinstance(result, dict):

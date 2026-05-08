@@ -188,3 +188,169 @@ class DelegationGuardrails:
             ))
 
         return violations
+
+
+# ── Temporal Safety Rules ─────────────────────────────────────────────
+# Lightweight temporal precedence constraints (inspired by LTL safety specs).
+# NOT full linear temporal logic — just "skill A must execute before skill B"
+# in any valid plan. Checked during LongHorizonPlan construction.
+
+
+@dataclass
+class TemporalRule:
+    """A temporal precedence rule: `before` must execute before `after`.
+
+    These encode domain knowledge about safe analysis ordering:
+      - Always check prevalence before training a disease model
+      - Always run safety_check before generating final reports
+      - Always define cohort before running survival analysis
+    """
+    name: str
+    before: str       # skill that must run first
+    after: str        # skill that must run after
+    severity: str = "WARN"  # "BLOCK" or "WARN"
+    reason: str = ""
+
+
+# Default temporal rules for biobank research safety
+TEMPORAL_RULES: list[TemporalRule] = [
+    TemporalRule(
+        name="prevalence_before_training",
+        before="prevalence",
+        after="train_model",
+        severity="WARN",
+        reason="Must verify disease prevalence (n_cases ≥ 100) before training predictive models",
+    ),
+    TemporalRule(
+        name="safety_before_report",
+        before="safety_check",
+        after="report",
+        severity="WARN",
+        reason="Safety review required before generating publication-ready reports",
+    ),
+    TemporalRule(
+        name="cohort_before_survival",
+        before="cohort_summary",
+        after="survival",
+        severity="WARN",
+        reason="Must define and validate cohort before running survival analysis",
+    ),
+    TemporalRule(
+        name="cohort_before_training",
+        before="cohort_summary",
+        after="train_model",
+        severity="WARN",
+        reason="Must define cohort (verify sample sizes) before training models",
+    ),
+    TemporalRule(
+        name="prevalence_before_gwas",
+        before="prevalence",
+        after="gwas_proxy",
+        severity="WARN",
+        reason="Must verify case count before running GWAS (need n_cases ≥ 500 for power)",
+    ),
+    TemporalRule(
+        name="missing_data_before_training",
+        before="missing_data",
+        after="train_model",
+        severity="WARN",
+        reason="Should assess missing data patterns before model training",
+    ),
+]
+
+
+class TemporalSafetyChecker:
+    """Check temporal precedence rules against a plan's skill ordering.
+
+    Usage::
+
+        checker = TemporalSafetyChecker()
+        violations = checker.check_plan(plan_steps)
+        for v in violations:
+            if v.severity == "BLOCK":
+                raise TemporalViolation(v)
+    """
+
+    def __init__(self, rules: list[TemporalRule] | None = None) -> None:
+        self.rules = rules if rules is not None else TEMPORAL_RULES
+
+    def check_plan(self, plan_steps: list[dict]) -> list[GuardrailViolation]:
+        """Check a plan's step ordering against temporal rules.
+
+        Parameters
+        ----------
+        plan_steps : list of dicts with at least {"skill": str, "id": str}
+            The ordered list of steps in a plan (topological order).
+
+        Returns
+        -------
+        List of violations (empty if plan is safe).
+        """
+        violations: list[GuardrailViolation] = []
+
+        # Build skill → position mapping (first occurrence)
+        skill_positions: dict[str, int] = {}
+        for i, step in enumerate(plan_steps):
+            skill_name = step.get("skill", "")
+            if skill_name and skill_name not in skill_positions:
+                skill_positions[skill_name] = i
+
+        # Check each rule
+        for rule in self.rules:
+            if rule.after in skill_positions:
+                # The "after" skill is in the plan — check if "before" precedes it
+                after_pos = skill_positions[rule.after]
+                if rule.before not in skill_positions:
+                    # "before" skill is missing entirely
+                    violations.append(GuardrailViolation(
+                        rule=f"temporal:{rule.name}",
+                        description=(
+                            f"Temporal rule violated: '{rule.before}' must execute before "
+                            f"'{rule.after}', but '{rule.before}' is not in the plan. "
+                            f"Reason: {rule.reason}"
+                        ),
+                        severity=rule.severity,
+                    ))
+                elif skill_positions[rule.before] > after_pos:
+                    # "before" skill comes AFTER "after" skill — wrong order
+                    violations.append(GuardrailViolation(
+                        rule=f"temporal:{rule.name}",
+                        description=(
+                            f"Temporal rule violated: '{rule.before}' (step {skill_positions[rule.before]}) "
+                            f"must execute BEFORE '{rule.after}' (step {after_pos}), "
+                            f"but is scheduled after. Reason: {rule.reason}"
+                        ),
+                        severity=rule.severity,
+                    ))
+
+        return violations
+
+    def suggest_reorder(self, plan_steps: list[dict]) -> list[dict]:
+        """Suggest a corrected ordering that satisfies all temporal rules.
+
+        Returns the reordered steps (best-effort; may not resolve all conflicts).
+        """
+        # Build dependency edges from temporal rules
+        deps: dict[str, set[str]] = {}  # skill → set of skills that must come before it
+        for rule in self.rules:
+            if rule.after not in deps:
+                deps[rule.after] = set()
+            deps[rule.after].add(rule.before)
+
+        # Simple topological adjustment: move "before" skills earlier
+        result = list(plan_steps)
+        for rule in self.rules:
+            before_idx = None
+            after_idx = None
+            for i, step in enumerate(result):
+                if step.get("skill") == rule.before and before_idx is None:
+                    before_idx = i
+                if step.get("skill") == rule.after and after_idx is None:
+                    after_idx = i
+
+            if before_idx is not None and after_idx is not None and before_idx > after_idx:
+                # Move "before" to just before "after"
+                step = result.pop(before_idx)
+                result.insert(after_idx, step)
+
+        return result

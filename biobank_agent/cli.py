@@ -16,6 +16,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -72,6 +73,13 @@ HELP_SECTIONS = [
         ("/plan-approve", "Approve plan and begin execution"),
         ("/plan-exit", "Exit plan mode"),
         ("/plans", "List all saved plans"),
+    ]),
+    ("External Agents", [
+        ("/external-agents", "Check local Codex and Claude Code availability"),
+        ("/codex-plan <task>", "Ask local Codex for a read-only plan"),
+        ("/codex-check [focus]", "Ask local Codex to review current execution/code"),
+        ("/claude-plan <task>", "Ask local Claude Code for a read-only plan"),
+        ("/claude-check [focus]", "Ask local Claude Code to review current execution/code"),
     ]),
     ("Pipelines & Memory", [
         ("/record <name>", "Save current session as a replayable pipeline"),
@@ -205,7 +213,7 @@ def _render_startup_dashboard(
         model_pool_preview += f" (+{len(model_pool) - 3})"
 
     left = Table.grid(padding=(0, 1))
-    left.add_row("[bold #56d4dd]Biobank Agent[/] [bold #94a3b8]v2.0[/]")
+    left.add_row("[bold #56d4dd]Biobank Agent[/] [bold #94a3b8]v2.1[/]")
     left.add_row("[#cbd5e1]Autonomous Scientific Discovery[/]")
     left.add_row(f"[#7dd3fc]Data source[/]: [bold]{settings.biobank_name}[/]")
     left.add_row("")
@@ -359,7 +367,9 @@ def eval_cmd() -> None:
       biobank eval --suite research_eval_v1 --mode baseline|mas_v2 [--enforce-gate]
     """
     from .eval.benchmarks import (
+        AgentReportWorkflowBenchmark,
         BiomedQABenchmark,
+        ReportQualityBenchmark,
         ResearchEvalV1,
         SkillCallBenchmark,
         SkillSchemaBenchmark,
@@ -379,7 +389,9 @@ def eval_cmd() -> None:
         raise SystemExit(2)
 
     benchmarks = {
+        "agent_report_workflow": AgentReportWorkflowBenchmark,
         "research_eval_v1": ResearchEvalV1,
+        "report_quality": ReportQualityBenchmark,
         "skill_schemas": SkillSchemaBenchmark,
         "biomedical_qa": BiomedQABenchmark,
         "skill_calls": SkillCallBenchmark,
@@ -492,6 +504,19 @@ def eval_cmd() -> None:
         "suite": suite,
         "mode": mode,
         "summary": result.summary(),
+        "results": [
+            {
+                "case_id": getattr(case_result, "case_id", ""),
+                "passed": bool(getattr(case_result, "passed", False)),
+                "score": float(getattr(case_result, "score", 0.0)),
+                "actual_skills": list(getattr(case_result, "actual_skills", []) or []),
+                "actual_text": getattr(case_result, "actual_text", ""),
+                "errors": list(getattr(case_result, "errors", []) or []),
+                "elapsed_s": float(getattr(case_result, "elapsed_s", 0.0)),
+                "metadata": getattr(case_result, "metadata", {}) or {},
+            }
+            for case_result in getattr(result, "results", []) or []
+        ],
         "observability": obs,
         "baseline_observability": result.baseline_observability,
         "comparative": result.comparative,
@@ -508,7 +533,7 @@ def eval_cmd() -> None:
             "pool_model_failures": missing_pool_models,
         },
     }
-    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     console.print(f"[green]Saved report:[/] {out_path}")
 
     if enforce_gate and not result.gate_passed:
@@ -735,6 +760,28 @@ def _handle_command(
                 status_color = {"DONE": "green", "EXECUTION": "yellow", "BLOCKED": "red"}.get(p["status"], "dim")
                 console.print(f"  [{status_color}]{p['status']}[/] {p['file']}")
 
+    # ── External agent commands ─────────────────────────
+    elif cmd == "/external-agents":
+        _run_external_agent_skill(agent, "external_agent_status", {"agent": arg or "all"})
+
+    elif cmd == "/codex-plan":
+        if not arg:
+            console.print("[yellow]Usage: /codex-plan <task>[/]")
+        else:
+            _run_external_agent_skill(agent, "codex_plan", {"task": arg})
+
+    elif cmd == "/codex-check":
+        _run_external_agent_skill(agent, "codex_check_execution", {"focus": arg})
+
+    elif cmd == "/claude-plan":
+        if not arg:
+            console.print("[yellow]Usage: /claude-plan <task>[/]")
+        else:
+            _run_external_agent_skill(agent, "claude_plan", {"task": arg})
+
+    elif cmd == "/claude-check":
+        _run_external_agent_skill(agent, "claude_check_execution", {"focus": arg})
+
     # ── Pipeline & memory commands ──────────────────────
     elif cmd == "/record":
         if not arg:
@@ -903,6 +950,68 @@ def _show_evidence(agent: Agent, claim_id: str) -> None:
         console.print(f"[yellow]{text}[/]")
         return
     console.print(Panel(text, title=f"Evidence: {claim_id}"))
+
+
+def _external_agent_ctx(agent: Agent):
+    """Build a skill context for CLI-triggered external-agent calls."""
+    report_dir = getattr(agent.settings, "reports_dir", Path("./reports")) / "external_agents"
+    try:
+        report_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    build_ctx = getattr(agent, "_build_ctx", None)
+    if callable(build_ctx):
+        try:
+            return build_ctx(report_dir)
+        except Exception:
+            pass
+    return SimpleNamespace(
+        settings=agent.settings,
+        state=agent.state,
+        memory=getattr(agent, "memory", None),
+        report_dir=report_dir,
+    )
+
+
+def _run_external_agent_skill(agent: Agent, skill_name: str, args: dict) -> None:
+    """Execute an external-agent skill and render the result compactly."""
+    try:
+        result = agent.registry.execute(skill_name, args, ctx=_external_agent_ctx(agent))
+    except Exception as e:
+        console.print(f"[red]External agent command failed: {e}[/]")
+        return
+
+    if not isinstance(result, dict):
+        console.print(str(result))
+        return
+
+    if "agents" in result:
+        table = Table(title="External Agents")
+        table.add_column("Agent", style="cyan")
+        table.add_column("Available", style="green")
+        table.add_column("Version", style="white")
+        table.add_column("Path", style="dim")
+        table.add_column("Error", style="red")
+        table.add_column("Next action", style="yellow")
+        for name, payload in result.get("agents", {}).items():
+            payload = payload or {}
+            table.add_row(
+                str(name),
+                "yes" if payload.get("available") else "no",
+                str(payload.get("version", "")),
+                str(payload.get("path", "")),
+                str(payload.get("error", "")),
+                str(payload.get("remediation", "")),
+            )
+        console.print(table)
+        return
+
+    status = result.get("status", "unknown")
+    title = f"{result.get('agent', 'external')} {result.get('task_kind', 'run')} ({status})"
+    output = result.get("stdout") or result.get("stderr") or result.get("error") or "(no output)"
+    console.print(Panel(str(output).strip()[:8000], title=title))
+    if result.get("command_display"):
+        console.print(f"[dim]{result['command_display']}[/]")
 
 
 def _show_cost(token_usage: dict, agent: Agent) -> None:

@@ -118,6 +118,18 @@ class TestRetryDecorator:
         assert kwargs["top_n"] == 10
         assert kwargs["max_depth"] == 9
 
+    def test_parameter_mutation_case_threshold_and_estimators(self):
+        """Case thresholds and estimator counts should be reduced with floors."""
+        kwargs = {"n_cases_min": 200, "n_estimators": 200}
+        _modify_parameters_for_retry(kwargs, 1)
+        assert kwargs["n_cases_min"] == 180
+        assert kwargs["n_estimators"] == 100
+
+        floor_kwargs = {"n_cases_min": 40, "n_estimators": 5}
+        _modify_parameters_for_retry(floor_kwargs, 1)
+        assert floor_kwargs["n_cases_min"] == 50
+        assert floor_kwargs["n_estimators"] == 10
+
     def test_backoff_delay(self):
         """Test exponential backoff is applied."""
         call_times = []
@@ -164,6 +176,17 @@ class TestRetryDecorator:
         assert "original_error" in result
         assert "Specific error message" in result["original_error"]
 
+    def test_zero_retries_returns_unexpected_state_fallback(self):
+        """A zero retry budget should hit the defensive fallback path."""
+        @retry_on_error(max_retries=0)
+        def never_called(*, ctx=None):
+            raise AssertionError("should not execute")
+
+        result = never_called(ctx=None)
+
+        assert result["error"] == "Unexpected state: exhausted retries"
+        assert result["skill"] == "never_called"
+
 
 class TestShouldRetryOnError:
     """Test should_retry_on_error function."""
@@ -198,10 +221,21 @@ class TestShouldRetryOnError:
         error = AttributeError("No such attribute")
         assert should_retry_on_error(error) is False
 
+    def test_permanent_type_error_by_type(self):
+        """Permanent exception types should be rejected even without keywords."""
+        assert should_retry_on_error(TypeError("wrong shape")) is False
+
     def test_error_message_keyword_retryable(self):
         """Test error message keywords indicate retryable."""
         error = RuntimeError("Please try again later")
         assert should_retry_on_error(error) is True
+
+    def test_error_message_keyword_retryable_for_unknown_type(self):
+        """Retryable keywords should apply to otherwise unknown exception types."""
+        class CustomError(Exception):
+            pass
+
+        assert should_retry_on_error(CustomError("worker busy")) is True
 
     def test_error_message_keyword_permanent(self):
         """Test error message keywords indicate permanent."""

@@ -18,6 +18,7 @@ from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .llm import LLMClient
+    from .study_spec import StudySpec
 
 logger = logging.getLogger(__name__)
 
@@ -157,13 +158,33 @@ class LongHorizonPlanner:
         goal: str,
         available_skills: list[str],
         context: str = "",
+        spec: Optional["StudySpec"] = None,
     ) -> LongHorizonPlan:
         """Use LLM to decompose a goal into a step graph.
 
         Falls back to a sensible default plan if LLM fails.
+        After decomposition, checks temporal safety rules.
+
+        Args:
+            goal: The research goal to decompose
+            available_skills: List of available skill names
+            context: Additional context string
+            spec: Optional StudySpec object to constrain planning.
+                  If provided, filters skills to spec.modalities and
+                  enforces spec.tool_budget as maximum steps.
         """
+        # Apply StudySpec constraints if provided
+        if spec is not None:
+            try:
+                available_skills = spec.constrain_skills(available_skills)
+                tool_budget = getattr(spec, "tool_budget", 20)
+            except (AttributeError, TypeError):
+                tool_budget = 20
+        else:
+            tool_budget = 50  # Default budget without spec
+
         if not self.llm:
-            return self._default_plan(goal)
+            return self._check_temporal_safety(self._default_plan(goal))
 
         prompt = f"""Decompose this biobank research goal into concrete analysis steps.
 
@@ -221,11 +242,20 @@ Respond with ONLY the JSON array."""
                     can_parallelize=item.get("can_parallelize", False),
                 ))
 
-            return LongHorizonPlan(goal=goal, steps=steps)
+            # Enforce tool_budget from StudySpec
+            if len(steps) > tool_budget:
+                logger.warning(
+                    "Plan has %d steps but tool_budget is %d; truncating.",
+                    len(steps), tool_budget
+                )
+                steps = steps[:tool_budget]
+
+            plan = LongHorizonPlan(goal=goal, steps=steps)
+            return self._check_temporal_safety(plan)
 
         except Exception as e:
             logger.warning("LLM plan decomposition failed: %s. Using default.", e)
-            return self._default_plan(goal)
+            return self._check_temporal_safety(self._default_plan(goal))
 
     def _default_plan(self, goal: str) -> LongHorizonPlan:
         """Sensible default plan for common biobank analyses."""
@@ -236,6 +266,23 @@ Respond with ONLY the JSON array."""
                 PlanStep(id="s2", skill="prevalence", args={"top_n": 10}, description="Check disease prevalence", depends_on=["s1"]),
             ],
         )
+
+    def _check_temporal_safety(self, plan: LongHorizonPlan) -> LongHorizonPlan:
+        """Check temporal safety rules and log warnings for violations.
+
+        Does NOT block execution — only logs warnings so the agent can
+        self-correct or the user is informed of ordering risks.
+        """
+        try:
+            from .guardrails import TemporalSafetyChecker
+            checker = TemporalSafetyChecker()
+            plan_steps = [{"skill": s.skill, "id": s.id} for s in plan.steps]
+            violations = checker.check_plan(plan_steps)
+            for v in violations:
+                logger.warning("Temporal safety: %s", v.description)
+        except Exception as e:
+            logger.debug("Temporal safety check skipped: %s", e)
+        return plan
 
 PLAN_TEMPLATE = """\
 # Plan: {title}

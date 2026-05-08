@@ -4,12 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "biobank-agent"
-version = "2.0.0"
+version = "2.1.0"
 description = "Autonomous scientific discovery agent for population-scale biobank research"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [{name = "CHEN Pengan", email = "chenpengan@link.cuhk.edu.hk"}]
+
+[project.urls]
+Homepage = "https://github.com/cpa2001/BioBank-Agent"
+Repository = "https://github.com/cpa2001/BioBank-Agent"
+Documentation = "https://github.com/cpa2001/BioBank-Agent/tree/main/docs"
 
 dependencies = [
     # Data
@@ -51,10 +56,33 @@ gpu = [
     "shap>=0.44",
     "umap-learn>=0.5",
 ]
+verify = [
+    "z3-solver>=4.12",
+]
+graphpop = [
+    "neo4j>=5.0",
+]
+research = [
+    "inferactively-pymdp>=0.1",
+]
+literature = [
+    "paper-qa>=5.0",
+]
+structured = [
+    "instructor>=1.0",
+]
+dev = [
+    "coverage>=7.6",
+]
 all = [
     "catboost>=1.2",
     "shap>=0.44",
     "umap-learn>=0.5",
+    "z3-solver>=4.12",
+    "neo4j>=5.0",
+    "paper-qa>=5.0",
+    "instructor>=1.0",
+    "coverage>=7.6",
 ]
 
 [project.scripts]
@@ -65,3 +93,19 @@ include = ["biobank_agent*"]
 
 [tool.pytest.ini_options]
 markers = ["integration: Integration tests requiring real LLM API"]
+
+[tool.coverage.run]
+source = ["biobank_agent"]
+branch = true
+omit = [
+    "biobank_agent/__init__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "pragma: no cover",
+]

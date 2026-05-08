@@ -52,6 +52,9 @@ build predictive models, and generate publication-quality reports.
 5. Use the `think` tool for multi-step reasoning before complex analyses.
 6. All figures must be publication-quality (Nature style: Arial, 300 dpi, no top/right spines).
 7. When reporting results, use precise scientific language suitable for a Nature paper.
+8. For high-risk multi-step plans or publication-facing reports, consider local
+   external review skills (`codex_plan`, `claude_plan`, `codex_check_execution`,
+   `claude_check_execution`) after checking `external_agent_status`.
 
 ## Current session state
 {session_state}
@@ -114,6 +117,25 @@ class Agent:
         self.tool_learner = ToolLearner(memory=self.memory)
         self.multimodal_grounder = SimpleMultimodalGrounder()
 
+        # Difficulty estimator (DAAO: learned routing with heuristic fallback)
+        from .difficulty import DifficultyEstimator
+        self.difficulty_estimator = DifficultyEstimator(
+            history_path=settings.memory_dir / "difficulty",
+        )
+
+        # Reproducibility harness (NeuroClaw pattern: SHA-256 checkpoints)
+        from .reproducibility import ReproducibilityHarness
+        self.reproducibility = ReproducibilityHarness(
+            checkpoint_dir=settings.reports_dir / "checkpoints",
+        )
+
+        # StudySpec compiler (schema-gated execution boundary)
+        # Uses heuristic-only until planner integration consumes the spec.
+        # Switch to llm=self.llm when planner.decompose(spec=...) is wired in.
+        from .study_spec import StudySpecCompiler
+        self._study_spec_compiler = StudySpecCompiler(llm=None)
+        self._current_study_spec = None  # Set per-run if compilation succeeds
+
         # Skills
         autodiscover_skills()
         discover_custom_skills(settings.custom_skills_dir)
@@ -123,6 +145,7 @@ class Agent:
         # Conversation
         self.messages: list[dict] = []
         self._active_query_id: str | None = None
+        self._last_orchestration_strategy: str = "single"
 
         # Background review
         self._review_lock = threading.Lock()
@@ -301,6 +324,17 @@ class Agent:
         # Compute report_dir once per run() call for consistency
         _report_dir = self.settings.reports_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
         _report_dir.mkdir(parents=True, exist_ok=True)
+
+        # Attempt StudySpec compilation (schema-gated execution boundary).
+        # On success, the spec constrains planning; on failure, proceed untyped.
+        self._current_study_spec = None
+        try:
+            spec = self._study_spec_compiler.compile(user_query)
+            self._current_study_spec = spec
+            logger.info("StudySpec compiled: design=%s, modalities=%s, budget=%d",
+                        spec.design.value, [m.value for m in spec.modalities], spec.tool_budget)
+        except Exception as e:
+            logger.debug("StudySpec compilation skipped: %s", e)
         turn_orchestrations: list[dict] = []
 
         for round_n in range(self.settings.max_tool_rounds):
@@ -328,6 +362,8 @@ class Agent:
                     force_strategy=force_strategy,
                 )
                 response = orchestration_result
+                # Track actual strategy for difficulty estimator
+                self._last_orchestration_strategy = orchestration_result.debate_trace.get("strategy", "single") if orchestration_result and orchestration_result.debate_trace else "ensemble"
             else:
                 llm_raw = self.llm.chat(
                     messages=all_messages,
@@ -368,7 +404,8 @@ class Agent:
             if not response.has_tool_calls:
                 self.messages.append({"role": "assistant", "content": response.text})
                 try:
-                    if orchestration_result:
+                    # Normal routing/wrapping always yields an orchestration result here.
+                    if orchestration_result:  # pragma: no branch
                         self._record_orchestration_graph(orchestration_result)
                 except Exception:
                     pass
@@ -501,6 +538,18 @@ class Agent:
                     except Exception:
                         pass  # non-critical
 
+                # Reproducibility: checkpoint skill execution
+                try:
+                    self.reproducibility.create_audit_log(
+                        skill_name=tc.name,
+                        inputs=tc.args,
+                        outputs=result if isinstance(result, dict) else {"raw": str(result)[:500]},
+                        duration_ms=elapsed * 1000 if isinstance(elapsed, (int, float)) else 0.0,
+                        status="success" if not is_error else "failed",
+                    )
+                except Exception:
+                    pass  # non-critical
+
                 # Record — only figures produced by THIS tool call
                 new_figs = [str(p) for p in self.state.figures[figs_before:]]
                 ts = datetime.now().isoformat()
@@ -555,6 +604,23 @@ class Agent:
 
     def _post_run(self, user_query: str) -> None:
         """Post-run housekeeping: index session, trigger background review."""
+        # Difficulty estimator: record query-level outcome (once per query, not per tool call)
+        try:
+            # Determine if this query had any errors
+            recent_records = self.state.records[-10:]
+            query_succeeded = not any(
+                isinstance(r.key_results, dict) and "error" in r.key_results
+                for r in recent_records
+                if r.timestamp >= (datetime.now().isoformat()[:10])  # today only
+            )
+            self.difficulty_estimator.record_outcome(
+                query=user_query,
+                strategy_used=self._last_orchestration_strategy,
+                succeeded=query_succeeded,
+            )
+        except Exception:
+            pass  # non-critical
+
         # Index this turn for cross-session recall
         try:
             session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -842,7 +908,8 @@ class Agent:
             if count >= 2:
                 name = "_".join(trigram)
                 if name not in self.memory.list_pipelines():
-                    for i in range(len(skills) - 2):
+                    # The trigram was counted from this same skills list, so one window must match.
+                    for i in range(len(skills) - 2):  # pragma: no branch
                         if tuple(skills[i : i + 3]) == trigram:
                             steps = [
                                 {"skill": r.skill, "args": r.args}

@@ -28,6 +28,11 @@ def _escape_path(path: Path) -> str:
     return str(path).replace("'", "''")
 
 
+def _quote_identifier(name: str) -> str:
+    """Quote a DuckDB identifier such as a view name."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
 # Map category name → CSV filename
 CATEGORY_CSVS = {
     "Population_Characteristics": "ukb672073_Population_Characteristics.csv",
@@ -315,8 +320,10 @@ def register_extended_parquet(
     """Register an extended parquet file as a DuckDB view in the DataManager."""
     if not parquet_path.exists():
         raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
+    safe_path = _escape_path(parquet_path)
+    safe_view = _quote_identifier(view_name)
     dm.conn.execute(
-        f"CREATE VIEW IF NOT EXISTS {view_name} AS "
-        f"SELECT * FROM read_parquet('{parquet_path}')"
+        f"CREATE VIEW IF NOT EXISTS {safe_view} AS "
+        f"SELECT * FROM read_parquet('{safe_path}')"
     )
     logger.info("Registered extended view '%s' from %s", view_name, parquet_path)

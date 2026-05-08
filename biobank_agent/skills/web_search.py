@@ -35,14 +35,16 @@ def _search_duckduckgo(query: str, max_results: int) -> list[dict]:
 
     results: list[dict] = []
     try:
-        ddgs = DDGS()
-        raw = ddgs.text(query, max_results=max_results)
-        for r in raw:
-            results.append({
-                "title": r.get("title", ""),
-                "url": r.get("href", r.get("link", "")),
-                "snippet": r.get("body", r.get("snippet", "")),
-            })
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            ddgs = DDGS()
+            raw = ddgs.text(query, max_results=max_results)
+            for r in raw:
+                results.append({
+                    "title": r.get("title", ""),
+                    "url": r.get("href", r.get("link", "")),
+                    "snippet": r.get("body", r.get("snippet", "")),
+                })
     except Exception as exc:
         # DuckDuckGo occasionally rate-limits; return whatever we got so far
         logger.warning("DuckDuckGo search interrupted: %s", exc)

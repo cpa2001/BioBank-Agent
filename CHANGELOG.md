@@ -2,6 +2,41 @@
 
 All notable changes to Biobank Agent are documented here.
 
+## [2.1.0] — 2026-05-08
+
+### Added
+- **Schema-Gated Execution**: `StudySpecCompiler` compiles natural language queries into typed `StudySpec` before execution (Pydantic v2)
+- **Verifier Mesh**: Multi-strategy verification — URL/DOI resolution, numeric range checking (UKB bounds), NLI claim-evidence entailment
+- **Evidence Lattice**: Claim-level provenance tracking with `EvidenceNode`, `ClaimRecord`, confidence computation (supports/refutes weighting)
+- **Formal Verification**: Z3 SMT solver integration for constraint satisfaction checking (optional dependency)
+- **Constants Module**: Single source of truth for UKB domain constants (502,411 participants, age 37–73, etc.)
+- **Difficulty-Aware Routing**: DAAO-inspired learned routing for task complexity
+- **Reproducibility Harness**: NeuroClaw-inspired SHA-256 checkpoint verification
+- **Progressive Disclosure**: 4-layer result presentation (headline → summary → detail → raw)
+- **Structured Outputs**: Optional Instructor integration for Pydantic-enforced LLM outputs
+- **Literature QA Skill**: PaperQA2-backed citation-first literature search (optional dependency)
+- **External Agents**: Safe subprocess runner for `codex` and `claude` CLI tools
+- **Project Documentation Skill**: `project_doc` lists, searches, and reads curated repository Markdown for agent-visible data, guide, architecture, and plugin docs
+- **GraphPop MCP Client**: 21-tool registry for population-genomics graph queries (optional)
+- **Validators Module**: UKB-specific domain validation (field ranges, ICD-10 format, cohort bounds)
+- **Temporal Safety Rules**: LTL-inspired precedence checks in planner decomposition
+- 49 new test files (1074 total tests passing)
+
+### Changed
+- Planner accepts optional `StudySpec` for skill constraint and tool budget enforcement
+- Verdict engine integrates Verifier Mesh as Phase 0.5 after formal checks
+- Memory system extended with evidence recording methods
+- 8-tier memory → action graph now links to Evidence Lattice
+- Documentation consolidated: 23 files → 13 files across 6 logical directories
+
+### Fixed
+- Constant mismatch (502,536 vs 502,411) resolved via authoritative `constants.py`
+- Non-atomic file writes in Evidence Lattice (now uses tmp + rename)
+- Duplicate verification issues from overlapping numeric checks (partitioned responsibility)
+- LLM `model_name` AttributeError (uses `getattr(llm, "model", "gpt-4")`)
+- Template shallow-copy mutation (now uses `copy.deepcopy()`)
+- asyncio deprecated `get_event_loop()` replaced with `get_running_loop()` idiom
+
 ## [2.0.0] — 2026-04-22
 
 ### Added

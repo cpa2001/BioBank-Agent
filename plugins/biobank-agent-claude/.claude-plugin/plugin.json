@@ -1,0 +1,8 @@
+{
+  "name": "biobank-agent",
+  "version": "0.1.0",
+  "description": "Use Biobank Agent from Claude Code for planning, test selection, execution review, and report-quality checks.",
+  "author": {
+    "name": "CHEN Pengan"
+  }
+}

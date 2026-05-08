@@ -1,6 +1,7 @@
 """Test automated scientific discovery pipeline."""
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -90,6 +91,25 @@ class TestDiscoverStandardDepth:
         assert result["phewas"]["n_significant"] == 12
         assert "literature_searched" not in result["steps_completed"]
 
+    @patch("biobank_agent.skills.gwas_proxy.gwas_proxy", side_effect=RuntimeError("GWAS offline"))
+    @patch("biobank_agent.skills.feature_importance.feature_importance")
+    @patch("biobank_agent.skills.train_model.train_model")
+    def test_standard_records_phewas_failure(self, mock_train, mock_fi, mock_gwas):
+        """PheWAS errors should be captured without aborting synthesis."""
+        from biobank_agent.skills.discovery import discover
+
+        ctx = MagicMock()
+        ctx.dm = MagicMock(spec=[])
+        mock_train.return_value = {"mean_auc": 0.82, "n_features": 20}
+        mock_fi.return_value = {"top_features": ["BMI"]}
+
+        with patch("biobank_agent.skills.discovery._run_cohort") as mock_cohort:
+            mock_cohort.return_value = {"n_cases": 3000, "n_controls": 9000}
+            result = discover("E11", discovery_depth="standard", ctx=ctx)
+
+        assert result["phewas"]["error"] == "GWAS offline"
+        assert "phewas_done" not in result["steps_completed"]
+
 
 class TestDiscoverDeepDepth:
     """Test 'deep' depth — adds literature search."""
@@ -123,6 +143,50 @@ class TestDiscoverDeepDepth:
         assert "literature_searched" in result["steps_completed"]
         assert isinstance(result["literature"], list)
         assert len(result["literature"]) > 0
+
+    @patch("biobank_agent.skills.web_search.web_search", side_effect=RuntimeError("search offline"))
+    @patch("biobank_agent.skills.gwas_proxy.gwas_proxy")
+    @patch("biobank_agent.skills.feature_importance.feature_importance")
+    @patch("biobank_agent.skills.train_model.train_model")
+    def test_deep_records_literature_failure(self, mock_train, mock_fi, mock_gwas, mock_web):
+        """Deep discovery treats literature search as non-critical."""
+        from biobank_agent.skills.discovery import discover
+
+        ctx = MagicMock()
+        ctx.dm = MagicMock(spec=[])
+        mock_train.return_value = {"mean_auc": 0.9, "n_features": 25}
+        mock_fi.return_value = {"top_features": ["HbA1c"]}
+        mock_gwas.return_value = {"n_significant": 5, "top_associations": []}
+
+        with patch("biobank_agent.skills.discovery._run_cohort") as mock_cohort:
+            mock_cohort.return_value = {"n_cases": 4000, "n_controls": 8000}
+            result = discover("E11", discovery_depth="deep", ctx=ctx)
+
+        assert result["literature"]["note"] == "Web search unavailable"
+        assert "search offline" in result["literature"]["error"]
+
+    @patch("biobank_agent.skills.web_search.web_search")
+    @patch("biobank_agent.skills.gwas_proxy.gwas_proxy")
+    @patch("biobank_agent.skills.feature_importance.feature_importance")
+    @patch("biobank_agent.skills.train_model.train_model")
+    def test_registry_ref_path_and_figures_are_aggregated(self, mock_train, mock_fi, mock_gwas, mock_web):
+        """Discovery can call a registry-backed cohort builder and collect figures."""
+        from biobank_agent.skills.discovery import discover
+
+        registry_ref = MagicMock()
+        registry_ref.execute.return_value = {"n_cases": 12, "n_controls": 48}
+        ctx = SimpleNamespace(dm=SimpleNamespace(registry_ref=registry_ref))
+        mock_train.return_value = {"auc": 0.91, "n_features": 10, "figures": ["model.png"]}
+        mock_fi.return_value = {"top_features": ["LDL"], "figures": ["features.png"]}
+        mock_gwas.return_value = {"n_significant": 2, "top_associations": [], "figures": ["phewas.png"]}
+        mock_web.return_value = {"results": []}
+
+        result = discover("I25", discovery_depth="deep", model_type="lightgbm", ctx=ctx)
+
+        registry_ref.execute.assert_called_once_with("cohort_summary", {"icd10_code": "I25"}, ctx=ctx)
+        assert result["cohort"] == {"n_cases": 12, "n_controls": 48}
+        assert result["model"]["auc"] == 0.91
+        assert result["figures"] == ["model.png", "features.png", "phewas.png"]
 
 
 class TestDiscoverFailureHandling:
@@ -210,6 +274,50 @@ class TestSynthesizeFindings:
         assert "cases" not in summary
         assert "AUC" not in summary
         assert "E11" in summary
+
+    def test_synthesis_handles_non_numeric_auc_and_literature(self):
+        """Non-numeric model metrics and literature counts should still summarize."""
+        from biobank_agent.skills.discovery import _synthesize_findings
+
+        results = {
+            "cohort": {"n_cases": 1, "n_controls": 4},
+            "model": {"type": "xgboost", "auc": "pending"},
+            "phewas": {"n_significant": 0},
+            "literature": [{"title": "A"}, {"title": "B"}],
+        }
+
+        summary = _synthesize_findings("E11", results, [])
+
+        assert "xgboost trained" in summary
+        assert "2 relevant papers" in summary
+
+        zero_auc = _synthesize_findings("E11", {"model": {"type": "xgboost", "auc": 0}}, [])
+        assert "AUC" not in zero_auc
+
+    def test_run_cohort_stores_direct_data_layer_result(self, monkeypatch):
+        """The direct data-layer cohort path stores the dataframe in session state."""
+        from biobank_agent.skills.discovery import _run_cohort
+
+        class FakeLabels:
+            def sum(self):
+                return 2
+
+        class FakeFrame:
+            def __getitem__(self, key):
+                assert key == "label"
+                return FakeLabels()
+
+            def __len__(self):
+                return 5
+
+        frame = FakeFrame()
+        monkeypatch.setattr("biobank_agent.data.cohort.build_cohort", lambda code, dm: frame)
+        ctx = SimpleNamespace(dm=object(), state=SimpleNamespace(cohorts={}))
+
+        result = _run_cohort("E11", ctx)
+
+        assert result == {"n_cases": 2, "n_controls": 3, "n_total": 5}
+        assert ctx.state.cohorts["E11"] is frame
 
 
 if __name__ == "__main__":

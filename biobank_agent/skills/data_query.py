@@ -22,7 +22,23 @@ from biobank_agent.registry import skill
     },
     required=["query"],
 )
-def field_search(query: str, limit: int = 20, *, ctx=None) -> dict:
+def field_search(query: str = "", limit: int = 20, *, ctx=None) -> dict:
+    query = str(query or "").strip()
+    if not query:
+        return {
+            "query": query,
+            "results": [],
+            "total": 0,
+            "error": "Missing query",
+            "message": "Provide a field ID or catalogue keyword, for example '30740' or 'glucose'.",
+        }
+    if ctx is None or not hasattr(ctx, "catalog"):
+        return {
+            "query": query,
+            "results": [],
+            "total": 0,
+            "error": "Field catalogue unavailable",
+        }
     catalog = ctx.catalog
 
     # Check if query is a field ID
@@ -48,7 +64,8 @@ def field_search(query: str, limit: int = 20, *, ctx=None) -> dict:
     for r in results:
         cat_name = catalog.category_name(r.get("category_id", ""))
         # Check if field is in parquet (fast) or CSV (slow)
-        source = ctx.dm.field_source(r["field_id"])
+        dm = getattr(ctx, "dm", None)
+        source = dm.field_source(r["field_id"]) if dm is not None else "unknown"
         formatted.append({
             "field_id": r["field_id"],
             "title": r["title"],

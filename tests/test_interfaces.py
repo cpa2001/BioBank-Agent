@@ -40,6 +40,9 @@ class TestInterfaceImports:
         models = client.available_models()
         assert isinstance(models, list)
         assert len(models) > 0
+        assert client.health_check() is False
+        with pytest.raises(NotImplementedError, match="FM embedding server not yet configured"):
+            client.encode(data=None, modality="genomic")
 
 
 class TestPlatformDetection:

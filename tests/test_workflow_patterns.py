@@ -96,6 +96,10 @@ class TestAnalyzeSkillSequences:
 
 class TestDetectBottlenecks:
     """Test resource bottleneck detection."""
+
+    def test_detect_empty_bottlenecks(self):
+        """Empty execution history has no bottlenecks or patterns."""
+        assert _detect_resource_bottlenecks([]) == {"bottlenecks": [], "patterns": []}
     
     def test_detect_memory_bottlenecks(self):
         """Test detection of memory issues."""
@@ -151,6 +155,63 @@ class TestDetectBottlenecks:
         # Should detect that higher values correlate with failure
         assert len(patterns) > 0 or len(result["bottlenecks"]) > 0
 
+    def test_parameter_patterns_skip_all_success_and_lower_failure_values(self):
+        """Parameter pattern mining should ignore non-risky or all-success values."""
+        records = [
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="train_model",
+                args={"n_folds": 5, "sample_size": 100, "stable": 1},
+                key_results={"auc": 0.8},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="train_model",
+                args={"n_folds": 6, "sample_size": 50, "stable": 2},
+                key_results={"auc": 0.81},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="train_model",
+                args={"n_folds": 2, "sample_size": 10},
+                key_results={},
+                figure_paths=[],
+                interpretation="Error: invalid split",
+            ),
+        ]
+
+        result = _detect_resource_bottlenecks(records)
+
+        assert result["parameter_patterns"] == []
+
+    def test_detect_timeout_bottlenecks(self):
+        """Timeout messages should be reported separately from memory issues."""
+        records = [
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="phewas",
+                args={"max_tests": 100000},
+                key_results={},
+                figure_paths=[],
+                interpretation="Error: timeout while scanning phenotypes",
+            )
+        ]
+
+        result = _detect_resource_bottlenecks(records)
+
+        assert result["bottlenecks"] == [
+            {
+                "type": "timeout",
+                "skill": "phewas",
+                "occurrences": 1,
+                "recommendation": "Parallelize computation or reduce dataset size",
+            }
+        ]
+
 
 class TestPredictCompatibility:
     """Test skill compatibility prediction."""
@@ -186,6 +247,75 @@ class TestPredictCompatibility:
         chains = result["compatible_chains"]
         # Should find chains with common numeric types
         assert isinstance(chains, list)
+
+    def test_predict_string_dict_and_list_compatibility(self):
+        """Compatibility inference should include non-numeric output and input types."""
+        records = [
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="extract_fields",
+                args={},
+                key_results={"summary": "text", "fields": ["30750"], "metadata": {"bank": "UKB"}},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="build_report",
+                args={"summary": "text", "metadata": {"bank": "UKB"}},
+                key_results={"path": "report.md"},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="archive",
+                args={"path": "report.md"},
+                key_results={},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+        ]
+
+        result = _predict_skill_compatibility(records)
+
+        first_chain = result["compatible_chains"][0]
+        assert first_chain["from"] == "extract_fields"
+        assert first_chain["to"] == "build_report"
+        assert set(first_chain["common_types"]) == {"string", "dict"}
+
+    def test_predict_compatibility_skips_unmatched_type_pairs(self):
+        """Pairs with no shared output/input type should be excluded."""
+        records = [
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="numeric_source",
+                args={"items": ["input"]},
+                key_results={"n": 1, "opaque": object()},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="dict_sink",
+                args={"config": {"x": 1}},
+                key_results={"done": True},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="list_source",
+                args={"name": "abc"},
+                key_results={"items": ["a"]},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+        ]
+
+        result = _predict_skill_compatibility(records)
+
+        assert result["compatible_chains"] == []
 
 
 class TestAnalyzeWorkflowPatternsSkill:
@@ -324,8 +454,101 @@ class TestSuggestOptimalPipeline:
         
         assert result["status"] == "success"
         assert "pipeline" in result
+
+    def test_suggest_low_reliability(self):
+        """If all observed skills fail, no pipeline should be recommended."""
+        records = [
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="train_model",
+                args={},
+                key_results={},
+                figure_paths=[],
+                interpretation="Error: failed",
+            ),
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="train_model",
+                args={},
+                key_results={},
+                figure_paths=[],
+                interpretation="Error: failed again",
+            ),
+        ]
+
+        mock_ctx = MagicMock()
+        mock_ctx.state.records = records
+        mock_ctx.state.memory = MagicMock(_data={"model_configs": {}})
+
+        result = suggest_optimal_pipeline(goal="disease_prediction", ctx=mock_ctx)
+
+        assert result["status"] == "low_reliability"
+        assert "No highly reliable skills" in result["message"]
+
+    def test_suggest_includes_saved_model_config(self):
+        """Long-term memory configs should enrich matching pipeline steps."""
+        records = [
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="train_model",
+                args={},
+                key_results={},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="train_model",
+                args={},
+                key_results={},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+        ]
+
+        mock_ctx = MagicMock()
+        mock_ctx.state.records = records
+        mock_ctx.state.memory = MagicMock(
+            _data={"model_configs": {"train_model:E11": {"config": {"n_folds": 3}}}}
+        )
+
+        result = suggest_optimal_pipeline(goal="disease_prediction", ctx=mock_ctx)
+
+        assert result["status"] == "success"
+        assert result["pipeline"] == [
+            {"skill": "train_model", "success_rate": 100.0, "suggested_config": {"n_folds": 3}}
+        ]
         assert result["total_steps"] <= 5
         assert "estimated_success_rate" in result
+
+    def test_suggest_ignores_nonmatching_model_configs(self):
+        records = [
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="train_model",
+                args={},
+                key_results={},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+            AnalysisRecord(
+                timestamp=datetime.now().isoformat(),
+                skill="train_model",
+                args={},
+                key_results={},
+                figure_paths=[],
+                interpretation="Success",
+            ),
+        ]
+        mock_ctx = MagicMock()
+        mock_ctx.state.records = records
+        mock_ctx.state.memory = MagicMock(
+            _data={"model_configs": {"calibration:I21": {"config": {"bins": 10}}}}
+        )
+
+        result = suggest_optimal_pipeline(goal="disease_prediction", ctx=mock_ctx)
+
+        assert result["pipeline"] == [{"skill": "train_model", "success_rate": 100.0}]
     
     def test_suggest_optimal_pipeline_survival_analysis(self):
         """Test pipeline suggestion for survival analysis."""

@@ -109,6 +109,12 @@ class TestPrevalenceSkill:
         result = reg.execute("prevalence", {"top_n": 3}, ctx=synthetic_ctx)
         assert result["total_subjects"] == 200
 
+    def test_chapter_filter_parameterizes_prefix(self, synthetic_ctx):
+        reg = get_registry()
+        result = reg.execute("prevalence", {"top_n": 5, "chapter_filter": "e"}, ctx=synthetic_ctx)
+        assert result["top_diseases"]
+        assert all(row["code"].startswith("E") for row in result["top_diseases"])
+
 
 class TestThinkSkill:
     def test_runs_without_error(self, synthetic_ctx):

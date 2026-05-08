@@ -50,6 +50,20 @@ plans/
 custom_skills/
 brainstorm/
 data_insights/
+docs/deep_research/
+
+# Claude Code & Agent session data. Keep repo-local plugin manifests tracked.
+.agents/*
+!.agents/plugins/
+!.agents/plugins/marketplace.json
+.claude-plugin/*
+!.claude-plugin/marketplace.json
+.claude/
+plugins/*
+!plugins/biobank-agent/
+!plugins/biobank-agent/**
+!plugins/biobank-agent-claude/
+!plugins/biobank-agent-claude/**
 
 # Serialized models
 *.pkl
@@ -77,3 +91,4 @@ PHASE_*.md
 PHASE_*.txt
 README_AUDIT*.md
 IMPLEMENTATION_*.md
+docs/deep_research/

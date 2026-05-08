@@ -50,12 +50,14 @@ def _analyze_skill_sequences(records: list) -> Dict[str, Any]:
     
     success_rates = {}
     for skill, counts in skill_success.items():
-        if counts["total"] > 0:
+        # Items only exist after a record has incremented total.
+        if counts["total"] > 0:  # pragma: no branch
             success_rates[skill] = round(counts["success"] / counts["total"] * 100, 1)
     
     # Generate recommendations
     recommendations = []
-    if bigram_freq:
+    # The early return above guarantees at least two records and therefore a bigram.
+    if bigram_freq:  # pragma: no branch
         top_pattern = bigram_freq[0]
         recommendations.append(
             f"Top skill sequence: {top_pattern[0][0]} → {top_pattern[0][1]} "

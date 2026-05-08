@@ -349,6 +349,80 @@ def _extract_key_findings(records) -> list[str]:
     return findings[:5] if findings else ["Analysis completed -- see details below"]
 
 
+def _extract_references(records) -> list[str]:
+    """Extract literature references from paper/research skill records."""
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    def add_ref(text: str) -> None:
+        clean = " ".join(str(text).split())
+        if clean and clean not in seen:
+            seen.add(clean)
+            refs.append(clean)
+
+    for rec in records:
+        results = rec.key_results or {}
+        if rec.skill in {"fetch_paper", "read_paper", "literature_qa"}:
+            title = results.get("title") or results.get("paper_title")
+            doi = results.get("doi")
+            url = results.get("url") or results.get("source_url")
+            authors = results.get("authors", "")
+            if isinstance(authors, list):
+                authors = ", ".join(str(a) for a in authors[:3])
+                if len(results.get("authors", []) or []) > 3:
+                    authors += " et al."
+            if title:
+                suffix = f" DOI: {doi}." if doi else (f" {url}" if url else "")
+                prefix = f"{authors}. " if authors else ""
+                add_ref(f"{prefix}{title}.{suffix}")
+
+        sources = results.get("sources")
+        if isinstance(sources, list):
+            for source in sources[:10]:
+                if isinstance(source, dict):
+                    title = source.get("title") or source.get("name")
+                    url = source.get("url")
+                    doi = source.get("doi")
+                    if title:
+                        suffix_parts = []
+                        if doi:
+                            suffix_parts.append(f"DOI: {doi}.")
+                        if url:
+                            suffix_parts.append(str(url))
+                        suffix = " ".join(suffix_parts)
+                        add_ref(f"{title}. {suffix}".strip())
+                elif isinstance(source, str):
+                    add_ref(source)
+
+    return refs
+
+
+def _governance_text(ctx, records) -> str:
+    """Build reproducibility and governance text grounded in session state."""
+    bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
+    if not isinstance(bank_name, str):
+        bank_name = "Biobank"
+    caveats = getattr(ctx.settings, "biobank_caveats", "") if ctx and hasattr(ctx, "settings") else ""
+    if not isinstance(caveats, str):
+        caveats = ""
+    n_records = len(records)
+    n_prov = len(getattr(ctx.state, "provenances", []) or []) if ctx and hasattr(ctx, "state") else 0
+    caveat_sentence = f" Cohort-level caveat: {caveats}." if caveats else ""
+    provenance_sentence = (
+        f"The session contains {n_records} analysis record(s)"
+        + (f" and {n_prov} provenance hash record(s)" if n_prov else "")
+        + "."
+    )
+    return (
+        f"Analyses were run against the configured {bank_name} data layer and should be "
+        "interpreted as aggregate, observational biobank evidence."
+        f"{caveat_sentence} {provenance_sentence} "
+        "Small-cell outputs require suppression or aggregation before external release. "
+        "Associations and prediction results are not causal effect estimates unless a "
+        "target-trial or external causal-validation record is explicitly reported."
+    )
+
+
 def _dedupe_records(records) -> list:
     """Collapse consecutive duplicate non-think calls (same skill + args)."""
     deduped = []
@@ -364,6 +438,23 @@ def _dedupe_records(records) -> list:
         else:
             deduped.append(rec)
     return deduped
+
+
+_EVIDENCE_GATHERING_SKILLS = {
+    "think",
+    "web_search",
+    "web_fetch",
+    "deep_research",
+    "fetch_paper",
+    "read_paper",
+    "read_pdf",
+    "literature_qa",
+}
+
+
+def _analysis_records(records) -> list:
+    """Records that should appear as numbered analytical report sections."""
+    return [rec for rec in records if getattr(rec, "skill", "") not in _EVIDENCE_GATHERING_SKILLS]
 
 
 def _report_records(ctx) -> list:
@@ -424,7 +515,7 @@ def generate_report(
         "markdown": str(md_path),
         "html": str(html_path) if html_path else None,
         "format": format,
-        "n_sections": len(_report_records(ctx)),
+        "n_sections": len(_analysis_records(_report_records(ctx))),
         "n_figures": len(ctx.state.figures),
     }
 
@@ -435,6 +526,7 @@ def generate_report(
 def _build_report_sections(title: str, ctx) -> list[str]:
     """Build technical report with executive summary and Key Findings."""
     records = _report_records(ctx)
+    analysis_records = _analysis_records(records)
     sections = []
 
     sections.append(REPORT_HEADER.format(
@@ -451,12 +543,12 @@ def _build_report_sections(title: str, ctx) -> list[str]:
 
     # Executive Summary
     if records:
-        n_analyses = len([r for r in records if r.skill != "think"])
+        n_analyses = len(analysis_records)
         n_figs = len(ctx.state.figures)
         n_cohorts = len(ctx.state.cohorts)
         n_models = len(ctx.state.models)
         bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
-        parts = [f"This report summarizes {n_analyses} analyses performed on the {bank_name} dataset."]
+        parts = [f"This report summarizes {n_analyses} computational analysis step(s) performed on the {bank_name} dataset."]
         if n_cohorts:
             parts.append(f"{n_cohorts} disease cohort(s) were constructed.")
         if n_models:
@@ -467,9 +559,7 @@ def _build_report_sections(title: str, ctx) -> list[str]:
 
     # Analysis sections with interpretive text
     section_n = 0
-    for rec in records:
-        if rec.skill == "think":
-            continue
+    for rec in analysis_records:
         section_n += 1
 
         skill_title = rec.skill.replace("_", " ").title()
@@ -528,14 +618,31 @@ def _build_report_sections(title: str, ctx) -> list[str]:
         "Statistical tests used two-sided P-values with significance threshold "
         "\u03b1 = 0.05. Multiple testing correction applied via FDR (Benjamini-Hochberg) "
         "where indicated. Figures follow Nature journal guidelines "
-        "(Arial 7 pt, 300 DPI, Okabe-Ito colour-blind safe palette). "
-        "[CITATION_NEEDED]\n\n"
+        "(Arial 7 pt, 300 DPI, Okabe-Ito colour-blind safe palette).\n\n"
     )
 
-    # References placeholder for paper format
+    sections.append("## Reproducibility and Governance\n\n")
+    sections.append(_governance_text(ctx, records) + "\n\n")
+    sections.append(
+        "Data availability: individual-level biobank data remain governed by "
+        "the applicable data access agreement and should not be redistributed "
+        "from this generated report. Derived aggregate tables, model settings, "
+        "cohort definitions and code provenance should be archived with any "
+        "external manuscript or internal analysis handoff.\n\n"
+    )
+
     sections.append("## References\n\n")
-    sections.append("*[References to be added. Use Nature citation style: "
-                    "Author, A. B. et al. Title. *Journal* **vol**, pages (year).]*\n\n")
+    refs = _extract_references(records)
+    if refs:
+        for i, ref in enumerate(refs, 1):
+            sections.append(f"{i}. {ref}\n")
+        sections.append("\n")
+    else:
+        sections.append(
+            "No external literature records were attached to this session. "
+            "Add `fetch_paper`, `read_paper`, or `deep_research` records before "
+            "treating this report as submission-ready.\n\n"
+        )
 
     return sections
 
@@ -543,6 +650,7 @@ def _build_report_sections(title: str, ctx) -> list[str]:
 def _build_paper_sections(title: str, ctx) -> list[str]:
     """Build IMRaD paper draft."""
     records = _report_records(ctx)
+    analysis_records = _analysis_records(records)
     sections = []
     bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
     bank_desc = ctx.settings.biobank_description if ctx and hasattr(ctx, "settings") else "a large-scale prospective cohort study"
@@ -618,9 +726,9 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
     ))
 
     results_parts = []
-    for rec in records:
+    for rec in analysis_records:
         interp = _interpret_skill(rec)
-        if interp:
+        if interp:  # pragma: no branch - analysis records always receive generic fallback text.
             results_parts.append(interp)
     sections.append(PAPER_RESULTS.format(
         results="\n\n".join(results_parts) if results_parts else "Results pending.",
@@ -646,6 +754,27 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
         ),
     ))
 
+    sections.append("## Reproducibility, Governance and Data Availability\n\n")
+    sections.append(_governance_text(ctx, records) + "\n\n")
+    sections.append(
+        "The analysis code, model configuration, cohort definitions and generated "
+        "figures should be archived with the final manuscript. Individual-level "
+        "biobank data remain subject to the relevant data access agreement and are "
+        "not redistributed by this report.\n\n"
+    )
+
+    refs = _extract_references(records)
+    sections.append("## References\n\n")
+    if refs:
+        for i, ref in enumerate(refs, 1):
+            sections.append(f"{i}. {ref}\n")
+        sections.append("\n")
+    else:
+        sections.append(
+            "External literature records were not attached in this session; citation "
+            "curation is required before journal submission.\n\n"
+        )
+
     _add_figures_section(sections, ctx)
     return sections
 
@@ -653,6 +782,7 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
 def _build_brief_sections(title: str, ctx) -> list[str]:
     """Build a brief summary report."""
     records = _report_records(ctx)
+    analysis_records = _analysis_records(records)
     sections = []
     sections.append(f"# {title}\n\n")
     sections.append(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
@@ -662,9 +792,7 @@ def _build_brief_sections(title: str, ctx) -> list[str]:
         sections.append(f"- {f}\n")
     sections.append("\n")
 
-    for rec in records:
-        if rec.skill == "think":
-            continue
+    for rec in analysis_records:
         interp = _interpret_skill(rec)
         if interp:
             sections.append(f"**{rec.skill}:** {interp}\n\n")
@@ -725,7 +853,9 @@ def _add_cohorts_section(sections: list[str], ctx) -> None:
             n_controls = n_total - n_cases
         else:
             n_cases, n_controls = "N/A", "N/A"
-        sections.append(f"| {name} | {n_total:,} | {n_cases:,} | {n_controls:,} |\n")
+        n_cases_str = f"{n_cases:,}" if isinstance(n_cases, int) else str(n_cases)
+        n_controls_str = f"{n_controls:,}" if isinstance(n_controls, int) else str(n_controls)
+        sections.append(f"| {name} | {n_total:,} | {n_cases_str} | {n_controls_str} |\n")
     sections.append("\n")
 
 

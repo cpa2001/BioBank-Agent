@@ -83,7 +83,8 @@ def survival(icd10_code: str, *, ctx=None) -> dict:
         ages["follow_up"] = 16.0
         
         # For deceased: compute actual follow-up from recruitment to death date
-        if "assessment_date" in ages.columns and "death_date" in ages.columns:
+        # The merge above creates death_date, and ages always carries assessment_date.
+        if "assessment_date" in ages.columns and "death_date" in ages.columns:  # pragma: no branch
             # Convert to datetime if strings
             ages["assessment_date"] = pd.to_datetime(ages["assessment_date"], errors="coerce")
             ages["death_date"] = pd.to_datetime(ages["death_date"], errors="coerce")

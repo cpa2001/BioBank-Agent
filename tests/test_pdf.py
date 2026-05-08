@@ -1,7 +1,9 @@
 """Test read_pdf skill — PDF text and table extraction."""
 
+import builtins
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -82,6 +84,58 @@ class TestReadPdfExtraction:
         doc.is_encrypted = False
         doc.metadata = metadata or {}
         return doc
+
+    def test_table_extraction_ignores_find_tables_errors(self):
+        """Older PyMuPDF table APIs may raise and should be ignored."""
+        from biobank_agent.skills.read_pdf import _extract_tables_from_page
+
+        page = MagicMock()
+        page.find_tables.side_effect = RuntimeError("not supported")
+
+        assert _extract_tables_from_page(page) == []
+
+    def test_missing_pdf_dependency_error(self, tmp_path, monkeypatch):
+        """Missing pymupdf and fitz imports should return a setup error."""
+        from biobank_agent.skills.read_pdf import read_pdf
+
+        pdf_file = tmp_path / "missing_dep.pdf"
+        pdf_file.write_bytes(b"%PDF-fake")
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name in {"pymupdf", "fitz"}:
+                raise ImportError("blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        result = read_pdf(path=str(pdf_file), ctx=None)
+
+        assert "pymupdf" in result["error"].lower()
+
+    def test_fitz_import_fallback(self, tmp_path, monkeypatch):
+        """Older fitz namespace should be used if pymupdf import is unavailable."""
+        from biobank_agent.skills.read_pdf import read_pdf
+
+        pdf_file = tmp_path / "fitz.pdf"
+        pdf_file.write_bytes(b"%PDF-fake")
+        page = self._mock_page(text="Fallback namespace text")
+        doc = self._mock_doc([page])
+        fake_fitz = SimpleNamespace(open=lambda path: doc)
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "pymupdf":
+                raise ImportError("blocked")
+            if name == "fitz":
+                return fake_fitz
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        result = read_pdf(path=str(pdf_file), ctx=None)
+
+        assert "Fallback namespace text" in result["text"]
 
     @patch("pymupdf.open")
     def test_single_page_extraction(self, mock_open, tmp_path):
@@ -204,6 +258,74 @@ class TestReadPdfExtraction:
 
         assert "error" in result
         assert "encrypted" in result["error"].lower()
+
+    @patch("pymupdf.open")
+    def test_encrypted_pdf_auth_exception(self, mock_open, tmp_path):
+        """Encrypted PDFs should error if authentication itself fails."""
+        from biobank_agent.skills.read_pdf import read_pdf
+
+        pdf_file = tmp_path / "encrypted_exception.pdf"
+        pdf_file.write_bytes(b"%PDF-fake")
+
+        doc = MagicMock()
+        doc.is_encrypted = True
+        doc.authenticate.side_effect = RuntimeError("auth broken")
+        mock_open.return_value = doc
+
+        result = read_pdf(path=str(pdf_file), ctx=None)
+
+        assert "encrypted" in result["error"].lower()
+
+    @patch("pymupdf.open")
+    def test_encrypted_pdf_auth_success_and_blank_page_text(self, mock_open, tmp_path):
+        """Successful empty-password auth continues through extraction."""
+        from biobank_agent.skills.read_pdf import read_pdf
+
+        pdf_file = tmp_path / "encrypted_readable.pdf"
+        pdf_file.write_bytes(b"%PDF-fake")
+        page = self._mock_page(text="   ")
+        doc = self._mock_doc([page])
+        doc.is_encrypted = True
+        doc.authenticate.return_value = True
+        mock_open.return_value = doc
+
+        result = read_pdf(path=str(pdf_file), ctx=None)
+
+        assert "error" not in result
+        assert result["text"] == ""
+        assert result["pages_read"] == 1
+
+    @patch("pymupdf.open")
+    def test_metadata_exception_is_ignored(self, mock_open, tmp_path):
+        """Broken metadata access should not fail text extraction."""
+        from biobank_agent.skills.read_pdf import read_pdf
+
+        pdf_file = tmp_path / "bad_meta.pdf"
+        pdf_file.write_bytes(b"%PDF-fake")
+        page = self._mock_page(text="Content")
+
+        class BadMetadataDoc:
+            is_encrypted = False
+
+            def __len__(self):
+                return 1
+
+            def __getitem__(self, idx):
+                return page
+
+            @property
+            def metadata(self):
+                raise RuntimeError("metadata broken")
+
+            def close(self):
+                return None
+
+        mock_open.return_value = BadMetadataDoc()
+
+        result = read_pdf(path=str(pdf_file), ctx=None)
+
+        assert result["text"]
+        assert result["metadata"] == {}
 
     @patch("pymupdf.open")
     def test_open_failure(self, mock_open, tmp_path):

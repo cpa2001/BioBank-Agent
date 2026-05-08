@@ -1,0 +1,48 @@
+"""Tests for curated project documentation access."""
+
+from biobank_agent.skills.project_doc import project_doc
+
+
+def test_project_doc_lists_curated_markdown():
+    result = project_doc(mode="list", limit=50)
+    paths = {entry["path"] for entry in result["results"]}
+
+    assert result["status"] == "success"
+    assert "README.md" in paths
+    assert "docs/data/UKB_DATA_REFERENCE.md" in paths
+    assert all("deep_research" not in path for path in paths)
+
+
+def test_project_doc_searches_document_content():
+    result = project_doc(mode="search", query="external agents", limit=5)
+
+    assert result["status"] == "success"
+    assert result["results"]
+    assert any("PLUGIN_INTEGRATION" in item["path"] or item["path"] == "README.md" for item in result["results"])
+
+
+def test_project_doc_reads_allowed_file_with_truncation():
+    result = project_doc(mode="read", path="docs/data/UKB_DATA_REFERENCE.md", max_chars=600)
+
+    assert result["status"] == "success"
+    assert result["path"] == "docs/data/UKB_DATA_REFERENCE.md"
+    assert "UK Biobank" in result["content"]
+    assert len(result["content"]) <= 600
+
+
+def test_project_doc_rejects_uncurated_paths():
+    outside = project_doc(mode="read", path="../.env")
+    ignored = project_doc(mode="read", path="docs/deep_research/GPT-deep-research-report.md")
+
+    assert outside["status"] == "error"
+    assert ignored["status"] == "error"
+
+
+def test_project_doc_infers_modes():
+    listed = project_doc(limit=3)
+    searched = project_doc(query="data reference", limit=3)
+    read = project_doc(path="README.md", max_chars=1000)
+
+    assert listed["mode"] == "list"
+    assert searched["mode"] == "search"
+    assert read["mode"] == "read"
