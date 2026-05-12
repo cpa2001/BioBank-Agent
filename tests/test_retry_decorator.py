@@ -84,13 +84,13 @@ class TestRetryDecorator:
         assert kwargs["n_repeats"] == 4
 
     def test_parameter_mutation_sample_size(self):
-        """Test sample_size is halved on retry."""
+        """sample_size is preserved so retry does not silently discard rows."""
         kwargs = {"sample_size": 1000}
         _modify_parameters_for_retry(kwargs, 1)
-        assert kwargs["sample_size"] == 500
+        assert kwargs["sample_size"] == 1000
         
         _modify_parameters_for_retry(kwargs, 2)
-        assert kwargs["sample_size"] == 250
+        assert kwargs["sample_size"] == 1000
 
     def test_parameter_mutation_top_n(self):
         """Test top_n is capped at 10."""
@@ -114,7 +114,7 @@ class TestRetryDecorator:
         _modify_parameters_for_retry(kwargs, 1)
         
         assert kwargs["n_folds"] == 4
-        assert kwargs["sample_size"] == 500
+        assert kwargs["sample_size"] == 1000
         assert kwargs["top_n"] == 10
         assert kwargs["max_depth"] == 9
 

@@ -35,6 +35,27 @@ class TestPaletteConstants:
         from biobank_agent.utils.plotting import PALETTE_DIV
         assert PALETTE_DIV == "RdBu_r"
 
+    def test_semantic_palette_helpers(self):
+        """Semantic palette helpers keep common biomedical roles stable."""
+        from biobank_agent.utils.plotting import (
+            PALETTE,
+            case_control_palette,
+            semantic_color,
+            semantic_palette,
+        )
+
+        assert semantic_color("case") == PALETTE[1]
+        assert semantic_color("risk_high") == PALETTE[1]
+        assert semantic_color("unknown", default="#ABCDEF") == "#ABCDEF"
+
+        case_control = case_control_palette()
+        assert case_control == {"control": PALETTE[0], "case": PALETTE[1]}
+
+        palette = semantic_palette(["control", "case", "exploratory"])
+        assert palette["control"] == PALETTE[0]
+        assert palette["case"] == PALETTE[1]
+        assert palette["exploratory"] == PALETTE[0]
+
 
 class TestNatureFigure:
     """Test Nature-style figure constructor."""

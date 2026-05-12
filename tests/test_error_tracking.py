@@ -299,7 +299,7 @@ class TestSuggestErrorFixSkill:
         
         mutations = result["suggested_parameter_mutations"]
         assert mutations["n_folds"] == 4  # Reduced by 1
-        assert mutations["sample_size"] == 500  # Halved
+        assert "sample_size" not in mutations  # Do not silently discard eligible biobank rows.
         assert mutations["n_repeats"] == 2  # Reduced by 1
         assert mutations["top_n"] == 10  # Capped at 10
     
@@ -371,13 +371,13 @@ class TestSuggestErrorFixSkill:
         )
 
         assert result["suggested_parameter_mutations"] == {
-            "sample_size": 10,
             "n_repeats": 1,
             "top_n": 4,
         }
         suggestions = result["suggestions"]
-        assert suggestions[0]["source"] == "from_history"
+        assert suggestions[0]["source"] == "generic"
         assert all(s["suggestion"] for s in suggestions)
+        assert all("sample size" not in s["suggestion"].lower() for s in suggestions)
 
         n_folds_only = suggest_error_fix(
             error_type="MemoryError",

@@ -38,11 +38,11 @@ def min_sample(icd10_code: str, case_counts: str = "50,100,200,500,1000,2000,500
     counts = [int(c.strip()) for c in case_counts.split(",")]
 
     # Build full cohort first
-    cohort_key = f"{icd10_code}_1:4"
+    cohort_key = f"{icd10_code}_1:all"
     if cohort_key in ctx.state.cohorts:
         full_df = ctx.state.cohorts[cohort_key]
     else:
-        full_df = build_cohort(dm, icd10_code, controls_ratio=4)
+        full_df = build_cohort(dm, icd10_code, controls_ratio=0)
         ctx.state.cohorts[cohort_key] = full_df
 
     feature_cols = [c for c in full_df.columns

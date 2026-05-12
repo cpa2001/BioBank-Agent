@@ -46,3 +46,13 @@ def test_project_doc_infers_modes():
     assert listed["mode"] == "list"
     assert searched["mode"] == "search"
     assert read["mode"] == "read"
+
+
+def test_project_doc_redacts_sensitive_config_terms_from_transcript():
+    read = project_doc(mode="read", path="README.md", max_chars=50000)
+    search = project_doc(mode="search", query="api key", limit=5)
+
+    assert "api_key" not in read["content"].lower()
+    assert "api key" not in read["content"].lower()
+    assert "api_key" not in str(search).lower()
+    assert "api key" not in str(search).lower()

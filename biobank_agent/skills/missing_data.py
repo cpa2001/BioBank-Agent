@@ -6,6 +6,7 @@ import seaborn as sns
 from biobank_agent.data.features import ALL_BIOMARKERS
 from biobank_agent.registry import skill
 from biobank_agent.utils.plotting import nature_figure, save_figure, apply_nature_style, PALETTE
+from ._column_select import biomarker_select_expressions
 
 
 @skill(
@@ -16,25 +17,26 @@ from biobank_agent.utils.plotting import nature_figure, save_figure, apply_natur
     parameters={
         "sample_size": {
             "type": "integer",
-            "description": "Number of subjects to sample for analysis (default 50000)",
-            "default": 50000,
+            "description": "Optional subject sample size. Use 0 or omit to analyse the full biomarker table.",
+            "default": 0,
         },
     },
     required=[],
 )
-def missing_data(sample_size: int = 50000, *, ctx=None) -> dict:
+def missing_data(sample_size: int = 0, *, ctx=None) -> dict:
     dm = ctx.dm
+    if sample_size in (None, 0):
+        sample_size = int(getattr(ctx.settings, "default_analysis_sample_size", 0) or 0)
 
-    # Get all biomarker columns (instance 0 only)
-    cols = []
-    col_names = []
-    for fid, name in ALL_BIOMARKERS.items():
-        col = f'"{fid}-0.0"'
-        cols.append(f'{col} AS "{name}"')
-        col_names.append(name)
+    cols, col_names, column_source = biomarker_select_expressions(dm, ALL_BIOMARKERS)
+    if not cols:
+        return {"error": "No numeric biomarker columns available for missing-data analysis."}
 
-    sql = f"SELECT {', '.join(cols)} FROM biomarkers USING SAMPLE {sample_size}"
+    sample_clause = f" USING SAMPLE {int(sample_size)}" if sample_size and int(sample_size) > 0 else ""
+    sql = f"SELECT {', '.join(cols)} FROM biomarkers{sample_clause}"
     df = dm.query(sql)
+    n_subjects = int(len(df))
+    sampling_applied = bool(sample_size and int(sample_size) > 0)
 
     # Compute missing percentage per column
     missing_pct = (df.isnull().sum() / len(df) * 100).sort_values(ascending=False)
@@ -53,7 +55,7 @@ def missing_data(sample_size: int = 50000, *, ctx=None) -> dict:
     ax.set_yticks(list(y_pos))
     ax.set_yticklabels(top_missing.index)
     ax.set_xlabel("Missing (%)")
-    ax.set_title(f"Missing Data (N={sample_size:,}, overall={overall_pct}%)")
+    ax.set_title(f"Missing Data (N={n_subjects:,}, overall={overall_pct}%)")
     ax.axvline(x=20, color="grey", linestyle="--", linewidth=0.5, alpha=0.5)
 
     fig.tight_layout()
@@ -66,7 +68,11 @@ def missing_data(sample_size: int = 50000, *, ctx=None) -> dict:
     high = [n for n, v in missing_pct.items() if v >= 20]
 
     return {
-        "sample_size": sample_size,
+        "sample_size": n_subjects,
+        "requested_sample_size": int(sample_size or 0),
+        "sampling_applied": sampling_applied,
+        "column_source": column_source,
+        "n_subjects_analyzed": n_subjects,
         "n_features": len(missing_pct),
         "overall_missing_pct": overall_pct,
         "complete_features": len(complete),

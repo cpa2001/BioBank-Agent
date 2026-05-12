@@ -227,6 +227,54 @@ def test_fetch_pdf_from_doi_unpaywall_non_200_and_no_pdf_url(monkeypatch, tmp_pa
     assert fetch_mod._fetch_pdf_from_doi("10.1038/no-pdf-url", tmp_path) is None
 
 
+def test_find_local_pdf_for_identifier_matches_doi_suffix(tmp_path, monkeypatch):
+    related = tmp_path / "docs" / "related_works"
+    related.mkdir(parents=True)
+    pdf = related / "s41588-024-01898-1.pdf"
+    pdf.write_bytes(b"%PDF local")
+    monkeypatch.setattr(fetch_mod, "_local_paper_search_roots", lambda: [related])
+
+    assert fetch_mod._find_local_pdf_for_identifier("10.1038/s41588-024-01898-1") == pdf
+    assert fetch_mod._find_local_pdf_for_identifier("https://doi.org/10.1038/s41588-024-01898-1") == pdf
+
+
+def test_fetch_paper_prefers_local_related_work_pdf_for_doi(tmp_path, monkeypatch):
+    ctx = FakeCtx(tmp_path)
+    related = tmp_path / "related"
+    related.mkdir()
+    pdf_path = related / "s41588-024-01898-1.full.pdf"
+    pdf_path.write_bytes(b"%PDF local")
+
+    monkeypatch.setattr(fetch_mod, "_local_paper_search_roots", lambda: [related])
+    monkeypatch.setattr(
+        fetch_mod,
+        "_resolve_doi",
+        lambda doi: {"title": "MILTON fixture", "authors": ["A Author"], "doi": doi},
+    )
+    monkeypatch.setattr(
+        fetch_mod,
+        "_fetch_pdf_from_doi",
+        lambda doi, save_dir: (_ for _ in ()).throw(AssertionError("network PDF download should not be used")),
+    )
+
+    def fake_read_pdf(path, max_pages=0, ctx=None):
+        assert path == str(pdf_path)
+        return {
+            "text": "Local full paper text for disease prediction in UK Biobank.",
+            "n_pages": 4,
+            "metadata": {"title": "PDF Title"},
+        }
+
+    monkeypatch.setattr("biobank_agent.skills.read_pdf.read_pdf", fake_read_pdf)
+
+    result = fetch_mod.fetch_paper("10.1038/s41588-024-01898-1", ctx=ctx)
+
+    assert result["source"] == "doi_local_cache"
+    assert result["pdf_path"] == str(pdf_path)
+    assert result["full_text"].startswith("Local full paper text")
+    assert result["n_pages"] == 4
+
+
 def test_fetch_paper_doi_extracts_pdf_text_and_metadata(tmp_path, monkeypatch):
     ctx = FakeCtx(tmp_path)
     pdf_path = tmp_path / "paper.pdf"

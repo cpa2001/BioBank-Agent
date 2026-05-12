@@ -408,11 +408,10 @@ def test_run_retries_retryable_tool_error_with_reduced_parameters(tmp_path):
     retry_args = registry.calls[1][1]
     assert retry_args["n_folds"] == 3
     assert retry_args["top_n"] == 10
-    assert retry_args["sample_size"] == 50
+    assert retry_args["sample_size"] == 100
     assert agent.state.records[0].key_results["_retried_with"] == {
         "n_folds": 3,
         "top_n": 10,
-        "sample_size": 50,
     }
 
 

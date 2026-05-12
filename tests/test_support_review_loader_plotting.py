@@ -102,6 +102,8 @@ def make_loader_settings(tmp_path):
         deaths_parquet=tmp_path / "missing_deaths",
         category_parquet_dir=tmp_path / "missing_categories",
         raw_csv_dir=tmp_path,
+        raw_dir=tmp_path,
+        full_ukb_feature_store=tmp_path / "missing_full_store",
         subject_id_col="eid",
         diagnoses_code_col="diag_icd10",
         deaths_code_col="cause_icd10",
@@ -159,6 +161,36 @@ def test_data_manager_field_routing_queries_csv_and_refresh(tmp_path):
     assert dm._parquet_fields is None
 
 
+def test_data_manager_routes_full_ukb_main_csv_and_feature_store(tmp_path):
+    pytest.importorskip("pyarrow")
+    from biobank_agent.data.parquet_builder import build_full_ukb_feature_store
+
+    raw_dir = tmp_path / "raw"
+    raw_csv = raw_dir / "UKB" / "ukb672073.csv"
+    raw_csv.parent.mkdir(parents=True)
+    raw_csv.write_text("eid,6153-0.0,2443-0.0\n1,1,1\n2,2,0\n", encoding="utf-8")
+
+    settings = make_loader_settings(tmp_path)
+    settings.raw_dir = raw_dir
+    settings.full_ukb_feature_store = tmp_path / "full_store"
+    dm = loader_mod.DataManager(settings)
+    dm.conn.execute('CREATE TABLE biomarkers AS SELECT * FROM (VALUES (1, 22.0), (2, 28.0)) AS t(eid, "21001-0.0")')
+
+    assert dm.field_source("6153") == "main_672073"
+
+    build_full_ukb_feature_store(
+        raw_dir,
+        settings.full_ukb_feature_store,
+        sources=["main_672073"],
+        field_ids=["6153"],
+        chunk_cols=5,
+    )
+    dm.refresh_parquet_views()
+
+    assert dm.field_source("6153").startswith("full_main_672073")
+    assert dm.get_field("6153")["value"].tolist() == ["1", "2"]
+
+
 def test_data_manager_init_registers_parquet_file_and_handles_unavailable(tmp_path):
     pytest.importorskip("pyarrow")
     biomarker_path = tmp_path / "biomarkers.parquet"
@@ -181,6 +213,284 @@ def test_data_manager_init_registers_parquet_file_and_handles_unavailable(tmp_pa
     dir_settings.biomarker_parquet = biomarker_dir
     dir_dm = loader_mod.DataManager(dir_settings)
     assert dir_dm.get_field("30870")["value"].tolist() == [2.0]
+
+
+def test_data_manager_uses_bank_adapter_for_columns_paths_and_fields(tmp_path):
+    pytest.importorskip("pyarrow")
+    from biobank_agent.data.cohort import build_cohort
+
+    pd.DataFrame(
+        {
+            "participant_id": [1, 2, 3],
+            "hba1c-0.0": [44.0, 52.0, 39.0],
+        }
+    ).to_parquet(tmp_path / "hpp_biomarkers.parquet")
+    pd.DataFrame(
+        {
+            "participant_id": [1],
+            "icd10": ["E11"],
+        }
+    ).to_parquet(tmp_path / "hpp_diagnoses.parquet")
+
+    settings = SimpleNamespace(
+        bank_id="hpp",
+        data_dir=tmp_path,
+        biomarker_parquet=tmp_path / "missing_biomarkers",
+        diagnoses_parquet=tmp_path / "missing_diagnoses",
+        deaths_parquet=tmp_path / "missing_deaths",
+        category_parquet_dir=tmp_path / "missing_categories",
+        raw_csv_dir=tmp_path,
+        subject_id_col="eid",
+        diagnoses_code_col="diag_icd10",
+        deaths_code_col="cause_icd10",
+    )
+    dm = loader_mod.DataManager(settings)
+
+    assert dm.subject_id_col == "participant_id"
+    assert dm.diagnoses_code_col == "icd10"
+    assert dm.field_source("HbA1c") == "parquet"
+    assert dm.get_field("HbA1c")["value"].tolist() == [44.0, 52.0, 39.0]
+    assert dm.get_diagnoses("e11")["participant_id"].tolist() == [1]
+
+    cohort = build_cohort(dm, "e11", biomarker_fields=["HbA1c"])
+    assert cohort.columns.tolist() == ["participant_id", "hba1c-0.0", "label"]
+    assert cohort["label"].sum() == 1
+
+
+def test_data_manager_accepts_rap_bank_aliases(tmp_path):
+    from biobank_agent.domain.banks import RAPAdapter
+
+    settings = SimpleNamespace(
+        bank_id="rap",
+        data_dir=tmp_path,
+        biomarker_parquet=tmp_path / "missing_biomarkers",
+        diagnoses_parquet=tmp_path / "missing_diagnoses",
+        deaths_parquet=tmp_path / "missing_deaths",
+        category_parquet_dir=tmp_path / "missing_categories",
+        raw_csv_dir=tmp_path,
+        subject_id_col="eid",
+        diagnoses_code_col="diag_icd10",
+        deaths_code_col="cause_icd10",
+    )
+
+    dm = loader_mod.DataManager(settings)
+
+    assert dm.bank_id == "ukb_rap"
+    assert isinstance(dm.bank_adapter, RAPAdapter)
+    assert dm.subject_id_col == "eid"
+    assert dm.data_available is False
+
+
+def test_hpp_native_columns_feed_default_cohort_and_model_training(tmp_path):
+    pytest.importorskip("pyarrow")
+    from biobank_agent.data.cohort import build_cohort
+    from biobank_agent.skills.train_model import train_model
+    from biobank_agent.state import SessionState
+
+    ids = list(range(1, 241))
+    case_ids = set(ids[:120])
+    pd.DataFrame(
+        {
+            "participant_id": ids,
+            "hba1c": [58.0 + (i % 5) if i in case_ids else 38.0 + (i % 5) for i in ids],
+            "bmi": [31.0 + (i % 3) if i in case_ids else 24.0 + (i % 3) for i in ids],
+            "clinic_site": ["A" if i % 2 else "B" for i in ids],
+        }
+    ).to_parquet(tmp_path / "hpp_biomarkers.parquet")
+    pd.DataFrame(
+        {
+            "participant_id": sorted(case_ids),
+            "icd10": ["E11"] * len(case_ids),
+        }
+    ).to_parquet(tmp_path / "hpp_diagnoses.parquet")
+
+    settings = SimpleNamespace(
+        bank_id="hpp",
+        data_dir=tmp_path,
+        biomarker_parquet=tmp_path / "missing_biomarkers",
+        diagnoses_parquet=tmp_path / "missing_diagnoses",
+        deaths_parquet=tmp_path / "missing_deaths",
+        category_parquet_dir=tmp_path / "missing_categories",
+        raw_csv_dir=tmp_path,
+        subject_id_col="eid",
+        diagnoses_code_col="diag_icd10",
+        deaths_code_col="cause_icd10",
+        field_column_pattern="{field_id}-{instance}.{array}",
+        max_train_rows_default=0,
+    )
+    dm = loader_mod.DataManager(settings)
+
+    assert dm.field_column("HbA1c") == "hba1c"
+    assert dm.get_field("HbA1c", eids=[1, 121])["value"].tolist() == [59.0, 39.0]
+    matrix = dm.get_biomarker_matrix(["HbA1c", "BMI"], eids=[1, 121])
+    assert matrix.columns.tolist() == ["participant_id", "hba1c", "bmi"]
+
+    cohort = build_cohort(dm, "250.0")
+    assert {"participant_id", "hba1c", "bmi", "label"}.issubset(cohort.columns)
+    assert "clinic_site" not in cohort.columns
+    assert int(cohort["label"].sum()) == 120
+
+    ctx = SimpleNamespace(
+        dm=dm,
+        settings=settings,
+        state=SessionState(duckdb_conn=dm.conn),
+        emit_progress=lambda *args, **kwargs: None,
+    )
+    result = train_model("250.0", model_type="logistic", n_folds=2, ctx=ctx)
+
+    assert "error" not in result
+    assert result["n_cases"] == 120
+    assert result["training_sample"]["applied"] is False
+    assert set(ctx.state.model_metadata[result["model_key"]]["feature_names"]) == {"hba1c", "bmi"}
+
+
+def test_hpp_icd9_only_diagnoses_feed_cohort_and_model_training(tmp_path):
+    pytest.importorskip("pyarrow")
+    from biobank_agent.data.cohort import build_cohort
+    from biobank_agent.skills.train_model import train_model
+    from biobank_agent.state import SessionState
+
+    ids = list(range(1, 241))
+    case_ids = set(ids[:120])
+    pd.DataFrame(
+        {
+            "participant_id": ids,
+            "hba1c": [57.0 + (i % 4) if i in case_ids else 39.0 + (i % 4) for i in ids],
+            "bmi": [30.0 + (i % 2) if i in case_ids else 23.0 + (i % 2) for i in ids],
+        }
+    ).to_parquet(tmp_path / "hpp_biomarkers.parquet")
+    pd.DataFrame(
+        {
+            "participant_id": sorted(case_ids),
+            "icd9": ["250"] * len(case_ids),
+        }
+    ).to_parquet(tmp_path / "hpp_diagnoses.parquet")
+
+    settings = SimpleNamespace(
+        bank_id="hpp",
+        data_dir=tmp_path,
+        biomarker_parquet=tmp_path / "missing_biomarkers",
+        diagnoses_parquet=tmp_path / "missing_diagnoses",
+        deaths_parquet=tmp_path / "missing_deaths",
+        category_parquet_dir=tmp_path / "missing_categories",
+        raw_csv_dir=tmp_path,
+        subject_id_col="eid",
+        diagnoses_code_col="diag_icd10",
+        deaths_code_col="cause_icd10",
+        field_column_pattern="{field_id}-{instance}.{array}",
+        max_train_rows_default=0,
+    )
+    dm = loader_mod.DataManager(settings)
+
+    assert dm.get_diagnoses("E11")["participant_id"].nunique() == 120
+    cohort = build_cohort(dm, "E11")
+    assert int(cohort["label"].sum()) == 120
+
+    ctx = SimpleNamespace(
+        dm=dm,
+        settings=settings,
+        state=SessionState(duckdb_conn=dm.conn),
+        emit_progress=lambda *args, **kwargs: None,
+    )
+    result = train_model("E11", model_type="logistic", n_folds=2, ctx=ctx)
+
+    assert "error" not in result
+    assert result["n_cases"] == 120
+    assert set(ctx.state.model_metadata[result["model_key"]]["feature_names"]) == {"hba1c", "bmi"}
+
+
+def test_ckb_native_columns_feed_default_cohort(tmp_path):
+    pytest.importorskip("pyarrow")
+    from biobank_agent.data.cohort import build_cohort
+
+    pd.DataFrame(
+        {
+            "study_id": [f"p{i}" for i in range(1, 7)],
+            "hba1c": [51.0, 49.0, 47.0, 38.0, 39.0, 40.0],
+            "bmi": [30.0, 31.0, 29.0, 23.0, 24.0, 25.0],
+            "region": ["north", "south", "north", "south", "north", "south"],
+        }
+    ).to_parquet(tmp_path / "ckb_biomarkers.parquet")
+    pd.DataFrame(
+        {
+            "study_id": ["p1", "p2", "p3"],
+            "icd10_code": ["E11", "E11", "E11"],
+        }
+    ).to_parquet(tmp_path / "ckb_diagnoses.parquet")
+
+    settings = SimpleNamespace(
+        bank_id="ckb",
+        data_dir=tmp_path,
+        biomarker_parquet=tmp_path / "missing_biomarkers",
+        diagnoses_parquet=tmp_path / "missing_diagnoses",
+        deaths_parquet=tmp_path / "missing_deaths",
+        category_parquet_dir=tmp_path / "missing_categories",
+        raw_csv_dir=tmp_path,
+        subject_id_col="eid",
+        diagnoses_code_col="diag_icd10",
+        deaths_code_col="cause_icd10",
+        field_column_pattern="{field_id}-{instance}.{array}",
+    )
+    dm = loader_mod.DataManager(settings)
+
+    assert dm.subject_id_col == "study_id"
+    assert dm.field_column("HbA1c") == "hba1c"
+    cohort = build_cohort(dm, "E11")
+
+    assert {"study_id", "hba1c", "bmi", "label"}.issubset(cohort.columns)
+    assert "region" not in cohort.columns
+    assert int(cohort["label"].sum()) == 3
+
+
+def test_ckb_native_columns_feed_train_model(tmp_path):
+    pytest.importorskip("pyarrow")
+    from biobank_agent.skills.train_model import train_model
+    from biobank_agent.state import SessionState
+
+    ids = [f"p{i}" for i in range(1, 241)]
+    case_ids = set(ids[:120])
+    pd.DataFrame(
+        {
+            "study_id": ids,
+            "hba1c": [54.0 + (i % 5) if sid in case_ids else 39.0 + (i % 5) for i, sid in enumerate(ids)],
+            "bmi": [29.0 + (i % 3) if sid in case_ids else 24.0 + (i % 3) for i, sid in enumerate(ids)],
+            "region": ["north" if i % 2 else "south" for i, _ in enumerate(ids)],
+        }
+    ).to_parquet(tmp_path / "ckb_biomarkers.parquet")
+    pd.DataFrame(
+        {
+            "study_id": sorted(case_ids),
+            "icd10_code": ["E11"] * len(case_ids),
+        }
+    ).to_parquet(tmp_path / "ckb_diagnoses.parquet")
+
+    settings = SimpleNamespace(
+        bank_id="ckb",
+        data_dir=tmp_path,
+        biomarker_parquet=tmp_path / "missing_biomarkers",
+        diagnoses_parquet=tmp_path / "missing_diagnoses",
+        deaths_parquet=tmp_path / "missing_deaths",
+        category_parquet_dir=tmp_path / "missing_categories",
+        raw_csv_dir=tmp_path,
+        subject_id_col="eid",
+        diagnoses_code_col="diag_icd10",
+        deaths_code_col="cause_icd10",
+        field_column_pattern="{field_id}-{instance}.{array}",
+        max_train_rows_default=0,
+    )
+    dm = loader_mod.DataManager(settings)
+    ctx = SimpleNamespace(
+        dm=dm,
+        settings=settings,
+        state=SessionState(duckdb_conn=dm.conn),
+        emit_progress=lambda *args, **kwargs: None,
+    )
+
+    result = train_model("E11", model_type="logistic", n_folds=2, ctx=ctx)
+
+    assert "error" not in result
+    assert result["n_cases"] == 120
+    assert set(ctx.state.model_metadata[result["model_key"]]["feature_names"]) == {"hba1c", "bmi"}
 
 
 def test_data_manager_category_parquet_and_defensive_loader_branches(tmp_path):

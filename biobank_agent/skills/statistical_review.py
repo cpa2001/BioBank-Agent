@@ -72,6 +72,10 @@ def statistical_review(scope: str = "session", *, ctx=None) -> dict:
             # Check 2: Class imbalance
             n_cases = r.key_results.get("n_cases", 0)
             n_total = r.key_results.get("n_total", r.key_results.get("n_samples", 0))
+            if not n_total:
+                n_controls = r.key_results.get("n_controls", 0)
+                if isinstance(n_cases, (int, float)) and isinstance(n_controls, (int, float)):
+                    n_total = n_cases + n_controls
             if n_cases and n_total and isinstance(n_cases, (int, float)):
                 ratio = n_cases / max(n_total, 1)
                 if ratio < 0.05:
@@ -82,8 +86,61 @@ def statistical_review(scope: str = "session", *, ctx=None) -> dict:
                         "message": f"Severe class imbalance: {int(n_cases)} cases / "
                                    f"{int(n_total)} total ({ratio:.1%}). ",
                         "recommendation": "Consider SMOTE, class weights, or stratified "
-                                          "sampling to address imbalance.",
+                                      "sampling to address imbalance.",
                     })
+
+            analysis_design = str(r.key_results.get("analysis_design", "") or "").lower()
+            incident_supported = bool(r.key_results.get("incident_risk_supported", True))
+            prediction_target = str(r.key_results.get("prediction_target", "") or "")
+            if "prevalent" in analysis_design or incident_supported is False:
+                issues.append({
+                    "severity": "WARNING",
+                    "type": "prevalent_case_control_not_incident_risk",
+                    "skill": r.skill,
+                    "message": (
+                        f"Model target `{prediction_target or 'diagnosis discrimination'}` is a prevalent/ever-diagnosed "
+                        "case-control endpoint, not an incident risk-prediction design."
+                    ),
+                    "recommendation": (
+                        "Report this as internal EHR/linked-diagnosis discrimination unless index date, baseline exclusion, "
+                        "washout and follow-up windows are constructed."
+                    ),
+                })
+
+            leakage_features = r.key_results.get("diagnostic_biomarker_leakage_features") or []
+            leakage_risk = bool(r.key_results.get("diagnostic_biomarker_leakage_risk"))
+            if leakage_risk or leakage_features:
+                severity = "CRITICAL" if isinstance(auc, (int, float)) and auc >= 0.90 else "WARNING"
+                preview = ", ".join(str(x) for x in list(leakage_features)[:5]) or "endpoint-adjacent biomarkers"
+                issues.append({
+                    "severity": severity,
+                    "type": "diagnostic_biomarker_temporal_leakage_risk",
+                    "skill": r.skill,
+                    "message": (
+                        f"Endpoint-adjacent diabetes biomarkers were included in an E11 discrimination model ({preview}). "
+                        "Without proof that measurements precede diagnosis, high AUC may reflect temporal or clinical-label leakage."
+                    ),
+                    "recommendation": (
+                        "For an incident-risk study, rebuild the cohort with pre-index predictors only. For the current run, "
+                        "label the result as prevalent E11 discrimination and include this limitation in the report."
+                    ),
+                })
+
+            evaluation_strategy = str(r.key_results.get("evaluation_strategy", "") or "").lower()
+            requested_folds = ((r.key_results.get("model_selection") or {}).get("requested_n_folds")
+                               if isinstance(r.key_results.get("model_selection"), dict) else None)
+            if evaluation_strategy == "stratified_holdout" and requested_folds:
+                issues.append({
+                    "severity": "INFO",
+                    "type": "holdout_selection_not_kfold_cv",
+                    "skill": r.skill,
+                    "message": (
+                        f"Auto model selection used a stratified holdout although n_folds={requested_folds} was requested."
+                    ),
+                    "recommendation": (
+                        "Distinguish holdout model selection from any later cross-validation diagnostics in report methods."
+                    ),
+                })
 
             # Check 3: Small sample size
             if isinstance(n_cases, (int, float)) and n_cases < 200:
@@ -169,6 +226,8 @@ def statistical_review(scope: str = "session", *, ctx=None) -> dict:
         if r.skill == "trajectory_tokenize":
             n_tokens = r.key_results.get("n_tokens", 0)
             n_participants = r.key_results.get("n_participants", 0)
+            support = str(r.key_results.get("longitudinal_support", "") or "").lower()
+            time_source = str(r.key_results.get("trajectory_time_source", "") or "").lower()
             if n_tokens == 0 or n_participants == 0:
                 issues.append({
                     "severity": "CRITICAL",
@@ -176,6 +235,22 @@ def statistical_review(scope: str = "session", *, ctx=None) -> dict:
                     "skill": r.skill,
                     "message": "Trajectory tokenization produced no usable participant tokens.",
                     "recommendation": "Check required columns, timestamps, missingness and modality mappings.",
+                })
+            elif support == "single_timepoint":
+                issues.append({
+                    "severity": "WARNING",
+                    "type": "single_timepoint_trajectory",
+                    "skill": r.skill,
+                    "message": "Trajectory tokenization found only single-timepoint biomarker support.",
+                    "recommendation": "Report this as cross-sectional tokenization or add repeated assessment rows before forecast claims.",
+                })
+            if "synthetic" in time_source:
+                issues.append({
+                    "severity": "INFO",
+                    "type": "synthetic_trajectory_time",
+                    "skill": r.skill,
+                    "message": "Trajectory timestamps were derived from assessment instances rather than exact visit dates.",
+                    "recommendation": "Treat time ordering as approximate and avoid claims requiring exact elapsed time.",
                 })
 
         # Check 9: World-model outputs need calibration/external validation before strong claims

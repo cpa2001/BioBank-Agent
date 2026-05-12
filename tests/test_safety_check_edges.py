@@ -23,6 +23,17 @@ def _ctx(records):
     )
 
 
+def _internal_ctx(records):
+    return SimpleNamespace(
+        state=SimpleNamespace(records=records),
+        settings=SimpleNamespace(
+            biobank_name="UK Biobank",
+            data_deidentified=True,
+            disclosure_control_mode="internal",
+        ),
+    )
+
+
 def test_safety_check_no_records_reports_no_data():
     result = safety_check(ctx=_ctx([]))
 
@@ -68,6 +79,21 @@ def test_session_scope_collects_and_sorts_all_safety_issues():
     }.issubset(types)
     assert result["k_threshold"] == 5
     assert result["scope"] == "session"
+
+
+def test_deidentified_internal_mode_does_not_block_small_counts():
+    records = [
+        _record("predict", {"predictions": [{"eid": "1"}, {"eid": "2"}], "n_patients": 2}),
+        _record("cohort_summary", {"n_cases": 4, "n_total": 8}),
+        _record("cohort_card", {"n_cases": 3, "banks": ["ukb"]}),
+    ]
+
+    result = safety_check(scope="session", k=5, ctx=_internal_ctx(records))
+
+    assert not result["overall"].startswith("BLOCK")
+    assert result["data_deidentified"] is True
+    assert result["internal_data_preserved"] is True
+    assert {issue["severity"] for issue in result["issues"]}.issubset({"WARNING", "INFO"})
 
 
 def test_warning_only_safety_result_requires_review():

@@ -71,7 +71,7 @@ def test_biomarker_dist_builds_and_reuses_cohort(tmp_path, monkeypatch):
     cohort = make_cohort()
     calls = []
 
-    def fake_build_cohort(dm, icd10_code, controls_ratio=4):
+    def fake_build_cohort(dm, icd10_code, controls_ratio=0):
         calls.append((icd10_code, controls_ratio))
         return cohort
 
@@ -81,7 +81,8 @@ def test_biomarker_dist_builds_and_reuses_cohort(tmp_path, monkeypatch):
     result = biomarker_mod.biomarker_dist("E11", biomarkers="30740,missing", ctx=ctx)
     reused = biomarker_mod.biomarker_dist("E11", biomarkers="30750", ctx=ctx)
 
-    assert calls == [("E11", 4)]
+    assert calls == [("E11", 0)]
+    assert result["controls_sampling_applied"] is False
     assert result["disease"] == "Type 2 diabetes mellitus"
     assert len(result["comparisons"]) == 1
     assert result["comparisons"][0]["field_id"] == "30740"
@@ -142,6 +143,7 @@ def test_cohort_summary_demographics_plot_and_no_age_path(tmp_path, monkeypatch)
 
     assert no_age["sex"] == {}
     assert no_age["age"] == {}
+    assert "E11_1:all" in ctx_no_age.state.cohorts
     assert no_age["figure"] is None
     plt.close("all")
 
@@ -202,7 +204,7 @@ def test_comorbidity_skips_invalid_odds_ratio_rows(tmp_path, monkeypatch):
 
 class FakeCorrelationDM:
     def query(self, sql, params=None):
-        assert "USING SAMPLE 50000" in sql
+        assert "USING SAMPLE" not in sql
         return pd.DataFrame(
             {
                 "A": [1, 2, 3, 4],
@@ -240,6 +242,8 @@ def test_correlation_uses_requested_group_and_reports_pairs(tmp_path, monkeypatc
 
     assert result["group"] == "unknown-group"
     assert result["n_features"] == 3
+    assert result["n_subjects_analyzed"] == 4
+    assert result["sampling_applied"] is False
     assert result["figures"] == [
         str(tmp_path / "correlation_unknown-group.svg"),
         str(tmp_path / "correlation_unknown-group.pdf"),
@@ -286,12 +290,76 @@ def test_missing_data_categorizes_features_and_records_figure(tmp_path, monkeypa
 
     result = missing_mod.missing_data(sample_size=4, ctx=ctx)
 
+    assert result["sample_size"] == 4
+    assert result["requested_sample_size"] == 4
+    assert result["sampling_applied"] is True
     assert result["n_features"] == 3
     assert result["overall_missing_pct"] == 41.67
     assert result["complete_features"] == 1
     assert result["high_missing"] == 2
     assert result["top_missing"][0] == {"feature": "BMI", "missing_pct": 75.0}
     assert result["figure"].endswith("missing_data.png")
+    plt.close("all")
+
+
+class FakeNativeColumnDM:
+    subject_id_col = "participant_id"
+
+    def list_parquet_columns(self):
+        return ["participant_id", "hba1c", "bmi", "clinic_site"]
+
+    def list_numeric_biomarker_columns(self):
+        return ["hba1c", "bmi"]
+
+    def field_column(self, field_id, instance=0, array=0, source="biomarkers"):
+        raise KeyError(field_id)
+
+    def query(self, sql, params=None):
+        assert '"hba1c" AS "hba1c"' in sql
+        assert '"bmi" AS "bmi"' in sql
+        assert "clinic_site" not in sql
+        assert "USING SAMPLE" not in sql
+        return pd.DataFrame(
+            {
+                "hba1c": [5.2, 6.1, None, 7.0],
+                "bmi": [24.0, 31.5, 28.2, None],
+            }
+        )
+
+
+def test_missing_data_uses_native_numeric_columns_without_sampling(tmp_path, monkeypatch):
+    ctx = SkillCtx(tmp_path, dm=FakeNativeColumnDM())
+    monkeypatch.setattr(missing_mod, "ALL_BIOMARKERS", {"30750": "HbA1c", "21001": "BMI"})
+    monkeypatch.setattr(missing_mod, "save_figure", fake_save_figure)
+
+    result = missing_mod.missing_data(ctx=ctx)
+
+    assert result["column_source"] == "numeric_columns"
+    assert result["sampling_applied"] is False
+    assert result["n_subjects_analyzed"] == 4
+    assert result["n_features"] == 2
+    plt.close("all")
+
+
+def test_correlation_uses_native_numeric_columns_without_sampling(tmp_path, monkeypatch):
+    ctx = SkillCtx(tmp_path, dm=FakeNativeColumnDM())
+    monkeypatch.setattr(correlation_mod, "BLOOD_BIOCHEMISTRY", {"30750": "HbA1c", "21001": "BMI"})
+    monkeypatch.setattr(correlation_mod, "apply_nature_style", lambda: None)
+    monkeypatch.setattr(correlation_mod, "save_figure", fake_save_figure)
+
+    class FakeCluster:
+        def __init__(self):
+            self.fig, _ = plt.subplots()
+            self.ax_heatmap = self.fig.axes[0]
+
+    monkeypatch.setattr(correlation_mod.sns, "clustermap", lambda *args, **kwargs: FakeCluster())
+
+    result = correlation_mod.correlation("biochemistry", ctx=ctx)
+
+    assert result["column_source"] == "numeric_columns"
+    assert result["sampling_applied"] is False
+    assert result["n_subjects_analyzed"] == 4
+    assert result["n_features"] == 2
     plt.close("all")
 
 
@@ -337,6 +405,43 @@ def test_field_search_numeric_keyword_and_missing_paths(tmp_path):
     assert no_query["error"] == "Missing query"
     assert no_catalog["error"] == "Field catalogue unavailable"
     assert unknown_source["results"][0]["data_source"] == "unknown"
+
+
+def test_field_search_expands_biomedical_phrase(tmp_path):
+    class FakeCatalog:
+        rows = {
+            "BMI": [{"field_id": "21001", "title": "Body mass index (BMI)", "category_id": "body", "value_type": "Continuous"}],
+            "body mass index": [{"field_id": "21001", "title": "Body mass index (BMI)", "category_id": "body", "value_type": "Continuous"}],
+            "HbA1c": [{"field_id": "30750", "title": "Glycated haemoglobin (HbA1c)", "category_id": "bio", "value_type": "Continuous"}],
+            "glycated haemoglobin": [{"field_id": "30750", "title": "Glycated haemoglobin (HbA1c)", "category_id": "bio", "value_type": "Continuous"}],
+            "glucose": [{"field_id": "30740", "title": "Glucose", "category_id": "bio", "value_type": "Continuous"}],
+            "blood pressure": [{"field_id": "4080", "title": "Systolic blood pressure", "category_id": "vitals", "value_type": "Continuous"}],
+            "diabetes": [{"field_id": "2443", "title": "Diabetes diagnosed by doctor", "category_id": "health", "value_type": "Categorical"}],
+        }
+
+        def search(self, query, limit=20):
+            return self.rows.get(query, [])
+
+        def category_name(self, category_id):
+            return category_id
+
+    class FakeDM:
+        def field_source(self, field_id):
+            return "parquet"
+
+    ctx = SkillCtx(tmp_path, dm=FakeDM(), catalog=FakeCatalog())
+    result = data_query_mod.field_search(
+        "longitudinal repeated measures BMI HbA1c glucose blood pressure Type 2 Diabetes",
+        limit=20,
+        ctx=ctx,
+    )
+
+    field_ids = {item["field_id"] for item in result["results"]}
+    assert result["status"] == "READY"
+    assert result["total"] >= 5
+    assert {"21001", "30750", "30740", "4080", "2443"}.issubset(field_ids)
+    assert result["requires_repair"] is False
+    assert "BMI" in result["matched_queries"]
 
 
 def test_think_simple_tot_success_and_tot_fallback(tmp_path, monkeypatch):

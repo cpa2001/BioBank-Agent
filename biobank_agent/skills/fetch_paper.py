@@ -36,6 +36,52 @@ def _detect_identifier_type(identifier: str) -> str:
     return "title"
 
 
+def _doi_filename_tokens(identifier: str) -> list[str]:
+    """Return filesystem-friendly tokens that can identify a cached DOI PDF."""
+    value = str(identifier or "").strip()
+    doi_match = re.search(r"(10\.\d{4,9}/[^\s&?#]+)", value)
+    doi = doi_match.group(1) if doi_match else value
+    doi = doi.rstrip(".")
+    tokens = []
+    if "/" in doi:
+        suffix = doi.rsplit("/", 1)[-1]
+        if suffix:
+            tokens.append(suffix.lower())
+    cleaned = re.sub(r"[^a-z0-9]+", "-", doi.lower()).strip("-")
+    if cleaned:
+        tokens.append(cleaned)
+    return list(dict.fromkeys(tokens))
+
+
+def _local_paper_search_roots() -> list[Path]:
+    """Directories searched before network fetching for repo-bundled papers."""
+    repo_root = Path(__file__).resolve().parents[2]
+    roots = [
+        repo_root / "docs" / "related_works",
+        Path.cwd() / "docs" / "related_works",
+    ]
+    out: list[Path] = []
+    for root in roots:
+        if root not in out:
+            out.append(root)
+    return out
+
+
+def _find_local_pdf_for_identifier(identifier: str) -> Path | None:
+    """Find a cached local PDF for a DOI or DOI URL if one exists."""
+    tokens = _doi_filename_tokens(identifier)
+    if not tokens:
+        return None
+    for root in _local_paper_search_roots():
+        if not root.exists():
+            continue
+        for path in root.rglob("*.pdf"):
+            name = path.name.lower()
+            if any(token and token in name for token in tokens):
+                return path
+    return None
+
+
 # ---------------------------------------------------------------------------
 # DOI resolution and PDF fetching
 # ---------------------------------------------------------------------------
@@ -213,8 +259,14 @@ def fetch_paper(identifier: str, *, ctx=None) -> dict:
         meta = _resolve_doi(doi)
         result.update({k: v for k, v in meta.items() if v})
 
-        # Try to download PDF
-        pdf_path = _fetch_pdf_from_doi(doi, papers_dir)
+        # Prefer repo-bundled related-work PDFs when available; this makes
+        # benchmark paper-replication runs deterministic and avoids depending
+        # on publisher network access for known fixtures.
+        pdf_path = _find_local_pdf_for_identifier(doi)
+        if pdf_path:
+            result["source"] = "doi_local_cache"
+        else:
+            pdf_path = _fetch_pdf_from_doi(doi, papers_dir)
         if pdf_path:
             result["pdf_path"] = str(pdf_path)
 
@@ -228,7 +280,11 @@ def fetch_paper(identifier: str, *, ctx=None) -> dict:
             result["doi"] = doi
             meta = _resolve_doi(doi)
             result.update({k: v for k, v in meta.items() if v})
-            pdf_path = _fetch_pdf_from_doi(doi, papers_dir)
+            pdf_path = _find_local_pdf_for_identifier(doi)
+            if pdf_path:
+                result["source"] = "url_local_cache"
+            else:
+                pdf_path = _fetch_pdf_from_doi(doi, papers_dir)
             if pdf_path:
                 result["pdf_path"] = str(pdf_path)
 

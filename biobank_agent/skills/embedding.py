@@ -23,25 +23,33 @@ from biobank_agent.utils.plotting import nature_figure, save_figure, PALETTE
         },
         "sample_size": {
             "type": "integer",
-            "description": "Max subjects to embed (default 5000 for speed)",
-            "default": 5000,
+            "description": "Optional max subjects to embed. Use 0 or omit to embed all rows currently in the model cohort.",
+            "default": 0,
         },
     },
     required=[],
 )
 def embedding(model_key: str = "", method: str = "umap",
-              sample_size: int = 5000, *, ctx=None) -> dict:
+              sample_size: int = 0, *, ctx=None) -> dict:
     X = ctx.state.feature_matrix
     y = ctx.state.labels
 
     if X is None or y is None:
         return {"error": "No feature matrix. Run train_model first to create a cohort."}
 
-    # Subsample for speed
-    n = min(sample_size, len(X))
-    idx = np.random.RandomState(42).choice(len(X), n, replace=False)
-    X_sub = X.iloc[idx].fillna(X.median())
-    y_sub = y.iloc[idx]
+    # Use the full model cohort by default. A positive sample_size remains
+    # available for explicit smoke tests or resource-constrained visualisation.
+    if sample_size and sample_size > 0:
+        n = min(sample_size, len(X))
+        idx = np.random.RandomState(42).choice(len(X), n, replace=False)
+        X_sub = X.iloc[idx].fillna(X.median())
+        y_sub = y.iloc[idx]
+        sampling_applied = n < len(X)
+    else:
+        n = len(X)
+        X_sub = X.fillna(X.median())
+        y_sub = y
+        sampling_applied = False
 
     # Scale
     from sklearn.preprocessing import StandardScaler
@@ -89,6 +97,8 @@ def embedding(model_key: str = "", method: str = "umap",
     return {
         "method": method,
         "n_subjects": n,
+        "requested_sample_size": int(sample_size or 0),
+        "sampling_applied": sampling_applied,
         "n_cases": int(cases.sum()),
         "n_controls": int(controls.sum()),
         "n_features": X_sub.shape[1],

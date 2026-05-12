@@ -2,6 +2,62 @@
 
 All notable changes to Biobank Agent are documented here.
 
+## [3.0.0-rc1] — 2026-05-12
+
+> Release candidate cut from the v3-foundation tree. Local 12 of 17 v3-completion
+> criteria pass; 5 remain `BLOCKED_EXTERNAL` because they require institutional
+> credentials or remote-CI evidence (see `docs/architecture/V3_RELEASE_NOTES.md`).
+> The final `v3.0` tag will only be cut when remaining `BLOCKED_EXTERNAL`
+> criteria close per the release-tag roadmap in the plan file.
+
+### Updated after UKB full-data audit
+- The local UKB readiness path now includes the configured `settings.data_dir`
+  fallback, so a real UKB-only `bank_data_readiness` artifact can close
+  criterion 13a. With that artifact present, the audit should report 13 of 17
+  criteria passing and 4 still `BLOCKED_EXTERNAL` (`13b`, `14`, `15`, `16`).
+- Added full-UKB raw CSV inventory and selected-field materialization support:
+  `ukb_data_inventory`, `ukb_field_resolve`, `ukb_materialize_fields`, and
+  `biobank build-ukb-full-parquet`. These expose `/Users/chenpengan/Projects/CUHK/UKB`
+  without replacing the existing Milton parquet subset.
+
+### Added
+- **v3-completion audit criterion 13 split**: the previous `credentialed_hpp_ckb_rap_data` criterion has been split into:
+  - `credentialed_ukb_data` (criterion 13a) — UKB readiness must `PASS` for the final `v3.0` tag. Run `biobank-agent skill bank_data_readiness --banks ukb` against the configured local UKB data dir, then point `--hpp-ckb-rap-readiness` at the produced JSON.
+  - `credentialed_hpp_ckb_rap_data` (criterion 13b) — HPP/CKB/RAP readiness; explicitly scoped to the v3.1 milestone so v3.0 can ship without indefinitely waiting on institutional data access. The audit still reports it as `BLOCKED_EXTERNAL` until evidence arrives.
+- **Worker content-quality audit hardening** (`biobank_agent/eval/v3_completion.py:_check_live_run` + new `_worker_has_content`): the live-benchmark audit no longer accepts empty `worker-NN/` directories as evidence. Every existing worker dir must demonstrate ≥10-line transcript or declared `report_dirs` whose `report*.md` exists and is non-empty; missing per-worker audit `report_dirs` is treated as legitimate "no-report query" only when the per-worker audit explicitly recorded `status=PASS`.
+- **Compatibility matrix** (`docs/architecture/COMPATIBILITY.md`): Tier 1 / Tier 2 / Not supported across Python, OS, Textual, openai SDK, and MCP transports.
+- **v3.0 release notes** (`docs/architecture/V3_RELEASE_NOTES.md`).
+
+### Known limitations (will close in rc2 or v3.1)
+- 5 of 17 v3-completion criteria are `BLOCKED_EXTERNAL` at rc1: `credentialed_ukb_data` (13a, requires local UKB readiness artifact), `credentialed_hpp_ckb_rap_data` (13b, **v3.1 milestone**), `real_mcp_compatibility_matrix` (14, targeted for rc2 via filesystem + github MCP STDIO), `remote_ci_scheduled_eval` (15, targeted for rc2 via `gh workflow run`), `credentialed_high_risk_pr_path` (16, targeted for rc2 on an owned repo).
+- MCP HTTP/SSE transport is **protocol-implemented and locally tested** but no production HTTP/SSE server is part of v3.0 compatibility evidence. Treat HTTP/SSE as a v3.1 target.
+- Paper-replication is wired end-to-end (read_paper → study-spec extract → planner → dual report → `paper_replication_compare` acceptance gates) with the MILTON DOI `10.1038/s41588-024-01898-1` fixture, but this verifies the **tool chain**, not a scientific reproduction of MILTON's 1091-disease AUC distribution. Numeric/figure diffs and additional paper fixtures are v3.2 work.
+- `biobank_agent/cli_legacy.py` is the compatibility entry until `cli/`-package decomposition completes in v3.2.
+
+## [2.4.0] — 2026-05-11
+
+### Added
+- **v3 Foundation Runtime**: Async event-stream runtime, streaming renderer, and Textual TUI scaffold with plan/tool/disclosure panels.
+- **Plan/Report Hard Gates**: Plan approval now requires schema-valid skill calls; failed skills, blocked dependencies, and missing `generate_report(format="dual")` artifacts pause or fail execution.
+- **MCP Manager**: STDIO and HTTP/SSE JSON-RPC MCP discovery with `/mcp-list`, `/mcp-start`, `/mcp-health`, `/mcp-call`, `/mcp-stop`, startup retry/backoff, call-failure reconnect, status/error reporting, safe tool-name normalization, and legacy registry bridging.
+- **Bank Adapter Main Path**: HPP ICD9/ICD10 and CKB native diagnosis columns are wired into cohort/model code-prefix paths for synthetic cross-bank fixtures.
+- **Paper Replication Scaffold**: Review-only paper replication StudySpec/plan artifacts plus table/figure target linking in generated reports.
+- **Self-Evolution Gate**: LOW generated-skill proposals require allow-listed targets and ALWAYS_PASSES eval success before application.
+- **Strict Live Artifact Audit**: `biobank eval --suite live_artifacts --run-dir <run> --enforce-gate` validates human-style benchmark artifacts for dual reports, MILTON paper acceptance gates, and trajectory token/world-model claim boundaries.
+- **v3 Completion Audit**: `biobank eval --suite v3_completion --run-dir <run>` maps the full v3 objective to concrete evidence and reports externally blocked credentialed items separately from local failures.
+- **OpenTelemetry Bridge**: Optional event-to-span tracing with low-cardinality metadata only, configurable `none`, `console`, and OTLP/HTTP exporters, a Jaeger runbook, and code-level `otel_policy=production` collector validation; raw queries, arguments, results, per-turn ids, timestamps, and participant identifiers are not recorded.
+- **Examples and Verification Docs**: `docs/architecture/V3.md` and `docs/examples/` define current scope, manual plan testing, SDK streaming, MCP smoke testing, and paper-replication fixture workflows.
+
+### Changed
+- Data-analysis skills default to full eligible data instead of fixed small samples where the local de-identified dataset can support full execution.
+- `web_search` uses `ddgs` first and suppresses the legacy `duckduckgo_search` rename warning.
+- Generated code remains review-only by default under `reports/generated_skills/`.
+
+### Fixed
+- Long `/plan` runs can no longer display success solely from step accounting when final report files are missing.
+- MCP server failures now record actionable status instead of silently looking unavailable.
+- MCP STDIO calls now have hard timeouts to avoid CLI hangs on malformed servers.
+
 ## [2.3.0] — 2026-05-08
 
 ### Added

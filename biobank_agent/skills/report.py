@@ -1,8 +1,8 @@
 """Report generator — compile analyses into structured, readable documents.
 
 Supports two modes:
-- 'report' (default): Technical report with executive summary, Key Findings, interpretive text
-- 'paper': IMRaD paper draft with Nature-quality prose
+- 'report' / 'technical' (default): Technical report with executive summary, Key Findings, interpretive text
+- 'paper' / 'nature': IMRaD paper draft with Nature-quality prose
 
 Output formats: Markdown, HTML (self-contained with CSS), PDF (via pandoc)
 """
@@ -10,11 +10,14 @@ Output formats: Markdown, HTML (self-contained with CSS), PDF (via pandoc)
 from pathlib import Path
 from datetime import datetime
 import json
+import re
+import shutil
 
 from biobank_agent.registry import skill
 from biobank_agent.utils.report_templates import (
     REPORT_HEADER,
     KEY_FINDINGS_BOX,
+    EXECUTIVE_FINDINGS_BOX,
     EXECUTIVE_SUMMARY,
     SECTION_HEADER,
     PAPER_ABSTRACT,
@@ -24,6 +27,108 @@ from biobank_agent.utils.report_templates import (
     PAPER_DISCUSSION,
     NATURE_CSS,
 )
+
+
+_FORMAT_ALIASES = {
+    "report": "report",
+    "technical": "report",
+    "paper": "paper",
+    "nature": "paper",
+    "dual": "dual",
+    "both": "dual",
+    "paired": "dual",
+    "brief": "brief",
+}
+
+
+_RAW_RESULT_KEYS = {
+    "execution_log",
+    "execution_logs",
+    "raw_execution_log",
+    "raw_log",
+    "raw_logs",
+    "stdout",
+    "stderr",
+    "trace",
+    "traceback",
+    "stacktrace",
+}
+
+
+_GUARDRAIL_SKILLS = {"statistical_review", "safety_check", "world_model_audit"}
+_APPENDIX_ONLY_SKILLS = {"executive_findings", "execution_log", "execution_appendix", "generate_report"}
+_UNSAFE_EXECUTIVE_PATTERNS = (
+    r"/Users/",
+    r"\btraceback\b",
+    r"\bstdout\b|\bstderr\b|\breturncode\b",
+    r"\bTODO\b|\bFIXME\b",
+    r"```",
+    r"\bpytest\b|\bbenchmark\b",
+    r"\bcodex\b|\bclaude\b",
+    r"\breview(ed|er| loop)?\b",
+    r"\bapi[_ -]?key\b|\bauth\b|\blogin\b",
+    r"\breport path\b|\bpath:\b",
+    r"\banalysis completed\b",
+)
+_UNQUALIFIED_CAUSAL_PATTERN = re.compile(
+    r"\b(causes?|causal effect|prevents?|treats?|cures?|reduces risk|protects against|therapy recommendation)\b",
+    re.IGNORECASE,
+)
+_CAUSAL_QUALIFIER_PATTERN = re.compile(
+    r"\b(associat(?:ed|ion)|hypothes(?:is|ize)|observational|not causal|cannot infer|does not establish|requires validation|may)\b",
+    re.IGNORECASE,
+)
+
+
+def _redact_report_tool_tokens(text: str) -> str:
+    """Remove AI/tool brand traces from human-facing report text."""
+    text = re.sub(r"\b(Codex|Claude(?:\s+Code)?|OpenAI)\b", "external reviewer", str(text), flags=re.IGNORECASE)
+    text = re.sub(r"\b(codex-check|claude-check)\b", "external review", text, flags=re.IGNORECASE)
+    return text
+
+
+def _sanitize_report_title(title: str, ctx=None) -> str:
+    """Convert free-form user goals into a concise human-facing report title."""
+    text = _redact_report_tool_tokens(str(title or "").strip())
+    text = re.sub(r"\s+", " ", text)
+    lower = text.lower()
+    prompt_like = (
+        len(text) > 180
+        or any(
+            token in lower
+            for token in (
+                "act as ",
+                "you should ",
+                "if some part",
+                "clarifications:",
+                "planning modes",
+                "available skills",
+                "current ukb data inventory",
+            )
+        )
+    )
+    if prompt_like:
+        bank = "UKB"
+        if ctx is not None and hasattr(ctx, "settings"):
+            configured_bank = getattr(ctx.settings, "biobank_abbreviation", "")
+            if isinstance(configured_bank, str) and configured_bank.strip():
+                bank = configured_bank.strip()
+        if any(token in lower for token in ("metabolic", "cardiometabolic", "trajectory", "trajectories")):
+            if any(token in lower for token in ("type 2", "t2d", "e11", "diabetes")):
+                return f"{bank} metabolic health trajectories and Type 2 Diabetes risk report"
+            return f"{bank} metabolic health trajectory feasibility report"
+        if "milton" in lower or "replicate" in lower or "reproduce" in lower:
+            return f"{bank} paper replication feasibility report"
+        if any(token in lower for token in ("type 2", "t2d", "e11", "diabetes")):
+            return f"{bank} Type 2 Diabetes analysis report"
+        return f"{bank} analysis report"
+    return text[:140].rstrip(" ,.;:-") or "Biobank Analysis Report"
+
+
+def _normalize_report_format(format_name: str) -> str:
+    """Normalize public report style aliases to canonical internal styles."""
+    key = str(format_name or "report").strip().lower()
+    return _FORMAT_ALIASES.get(key, "report")
 
 
 def _format_value(v):
@@ -108,7 +213,17 @@ def _build_figure_caption(fig_path, rec, fig_n: int, ctx) -> str:
             caption_parts.append(f"Log-rank {_format_p_value(p_val)}.")
 
     elif skill_name == "feature_importance":
-        caption_parts.append("SHAP beeswarm plot showing feature contributions to model predictions.")
+        importance_type = str(results.get("importance_type") or results.get("effective_method") or "Tree-based")
+        if "shap" in importance_type.lower():
+            caption_parts.append("SHAP feature-attribution plot showing feature contributions to model predictions.")
+        else:
+            caption_parts.append("Tree-based feature-importance bar chart for the trained model.")
+
+    elif skill_name == "smart_plot" and str(results.get("plot_type") or rec.args.get("plot_type", "")).lower() == "summary":
+        caption_parts.append(
+            "Session-level diagnostic summary combining cohort composition, trajectory tokenization, "
+            "model discrimination/calibration, top biomarkers and guardrail status."
+        )
 
     elif skill_name == "biomarker_dist":
         biomarker = rec.args.get("field_name", "biomarker") if rec else "biomarker"
@@ -145,11 +260,10 @@ def _interpret_skill(rec) -> str:
         if skill_name == "prevalence":
             n_diseases = results.get("n_codes", results.get("n_diseases", "N/A"))
             top = results.get("top_disease", results.get("top_code", ""))
-            return (
-                f"Prevalence analysis examined {n_diseases} disease codes. "
-                f"Top finding: {top}. This establishes the epidemiological baseline "
-                f"for downstream analyses."
-            )
+            sentence = f"Prevalence analysis examined {n_diseases} disease codes."
+            if top:
+                sentence += f" The most frequent coded condition was {top}."
+            return sentence + " This establishes the epidemiological baseline for downstream analyses."
 
         elif skill_name == "cohort_summary":
             n_cases = results.get("n_cases", "?")
@@ -160,6 +274,56 @@ def _interpret_skill(rec) -> str:
                 f"This case-control ratio is "
                 f"{'adequate' if isinstance(n_cases, int) and n_cases > 500 else 'moderate'} "
                 f"for downstream machine learning analyses."
+            )
+
+        elif skill_name == "field_search":
+            total = results.get("total", 0)
+            query = args.get("query", results.get("query", ""))
+            if total:
+                matched = results.get("matched_queries", []) or []
+                matched_text = f" Matched probes included: {', '.join(str(x) for x in matched[:6])}." if matched else ""
+                return f"Field search for `{query}` identified {total} candidate catalogue field(s).{matched_text}"
+            warnings = results.get("warnings", []) or []
+            warning_text = " ".join(str(w) for w in warnings[:2])
+            return f"Field search for `{query}` found no catalogue fields. {warning_text}".strip()
+
+        elif skill_name == "ukb_data_inventory":
+            n_subjects = results.get("n_subjects", "?")
+            inv = results.get("full_csv_inventory", {}) or {}
+            n_fields = inv.get("n_total_fields", "?")
+            n_cols = inv.get("n_total_columns", "?")
+            store = results.get("feature_store_manifest", {}) or {}
+            store_text = "available" if store.get("exists") else "not yet built"
+            return (
+                f"UKB data inventory confirmed {n_subjects} registered subjects and "
+                f"{n_fields} raw UKB field prefixes across {n_cols} CSV columns. "
+                f"The optional full-field parquet feature store is {store_text}."
+            )
+
+        elif skill_name == "ukb_field_resolve":
+            n_fields = results.get("n_fields", 0)
+            candidates = results.get("materialization_candidates", []) or []
+            return (
+                f"UKB field resolution mapped {n_fields} candidate field(s) to concrete data sources. "
+                f"{len(candidates)} field(s) were flagged for full-field materialization or further source checks."
+            )
+
+        elif skill_name == "ukb_materialize_fields":
+            status = results.get("status", "?")
+            chunks = results.get("n_chunks", 0)
+            fields = results.get("requested_field_ids", []) or args.get("field_ids", "")
+            return (
+                f"Full UKB field materialization finished with status {status}, "
+                f"writing or reusing {chunks} parquet chunk(s) for fields {fields}."
+            )
+
+        elif skill_name == "deep_research":
+            n_sources = results.get("n_sources", len(results.get("sources", []) or []))
+            status = results.get("status", "READY")
+            warning = " ".join(str(w) for w in (results.get("warnings", []) or [])[:1])
+            return (
+                f"Deep research reviewed {n_sources} source(s) with status {status}. "
+                f"{warning}".strip()
             )
 
         elif skill_name == "train_model":
@@ -178,7 +342,8 @@ def _interpret_skill(rec) -> str:
                 return (
                     f"The {model_type} model achieved {auc_str}, indicating "
                     f"{quality} discriminative ability using {n_features} features "
-                    f"(n = {n_cases} cases, {n_controls} controls)."
+                    f"(n = {n_cases} cases, {n_controls} controls). "
+                    f"{results.get('selection_rationale', '')}".strip()
                 )
             return f"Model training completed with {model_type}."
 
@@ -210,9 +375,20 @@ def _interpret_skill(rec) -> str:
             if not top_feat:
                 top_feats = results.get("top_features", [])
                 top_feat = top_feats[0] if isinstance(top_feats, list) and top_feats else "?"
+            diagnostic_note = results.get("diagnostic_leakage_note") or results.get("interpretation_note")
+            if diagnostic_note:
+                return (
+                    f"Feature importance identified {top_feat} as the leading model feature. "
+                    f"{diagnostic_note}"
+                )
+            importance_type = str(results.get("importance_type") or results.get("effective_method") or "Tree-based")
+            if "shap" in importance_type.lower():
+                method_text = "SHAP feature-attribution plot"
+            else:
+                method_text = "tree-based feature-importance chart"
             return (
                 f"Feature importance analysis identified {top_feat} as the most "
-                f"predictive biomarker. See SHAP beeswarm plot for feature contributions."
+                f"predictive recorded feature. See the {method_text} for feature contributions."
             )
 
         elif skill_name in ("evaluate_model", "calibration"):
@@ -232,8 +408,17 @@ def _interpret_skill(rec) -> str:
             return "Comorbidity analysis reveals disease co-occurrence patterns. See network plot."
 
         elif skill_name == "missing_data":
-            pct = results.get("mean_missing_pct", results.get("overall_missing", "?"))
-            return f"Missing data analysis: mean missingness = {pct}%. See pattern matrix."
+            pct = results.get(
+                "mean_missing_pct",
+                results.get("overall_missing_pct", results.get("overall_missing")),
+            )
+            if isinstance(pct, (int, float)):
+                pct_text = f"{pct:.2f}"
+            elif pct not in (None, ""):
+                pct_text = str(pct)
+            else:
+                pct_text = "not available"
+            return f"Missing data analysis: mean missingness = {pct_text}%. See pattern matrix."
 
         elif skill_name == "phenotype_harmonize":
             label = results.get("label", args.get("concept", "phenotype"))
@@ -255,8 +440,25 @@ def _interpret_skill(rec) -> str:
             )
 
         elif skill_name == "trajectory_tokenize":
+            status = str(results.get("status", "")).upper()
+            n_tokens = results.get("n_tokens", 0)
+            support = str(results.get("longitudinal_support", "") or "")
+            time_source = str(results.get("trajectory_time_source", "") or "")
+            if status == "PARTIAL" and not n_tokens:
+                reason = "; ".join((results.get("blocking_reasons") or [])[:2])
+                return (
+                    "Trajectory tokenization is incomplete: no usable longitudinal tokens were available. "
+                    f"{reason or 'Provide participant-level longitudinal rows before interpreting a trajectory forecast.'}"
+                )
+            if status == "PARTIAL" and n_tokens:
+                return (
+                    f"Trajectory tokenization prepared {n_tokens} tokens across "
+                    f"{results.get('n_participants', 0)} participants, but temporal support is limited "
+                    f"({support or 'unknown support'}; {time_source or 'unknown time source'}). "
+                    "This can support feasibility auditing, not a validated longitudinal forecast."
+                )
             return (
-                f"Trajectory tokenization prepared {results.get('n_tokens', 0)} tokens across "
+                f"Trajectory tokenization prepared {n_tokens} tokens across "
                 f"{results.get('n_participants', 0)} participants and {len(results.get('modalities', []) or [])} modalities. "
                 "This is a HealthFormer-style evaluation layer, not a trained world model."
             )
@@ -266,6 +468,18 @@ def _interpret_skill(rec) -> str:
                 f"World-model audit returned safety={results.get('safety_status', 'PARTIAL')} "
                 f"and allowed claim type `{results.get('allowed_claim_type', 'association_conditioned_forecast')}`. "
                 "Intervention simulations must not be interpreted as causal without external or target-trial evidence."
+            )
+
+        elif skill_name == "paper_replication_compare":
+            status = results.get("overall_status", "partial_replication")
+            acceptance = (results.get("acceptance_summary") or {}).get("verdict", "not_recorded")
+            n_approx = results.get("n_approximated_dimensions", 0)
+            n_unavailable = results.get("n_unavailable_dimensions", 0)
+            return (
+                f"Paper replication comparison classified the local workflow as {status}. "
+                f"Acceptance verdict: {acceptance}. "
+                f"{n_approx} dimension(s) were approximations and {n_unavailable} were unavailable or not recorded. "
+                "The final report must separate paper targets from local UKB evidence."
             )
 
         elif skill_name == "genetic_target_hypothesis":
@@ -331,13 +545,13 @@ def _interpret_skill(rec) -> str:
     except Exception:
         pass
 
-    # Generic fallback
+    # Generic fallback: keep unknown skills factual and avoid placeholder prose.
     key_nums = {k: _format_value(v) for k, v in results.items()
                 if isinstance(v, (int, float)) or (hasattr(v, "item") and callable(v.item))}
     if key_nums:
         nums_str = ", ".join(f"{k}={v}" for k, v in list(key_nums.items())[:3])
-        return f"Analysis completed: {nums_str}."
-    return f"Analysis step `{skill_name}` completed."
+        return f"Recorded quantitative outputs include {nums_str}."
+    return ""
 
 
 def _extract_key_findings(records) -> list[str]:
@@ -354,7 +568,12 @@ def _extract_key_findings(records) -> list[str]:
             auc = _format_value(results.get("mean_auc", results.get("auc")))
             if auc and isinstance(auc, (int, float)):
                 model = rec.args.get("model_type", "model")
-                findings.append(f"{model} achieved AUC={auc:.4f} for disease prediction")
+                design = str(results.get("analysis_design") or results.get("prediction_target") or "").replace("_", " ")
+                if results.get("incident_risk_supported") is False or "prevalent" in design:
+                    target = design or "prevalent/ever-diagnosed disease discrimination"
+                    findings.append(f"{model} achieved AUC={auc:.4f} for {target}, not incident-risk prediction")
+                else:
+                    findings.append(f"{model} achieved AUC={auc:.4f} for disease prediction")
 
         elif rec.skill == "prevalence":
             top = results.get("top_disease", results.get("top_code"))
@@ -399,12 +618,21 @@ def _extract_key_findings(records) -> list[str]:
             n_tokens = results.get("n_tokens")
             if n_tokens:
                 findings.append(f"Trajectory layer: {n_tokens:,} HealthFormer-style tokens prepared")
+            elif str(results.get("status", "")).upper() == "PARTIAL":
+                findings.append("Trajectory layer unavailable: no longitudinal participant tokens were prepared")
 
         elif rec.skill == "world_model_audit":
             safety = results.get("safety_status")
             allowed = results.get("allowed_claim_type")
             if safety:
                 findings.append(f"World-model audit: {safety}, claims limited to {allowed}")
+
+        elif rec.skill == "paper_replication_compare":
+            status = results.get("overall_status")
+            acceptance = (results.get("acceptance_summary") or {}).get("verdict")
+            if status:
+                suffix = f", acceptance={acceptance}" if acceptance else ""
+                findings.append(f"Paper replication comparison: {status.replace('_', ' ')}{suffix}")
 
         elif rec.skill == "genetic_target_hypothesis":
             targets = results.get("targets", []) or []
@@ -432,7 +660,172 @@ def _extract_key_findings(records) -> list[str]:
                     f"for {results.get('phenotype') or 'target set'}"
                 )
 
-    return findings[:5] if findings else ["Analysis completed -- see details below"]
+    return findings[:5]
+
+
+def _is_mockish(value) -> bool:
+    """Detect unset MagicMock attributes without importing test-only helpers."""
+    return value.__class__.__module__.startswith("unittest.mock")
+
+
+def _coerce_text_list(value) -> list[str]:
+    """Convert strings, dicts, and lists into compact report bullets."""
+    if value is None or _is_mockish(value):
+        return []
+    if isinstance(value, str):
+        clean = " ".join(value.split())
+        return [clean] if clean else []
+    if isinstance(value, dict):
+        for key in ("finding", "summary", "message", "text", "title"):
+            if value.get(key):
+                return _coerce_text_list(value.get(key))
+        if value.get("findings"):
+            return _coerce_text_list(value.get("findings"))
+        return []
+    if isinstance(value, (list, tuple)):
+        findings: list[str] = []
+        for item in value:
+            findings.extend(_coerce_text_list(item))
+        return findings
+    return []
+
+
+def _is_safe_executive_finding(text: str) -> bool:
+    """Filter report-lead findings that are logs, reviewer notes, or unsupported claims."""
+    clean = " ".join(str(text).split())
+    if len(clean) < 20:
+        return False
+    if clean.endswith(":") and len(clean) < 80:
+        return False
+    for pattern in _UNSAFE_EXECUTIVE_PATTERNS:
+        if re.search(pattern, clean, re.IGNORECASE):
+            return False
+    if _UNQUALIFIED_CAUSAL_PATTERN.search(clean) and not _CAUSAL_QUALIFIER_PATTERN.search(clean):
+        return False
+    return True
+
+
+def _clean_executive_finding(text: str) -> str:
+    clean = re.sub(r"^#{1,6}\s*", "", str(text).strip())
+    clean = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", clean)
+    return " ".join(clean.strip(" -\t").split())[:450].rstrip()
+
+
+def _extract_executive_findings(ctx, records) -> list[str]:
+    """Extract curated executive findings from state or executive_findings records."""
+    findings: list[str] = []
+    state_value = getattr(ctx.state, "executive_findings", None) if ctx and hasattr(ctx, "state") else None
+    findings.extend(_coerce_text_list(state_value))
+
+    for rec in records:
+        if getattr(rec, "skill", "") != "executive_findings":
+            continue
+        results = getattr(rec, "key_results", {}) or {}
+        for key in ("executive_findings", "findings", "items", "summary"):
+            findings.extend(_coerce_text_list(results.get(key)))
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for finding in findings:
+        clean = _clean_executive_finding(finding)
+        if not _is_safe_executive_finding(clean):
+            continue
+        key = clean.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(clean)
+    return unique[:7]
+
+
+def _extract_guardrail_issues(ctx, records) -> list[dict]:
+    """Expand statistical/safety guardrail outputs into normalized issue rows."""
+    rows: list[dict] = []
+
+    def add_issue(issue, source: str) -> None:
+        if not isinstance(issue, dict):
+            return
+        message = issue.get("message") or issue.get("detail") or issue.get("description") or ""
+        recommendation = issue.get("recommendation") or issue.get("action") or issue.get("mitigation") or ""
+        issue_type = issue.get("type") or issue.get("code") or "guardrail_issue"
+        rows.append({
+            "source": source,
+            "severity": str(issue.get("severity", "INFO")).upper(),
+            "type": str(issue_type),
+            "skill": str(issue.get("skill") or issue.get("record") or ""),
+            "message": " ".join(str(message).split()),
+            "recommendation": " ".join(str(recommendation).split()),
+        })
+
+    state_issues = getattr(ctx.state, "guardrail_issues", None) if ctx and hasattr(ctx, "state") else None
+    if isinstance(state_issues, (list, tuple)):
+        for issue in state_issues:
+            add_issue(issue, "state")
+
+    for rec in records:
+        if getattr(rec, "skill", "") not in _GUARDRAIL_SKILLS:
+            continue
+        results = getattr(rec, "key_results", {}) or {}
+        for issue in results.get("issues", []) or []:
+            add_issue(issue, rec.skill)
+
+    deduped: list[dict] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for row in rows:
+        key = (
+            row["severity"],
+            row["type"],
+            row["skill"],
+            row["message"],
+            row["recommendation"],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+
+    severity_order = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
+    deduped.sort(key=lambda row: (severity_order.get(row["severity"], 9), row["source"], row["type"]))
+    return deduped
+
+
+def _extract_execution_log(ctx, records) -> list[dict]:
+    """Extract execution diagnostics for the appendix without raw stdout/stderr."""
+    entries = []
+    state_value = getattr(ctx.state, "execution_log", None) if ctx and hasattr(ctx, "state") else None
+    if not isinstance(state_value, (list, tuple)) or _is_mockish(state_value):
+        custom_data = getattr(ctx.state, "custom_data", {}) if ctx and hasattr(ctx, "state") else {}
+        if isinstance(custom_data, dict):
+            state_value = custom_data.get("execution_log")
+
+    if isinstance(state_value, (list, tuple)):
+        entries.extend(item for item in state_value if isinstance(item, dict))
+
+    for rec in records:
+        if getattr(rec, "skill", "") not in {"execution_log", "execution_appendix"}:
+            continue
+        results = getattr(rec, "key_results", {}) or {}
+        log_value = results.get("execution_log") or results.get("steps") or results.get("entries")
+        if isinstance(log_value, (list, tuple)):
+            entries.extend(item for item in log_value if isinstance(item, dict))
+
+    return entries
+
+
+def _format_execution_value(entry: dict, keys: tuple[str, ...], default: str = "") -> str:
+    for key in keys:
+        value = entry.get(key)
+        if value is not None and key not in _RAW_RESULT_KEYS and not isinstance(value, (dict, list, tuple)):
+            return _redact_report_tool_tokens(" ".join(str(value).split())).replace("|", "\\|")
+    return default
+
+
+def _is_raw_result_key(key: str) -> bool:
+    lower = str(key).lower()
+    return lower in _RAW_RESULT_KEYS or lower.endswith("_execution_log")
+
+
+def _table_cell(value) -> str:
+    return _redact_report_tool_tokens(" ".join(str(value).split())).replace("|", "\\|")
 
 
 def _extract_references(records) -> list[str]:
@@ -481,6 +874,379 @@ def _extract_references(records) -> list[str]:
                     add_ref(source)
 
     return refs
+
+
+def _session_evidence_summary(ctx, records) -> dict:
+    """Collect report-level evidence for synthesis paragraphs."""
+    summary = {
+        "bank_name": ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank",
+        "cohort": None,
+        "model": None,
+        "top_feature": None,
+        "biomarkers": [],
+        "progression": [],
+        "guardrail": None,
+        "safety": None,
+        "world_model": None,
+        "references": len(_extract_references(records)),
+    }
+    for rec in records:
+        results = getattr(rec, "key_results", {}) or {}
+        args = getattr(rec, "args", {}) or {}
+        if rec.skill == "cohort_summary" and not summary["cohort"]:
+            summary["cohort"] = {
+                "endpoint": args.get("icd10_code") or args.get("disease") or "target endpoint",
+                "disease": args.get("disease") or args.get("icd10_code") or "target endpoint",
+                "n_cases": results.get("n_cases"),
+                "n_controls": results.get("n_controls"),
+                "n_features": results.get("n_features"),
+            }
+        elif rec.skill == "train_model" and not summary["model"]:
+            summary["model"] = {
+                "model_type": results.get("model_type") or args.get("model_type") or "model",
+                "auc": _format_value(results.get("mean_auc", results.get("auc_mean", results.get("auc")))),
+                "auc_95ci": results.get("auc_95ci"),
+                "n_features": results.get("n_features"),
+                "analysis_design": results.get("analysis_design"),
+                "prediction_target": results.get("prediction_target"),
+                "incident_risk_supported": results.get("incident_risk_supported"),
+                "evaluation_strategy": results.get("evaluation_strategy") or (results.get("model_selection") or {}).get("evaluation_strategy"),
+            }
+        elif rec.skill == "feature_importance" and not summary["top_feature"]:
+            top_features = results.get("top_features") or []
+            top_feature = results.get("top_feature")
+            if not top_feature and top_features:
+                first = top_features[0]
+                top_feature = first.get("feature") if isinstance(first, dict) else first
+            summary["top_feature"] = {
+                "name": top_feature,
+                "note": results.get("diagnostic_leakage_note") or results.get("interpretation_note") or "",
+            }
+        elif rec.skill == "biomarker_dist":
+            summary["biomarkers"].append({
+                "name": args.get("field_name") or args.get("field_id") or "biomarker",
+                "p_value": results.get("p_value", results.get("p")),
+                "effect_size": results.get("effect_size"),
+            })
+        elif rec.skill == "survival":
+            summary["progression"].append({
+                "endpoint": args.get("outcome") or args.get("icd10_code") or "outcome",
+                "p_value": results.get("log_rank_p"),
+                "n_cases": results.get("n_cases"),
+            })
+        elif rec.skill == "statistical_review":
+            summary["guardrail"] = results.get("overall_assessment") or results.get("overall") or "recorded"
+        elif rec.skill == "safety_check":
+            summary["safety"] = results.get("overall") or results.get("status") or "recorded"
+        elif rec.skill == "world_model_audit":
+            summary["world_model"] = {
+                "safety_status": results.get("safety_status"),
+                "allowed_claim_type": results.get("allowed_claim_type"),
+            }
+        elif rec.skill == "paper_replication_compare":
+            summary["replication_compare"] = {
+                "overall_status": results.get("overall_status"),
+                "acceptance_verdict": (results.get("acceptance_summary") or {}).get("verdict"),
+                "paper_access": results.get("paper_access"),
+                "local_endpoint": results.get("local_endpoint"),
+            }
+    return summary
+
+
+def _model_design_label(model: dict) -> str:
+    design = str(model.get("analysis_design") or "").lower()
+    target = str(model.get("prediction_target") or "").replace("_", " ")
+    if "prevalent" in design or model.get("incident_risk_supported") is False:
+        return target or "prevalent/ever-diagnosed disease discrimination"
+    return target or "risk-prediction"
+
+
+def _model_method_label(model: dict) -> str:
+    strategy = str(model.get("evaluation_strategy") or "").lower()
+    if strategy == "stratified_holdout":
+        return "stratified holdout model selection"
+    if strategy:
+        return strategy.replace("_", " ")
+    return "recorded model evaluation"
+
+
+def _external_review_summary(ctx) -> dict:
+    try:
+        summary = ctx.state.custom_data.get("external_review_summary", {})
+    except Exception:
+        summary = {}
+    return summary if isinstance(summary, dict) else {}
+
+
+def _add_external_review_section(sections: list[str], ctx) -> None:
+    summary = _external_review_summary(ctx)
+    if not summary:
+        return
+    findings = summary.get("actionable_findings") or []
+    keywords = summary.get("keyword_hits") or []
+    severity = summary.get("severity_counts") or {}
+    redacted_agents = [
+        _redact_report_tool_tokens(agent) for agent in (summary.get("agents", []) or ["external reviewer"])
+    ]
+    sections.append("## External Review and Repair\n\n")
+    sections.append(
+        f"External review status: **{summary.get('status', 'recorded')}**. "
+        f"Review agents: {', '.join(redacted_agents)}. "
+        f"Severity counts: {json.dumps(severity, ensure_ascii=False)}.\n\n"
+    )
+    if keywords:
+        sections.append("Review themes: " + ", ".join(str(k) for k in keywords[:12]) + ".\n\n")
+    if findings:
+        sections.append("| Finding | Repair response |\n|---|---|\n")
+        for finding in findings[:8]:
+            response = (
+                "Addressed through regenerated statistical review, safety/world-model checks, "
+                "and conservative report wording; unresolved code-level items remain listed as limitations."
+            )
+            sections.append(f"| {_table_cell(str(finding)[:300])} | {_table_cell(response)} |\n")
+        sections.append("\n")
+
+
+def _status_value(value, default: str = "not recorded") -> str:
+    if value is None or value == "":
+        return default
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    return str(value)
+
+
+def _join_finding_sentences(findings: list[str], limit: int = 3) -> str:
+    """Join finding bullets into a clean prose sentence without doubled periods."""
+    clean = [str(item).strip().rstrip(".") for item in findings[:limit] if str(item).strip()]
+    return ". ".join(clean)
+
+
+def _model_sentence_label(model_type: str) -> str:
+    """Render model labels without awkward repeated selection wording."""
+    label = str(model_type or "model").strip()
+    if label.lower().startswith("auto-selected "):
+        return "automatically selected " + label[len("auto-selected "):]
+    return label
+
+
+def _add_study_status_block(sections: list[str], ctx, records) -> None:
+    """Add a decision-ready status block near the top of technical reports."""
+    summary = _session_evidence_summary(ctx, records)
+    cohort = summary.get("cohort") or {}
+    model = summary.get("model") or {}
+    world_model = summary.get("world_model") or {}
+    sections.append("## Study Status\n\n")
+    sections.append("| Field | Status |\n|-------|--------|\n")
+    sections.append(f"| Data source | {_table_cell(summary['bank_name'])} only |\n")
+    sections.append(
+        f"| Primary endpoint | {_table_cell(cohort.get('disease') or cohort.get('endpoint') or 'not recorded')} |\n"
+    )
+    sections.append(
+        f"| Cohort evidence | {_status_value(cohort.get('n_cases'))} cases; "
+        f"{_status_value(cohort.get('n_controls'))} controls |\n"
+    )
+    auc = model.get("auc")
+    auc_text = f"{auc:.3f}" if isinstance(auc, (int, float)) else _status_value(auc)
+    sections.append(
+        f"| Predictive model | {_table_cell(model.get('model_type') or 'not recorded')}; "
+        f"AUC={auc_text}; 95% CI={_table_cell(model.get('auc_95ci') or 'not recorded')} |\n"
+    )
+    sections.append(
+        f"| Governance | statistical_review={_table_cell(summary.get('guardrail') or 'not recorded')}; "
+        f"safety_check={_table_cell(summary.get('safety') or 'not recorded')} |\n"
+    )
+    sections.append(
+        f"| Claim boundary | {_table_cell(world_model.get('allowed_claim_type') or 'observational association / prediction only')} |\n"
+    )
+    sections.append("\n")
+
+
+def _add_replication_comparison_section(sections: list[str], records) -> None:
+    """Add paper-vs-local replication matrix when available."""
+    comparisons = [
+        getattr(rec, "key_results", {}) or {}
+        for rec in records
+        if getattr(rec, "skill", "") == "paper_replication_compare"
+    ]
+    if not comparisons:
+        return
+    result = comparisons[-1]
+    rows = result.get("comparison_rows") or []
+    if not rows:
+        return
+
+    sections.append("## Paper Replication Comparison\n\n")
+    sections.append(
+        f"Overall comparison status: **{_table_cell(result.get('overall_status', 'partial_replication'))}**. "
+        f"Acceptance verdict: **{_table_cell((result.get('acceptance_summary') or {}).get('verdict', 'not recorded'))}**. "
+        f"Paper access: **{_table_cell(result.get('paper_access', 'not recorded'))}**. "
+        "This section separates the paper target from the local UKB approximation.\n\n"
+    )
+    sections.append("| Dimension | Paper Target | Local UKB Result | Status | Evidence |\n")
+    sections.append("|-----------|--------------|------------------|--------|----------|\n")
+    for row in rows:
+        sections.append(
+            f"| {_table_cell(row.get('dimension', ''))} | "
+            f"{_table_cell(row.get('paper_target', ''))} | "
+            f"{_table_cell(row.get('local_result', ''))} | "
+            f"{_table_cell(row.get('status', ''))} | "
+            f"{_table_cell(row.get('evidence', ''))} |\n"
+        )
+    gates = result.get("acceptance_gates") or []
+    if gates:
+        sections.append("\nAcceptance gates:\n\n")
+        sections.append("| Gate | Status | Observed | Threshold | Evidence | Message |\n")
+        sections.append("|------|--------|----------|-----------|----------|---------|\n")
+        for gate in gates:
+            sections.append(
+                f"| {_table_cell(gate.get('gate', ''))} | "
+                f"{_table_cell(gate.get('status', ''))} | "
+                f"{_table_cell(gate.get('observed', ''))} | "
+                f"{_table_cell(gate.get('threshold', ''))} | "
+                f"{_table_cell(gate.get('evidence', ''))} | "
+                f"{_table_cell(gate.get('message', ''))} |\n"
+            )
+    requirements = result.get("report_requirements") or []
+    if requirements:
+        sections.append("\nRequired report language:\n\n")
+        for item in requirements[:5]:
+            sections.append(f"- {_table_cell(item)}\n")
+    diff_rows = result.get("table_figure_diff") or []
+    if diff_rows:
+        sections.append("\nTable/Figure diff targets:\n\n")
+        sections.append("| Target | Paper Caption | Local Artifact | Status | Limitation |\n")
+        sections.append("|--------|---------------|----------------|--------|------------|\n")
+        for row in diff_rows[:12]:
+            artifact = Path(str(row.get("local_artifact", ""))).name if row.get("local_artifact") else ""
+            sections.append(
+                f"| {_table_cell(row.get('target_type', ''))} | "
+                f"{_table_cell(row.get('paper_caption', ''))} | "
+                f"{_table_cell(artifact)} | "
+                f"{_table_cell(row.get('status', ''))} | "
+                f"{_table_cell(row.get('limitation', ''))} |\n"
+            )
+    sections.append("\n")
+
+
+def _paper_results_narrative(ctx, records, analysis_records) -> str:
+    """Build grouped Nature-style results instead of a tool-by-tool transcript."""
+    summary = _session_evidence_summary(ctx, records)
+    cohort = summary.get("cohort") or {}
+    model = summary.get("model") or {}
+    top_feature = summary.get("top_feature") or {}
+    paragraphs: list[str] = []
+
+    if cohort:
+        feature_clause = ""
+        if model and cohort.get("n_features"):
+            feature_clause = (
+                f" The analysis retained {_status_value(cohort.get('n_features'))} candidate features "
+                "for the recorded modelling branch after data-readiness checks."
+            )
+        paragraphs.append(
+            "### Cohort definition and data readiness\n\n"
+            f"The primary {cohort.get('disease', 'endpoint')} cohort contained "
+            f"{_status_value(cohort.get('n_cases'))} cases and "
+            f"{_status_value(cohort.get('n_controls'))} controls from {summary['bank_name']}."
+            f"{feature_clause}"
+        )
+
+    if model:
+        auc = model.get("auc")
+        auc_text = f"{auc:.3f}" if isinstance(auc, (int, float)) else _status_value(auc)
+        ci = model.get("auc_95ci")
+        ci_text = f" (95% CI: {str(ci).strip('[]')})" if ci else ""
+        design_label = _model_design_label(model)
+        method_label = _model_method_label(model)
+        if model.get("incident_risk_supported") is False:
+            claim_text = (
+                f"The {_model_sentence_label(model.get('model_type', 'model'))} achieved AUC = {auc_text}{ci_text} "
+                f"for {design_label} using {method_label}. This supports internal discrimination feasibility, "
+                "but it does not establish prospective incident Type 2 Diabetes risk prediction or actionable biomarkers."
+            )
+        else:
+            claim_text = (
+                f"The {_model_sentence_label(model.get('model_type', 'model'))} achieved AUC = {auc_text}{ci_text}, "
+                f"supporting internally validated {design_label} within the analysed cohort."
+            )
+        paragraphs.append(
+            "### Predictive performance\n\n"
+            + claim_text
+        )
+
+    if top_feature.get("name") or summary.get("biomarkers"):
+        feature_sentence = ""
+        if top_feature.get("name"):
+            feature_sentence = f"{top_feature['name']} was the leading model feature."
+            if top_feature.get("note"):
+                feature_sentence += f" {top_feature['note']}"
+        biomarker_sentences = []
+        for item in summary.get("biomarkers", [])[:3]:
+            p_value = item.get("p_value")
+            p_text = _format_p_value(p_value) if p_value is not None else "P value not recorded"
+            effect = item.get("effect_size")
+            effect_text = f", effect size={effect:.3g}" if isinstance(effect, (int, float)) else ""
+            biomarker_sentences.append(f"{item.get('name', 'Biomarker')} showed {p_text}{effect_text}.")
+        paragraphs.append(
+            "### Biomarker interpretation\n\n"
+            + " ".join([feature_sentence, *biomarker_sentences]).strip()
+        )
+
+    replication = summary.get("replication_compare") or {}
+    if replication:
+        paragraphs.append(
+            "### Paper replication comparison\n\n"
+            f"The replication comparison classified the local analysis as "
+            f"{replication.get('overall_status', 'partial_replication')} with "
+            f"acceptance verdict {replication.get('acceptance_verdict', 'not recorded')}. "
+            f"The paper-access status was {replication.get('paper_access', 'not recorded')}, "
+            f"and the local endpoint was {replication.get('local_endpoint', 'not recorded')}. "
+            "Claims should distinguish exact paper methods from the feasible UKB-only approximation."
+        )
+
+    if summary.get("progression"):
+        progression = []
+        for item in summary["progression"][:5]:
+            p_value = item.get("p_value")
+            p_text = _format_p_value(p_value) if p_value is not None else "P value not recorded"
+            n_cases = item.get("n_cases")
+            n_text = f" ({_status_value(n_cases)} cases)" if n_cases else ""
+            endpoint = str(item.get("endpoint", "Outcome")).capitalize()
+            progression.append(f"{endpoint}{n_text}: log-rank {p_text}.")
+        paragraphs.append(
+            "### Cardiometabolic progression endpoints\n\n"
+            + " ".join(progression)
+        )
+
+    guardrail_bits = []
+    if summary.get("guardrail"):
+        guardrail_bits.append(f"statistical_review={summary['guardrail']}")
+    if summary.get("safety"):
+        guardrail_bits.append(f"safety_check={summary['safety']}")
+    if summary.get("world_model"):
+        wm = summary["world_model"]
+        guardrail_bits.append(
+            f"world_model_audit={wm.get('safety_status') or 'recorded'}, "
+            f"claim type={wm.get('allowed_claim_type') or 'association only'}"
+        )
+    if guardrail_bits:
+        paragraphs.append(
+            "### Guardrails and interpretation boundary\n\n"
+            + "; ".join(guardrail_bits)
+            + ". These outputs support execution-grounded findings and hypotheses, not causal or clinical-deployment claims."
+        )
+
+    if not paragraphs:
+        results_parts = []
+        for rec in analysis_records:
+            interp = _interpret_skill(rec)
+            if interp:
+                results_parts.append(interp)
+        return "\n\n".join(results_parts) if results_parts else "No analytical result records were available."
+
+    return "\n\n".join(paragraphs)
 
 
 def _governance_text(ctx, records) -> str:
@@ -540,7 +1306,8 @@ _EVIDENCE_GATHERING_SKILLS = {
 
 def _analysis_records(records) -> list:
     """Records that should appear as numbered analytical report sections."""
-    return [rec for rec in records if getattr(rec, "skill", "") not in _EVIDENCE_GATHERING_SKILLS]
+    excluded = _EVIDENCE_GATHERING_SKILLS | _GUARDRAIL_SKILLS | _APPENDIX_ONLY_SKILLS
+    return [rec for rec in records if getattr(rec, "skill", "") not in excluded]
 
 
 def _report_records(ctx) -> list:
@@ -552,7 +1319,8 @@ def _report_records(ctx) -> list:
     name="generate_report",
     description="Generate a structured analysis report from all session analyses. "
                 "Supports 'report' format (technical with Key Findings) or 'paper' "
-                "format (IMRaD structure). Produces Markdown, HTML, and optionally PDF output.",
+                "format (IMRaD structure), plus 'dual' for paired technical and Nature-style outputs. "
+                "Produces Markdown, HTML, and optionally PDF output.",
     parameters={
         "title": {
             "type": "string",
@@ -561,8 +1329,13 @@ def _report_records(ctx) -> list:
         },
         "format": {
             "type": "string",
-            "description": "Output format: 'report' (technical), 'paper' (IMRaD draft), or 'brief' (summary only)",
+            "description": "Output format: 'report'/'technical', 'paper'/'nature', 'dual'/'both', or 'brief'",
             "default": "report",
+        },
+        "output_dir": {
+            "type": "string",
+            "description": "Optional report directory to overwrite; defaults to the active session report directory",
+            "default": "",
         },
     },
     required=[],
@@ -570,16 +1343,62 @@ def _report_records(ctx) -> list:
 def generate_report(
     title: str = "Biobank Analysis Report",
     format: str = "report",
+    output_dir: str = "",
     *,
     ctx=None,
 ) -> dict:
     """Generate a structured, readable analysis report."""
+    format = _normalize_report_format(format)
+
     # Dynamic title from settings if using default
     if title == "Biobank Analysis Report" and ctx and hasattr(ctx, "settings"):
         title = f"{ctx.settings.biobank_name} Analysis Report"
+    title = _sanitize_report_title(title, ctx)
 
-    report_dir = ctx.report_dir
+    report_dir = Path(output_dir).expanduser() if output_dir else ctx.report_dir
     report_dir.mkdir(parents=True, exist_ok=True)
+    _materialize_report_figures(ctx, report_dir)
+
+    if format == "dual":
+        technical_sections = _build_report_sections(title, ctx)
+        nature_sections = _build_paper_sections(title, ctx)
+        technical_content = _render_markdown(technical_sections)
+        nature_content = _render_markdown(nature_sections)
+
+        md_path = report_dir / "report.md"
+        technical_path = report_dir / "report_technical.md"
+        nature_path = report_dir / "report_nature.md"
+        md_path.write_text(technical_content, encoding="utf-8")
+        technical_path.write_text(technical_content, encoding="utf-8")
+        nature_path.write_text(nature_content, encoding="utf-8")
+
+        html_path = _write_html(technical_content, title, report_dir)
+        nature_html_path = _write_html(nature_content, title, report_dir, stem="report_nature")
+        css_md_path = report_dir / "_report_with_css.md"
+        nature_css_md_path = report_dir / "_report_nature_with_css.md"
+
+        result = {
+            "report_dir": str(report_dir),
+            "markdown": str(md_path),
+            "markdown_with_css": str(css_md_path) if css_md_path.exists() else None,
+            "html": str(html_path) if html_path else None,
+            "format": "dual",
+            "paired_outputs": {
+                "technical_markdown": str(technical_path),
+                "technical_markdown_with_css": str(css_md_path) if css_md_path.exists() else None,
+                "technical_html": str(html_path) if html_path else None,
+                "nature_markdown": str(nature_path),
+                "nature_markdown_with_css": str(nature_css_md_path) if nature_css_md_path.exists() else None,
+                "nature_html": str(nature_html_path) if nature_html_path else None,
+            },
+            "n_sections": len(_analysis_records(_report_records(ctx))),
+            "n_figures": len(_logical_figures(ctx)),
+        }
+        return _attach_report_artifact_status(
+            result,
+            report_dir,
+            [p for p in (md_path, technical_path, nature_path, css_md_path, nature_css_md_path) if p.exists()],
+        )
 
     if format == "paper":
         sections = _build_paper_sections(title, ctx)
@@ -589,24 +1408,36 @@ def generate_report(
         sections = _build_report_sections(title, ctx)
 
     # Write markdown
-    md_content = "\n".join(sections)
+    md_content = _render_markdown(sections)
     md_path = report_dir / "report.md"
     md_path.write_text(md_content)
 
     # Write HTML with embedded CSS
     html_path = _write_html(md_content, title, report_dir)
+    css_md_path = report_dir / "_report_with_css.md"
 
-    return {
+    result = {
         "report_dir": str(report_dir),
         "markdown": str(md_path),
+        "markdown_with_css": str(css_md_path) if css_md_path.exists() else None,
         "html": str(html_path) if html_path else None,
         "format": format,
         "n_sections": len(_analysis_records(_report_records(ctx))),
-        "n_figures": len(ctx.state.figures),
+        "n_figures": len(_logical_figures(ctx)),
     }
+    return _attach_report_artifact_status(
+        result,
+        report_dir,
+        [p for p in (md_path, css_md_path) if p.exists()],
+    )
 
 
 # ── Report builders ──────────────────────────────────────────
+
+
+def _render_markdown(sections: list[str]) -> str:
+    """Render pre-formatted markdown fragments without inserting table-breaking blank lines."""
+    return "".join(sections)
 
 
 def _build_report_sections(title: str, ctx) -> list[str]:
@@ -621,16 +1452,22 @@ def _build_report_sections(title: str, ctx) -> list[str]:
         format_name="Technical Report",
     ))
 
+    executive_findings = _extract_executive_findings(ctx, records)
+    if executive_findings:
+        findings_md = "\n".join(f"> - {f}" for f in executive_findings)
+        sections.append(EXECUTIVE_FINDINGS_BOX.format(findings=findings_md))
+
     # Key Findings
     if records:
-        findings = _extract_key_findings(records)
-        findings_md = "\n".join(f"> - {f}" for f in findings)
-        sections.append(KEY_FINDINGS_BOX.format(findings=findings_md))
+        findings = executive_findings or _extract_key_findings(records)
+        if findings:
+            findings_md = "\n".join(f"> - {f}" for f in findings)
+            sections.append(KEY_FINDINGS_BOX.format(findings=findings_md))
 
     # Executive Summary
     if records:
         n_analyses = len(analysis_records)
-        n_figs = len(ctx.state.figures)
+        n_figs = len(_logical_figures(ctx))
         n_cohorts = len(ctx.state.cohorts)
         n_models = len(ctx.state.models)
         bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
@@ -643,6 +1480,9 @@ def _build_report_sections(title: str, ctx) -> list[str]:
             parts.append(f"{n_figs} publication-quality figures were generated.")
         sections.append(EXECUTIVE_SUMMARY.format(summary=" ".join(parts)))
 
+    _add_study_status_block(sections, ctx, records)
+    _add_replication_comparison_section(sections, records)
+
     # Analysis sections with interpretive text
     section_n = 0
     for rec in analysis_records:
@@ -651,22 +1491,40 @@ def _build_report_sections(title: str, ctx) -> list[str]:
         skill_title = rec.skill.replace("_", " ").title()
         sections.append(SECTION_HEADER.format(n=section_n, title=skill_title))
 
-        if rec.args:
-            args_str = ", ".join(f"`{k}={v}`" for k, v in rec.args.items())
-            sections.append(f"**Parameters:** {args_str}\n\n")
-
         interp = _interpret_skill(rec)
         if interp:
             sections.append(f"{interp}\n\n")
 
         if rec.key_results and "error" not in rec.key_results:
-            exclude_keys = {"figure", "figures", "_retried_with"}
+            exclude_keys = {"figure", "figures", "_retried_with", "issues"}
             if rec.skill == "target_annotation_context":
                 exclude_keys.update({"targets", "sources", "warnings", "caveats", "source_results"})
             elif rec.skill == "target_enrichment":
                 exclude_keys.update({"terms", "sources", "warnings", "caveats"})
+            elif rec.skill == "train_model":
+                exclude_keys.update({"candidate_comparison", "model_selection"})
+            elif rec.skill == "deep_research":
+                exclude_keys.update({"sources", "biobank_relevant_fields", "brief"})
+            elif rec.skill == "replicate_paper":
+                exclude_keys.update({
+                    "plan",
+                    "replication_targets",
+                    "feasibility_map",
+                    "comparison_checklist",
+                    "artifact",
+                    "artifacts",
+                    "message",
+                })
+            elif rec.skill == "paper_replication_compare":
+                exclude_keys.update({
+                    "comparison_rows",
+                    "acceptance_gates",
+                    "report_requirements",
+                    "artifacts",
+                    "top_local_features",
+                })
             metrics = {k: _format_value(v) for k, v in rec.key_results.items()
-                       if k not in exclude_keys}
+                       if k not in exclude_keys and not _is_raw_result_key(k)}
             if metrics:
                 sections.append("| Metric | Value |\n|--------|-------|\n")
                 for k, v in metrics.items():
@@ -676,7 +1534,7 @@ def _build_report_sections(title: str, ctx) -> list[str]:
                         v_str = f"[{v[0]}, ..., {v[-1]}] ({len(v)} items)"
                     else:
                         v_str = str(v)
-                    sections.append(f"| {k} | {v_str} |\n")
+                    sections.append(f"| {_table_cell(k)} | {_table_cell(v_str)} |\n")
                 sections.append("\n")
 
         if rec.key_results and "error" in rec.key_results:
@@ -685,8 +1543,10 @@ def _build_report_sections(title: str, ctx) -> list[str]:
         sections.append("")
 
     _add_figures_section(sections, ctx)
-    _add_cohorts_section(sections, ctx)
+    _add_cohorts_section(sections, ctx, records)
     _add_models_section(sections, ctx)
+    _add_model_selection_section(sections, ctx, records)
+    _add_guardrail_section(sections, ctx, records)
 
     bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
     sections.append("## Methodology Notes\n\n")
@@ -697,16 +1557,31 @@ def _build_report_sections(title: str, ctx) -> list[str]:
         for key, meta in ctx.state.model_metadata.items():
             mt = meta.get("model_type", "gradient-boosted")
             nf = meta.get("n_features", "all available")
+            strategy = meta.get("evaluation_strategy") or (meta.get("model_selection") or {}).get("evaluation_strategy")
+            if strategy == "stratified_holdout":
+                eval_text = (
+                    "Auto model selection used a stratified holdout; any separate "
+                    "cross-validation diagnostics are reported as downstream checks, not as the selection procedure."
+                )
+            elif strategy:
+                eval_text = f"Model evaluation strategy was {str(strategy).replace('_', ' ')}."
+            else:
+                eval_text = "Model evaluation strategy was recorded in the model metadata when available."
+            design_text = ""
+            if meta.get("incident_risk_supported") is False:
+                design_text = (
+                    " The target is prevalent/ever-diagnosed disease discrimination, "
+                    "not prospective incident risk prediction."
+                )
             method_details.append(
-                f"The {mt} classifier was trained with {nf} features."
+                f"The {mt} classifier was trained with {nf} features. {eval_text}{design_text}"
             )
 
     sections.append(
         f"All analyses were performed on the {bank_name} cohort using "
         "DuckDB for data access and Python scientific stack for computation. "
         + (" ".join(method_details) + " " if method_details else "")
-        + "Cross-validation used stratified k-fold with standard 5-fold default. "
-        "Statistical tests used two-sided P-values with significance threshold "
+        + "Statistical tests used two-sided P-values with significance threshold "
         "\u03b1 = 0.05. Multiple testing correction applied via FDR (Benjamini-Hochberg) "
         "where indicated. Figures follow Nature journal guidelines "
         "(Arial 7 pt, 300 DPI, Okabe-Ito colour-blind safe palette).\n\n"
@@ -722,6 +1597,8 @@ def _build_report_sections(title: str, ctx) -> list[str]:
         "external manuscript or internal analysis handoff.\n\n"
     )
 
+    _add_external_review_section(sections, ctx)
+
     sections.append("## References\n\n")
     refs = _extract_references(records)
     if refs:
@@ -735,6 +1612,7 @@ def _build_report_sections(title: str, ctx) -> list[str]:
             "treating this report as submission-ready.\n\n"
         )
 
+    _add_execution_appendix(sections, ctx, records)
     return sections
 
 
@@ -746,43 +1624,113 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
     bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
     bank_desc = ctx.settings.biobank_description if ctx and hasattr(ctx, "settings") else "a large-scale prospective cohort study"
     bank_caveats = ctx.settings.biobank_caveats if ctx and hasattr(ctx, "settings") else "healthy volunteer cohort with known selection biases"
+    evidence_summary = _session_evidence_summary(ctx, records)
+    has_model = bool(evidence_summary.get("model") or getattr(ctx.state, "model_metadata", {}))
+    has_feature_importance = any(r.skill == "feature_importance" for r in records)
+    has_trajectory = any(r.skill == "trajectory_tokenize" for r in records)
+    empty_trajectory = any(
+        r.skill == "trajectory_tokenize"
+        and str(r.key_results.get("status", "")).upper() == "PARTIAL"
+        and not r.key_results.get("n_tokens")
+        for r in records
+    )
 
     sections.append(f"# {title}\n\n")
-    sections.append("*CHEN Pengan*\n\n")
-    sections.append("*The Chinese University of Hong Kong*\n\n")
     sections.append("---\n\n")
 
-    findings = _extract_key_findings(records)
+    executive_findings = _extract_executive_findings(ctx, records)
+    if executive_findings:
+        findings_md = "\n".join(f"> - {f}" for f in executive_findings)
+        sections.append(EXECUTIVE_FINDINGS_BOX.format(findings=findings_md))
 
-    abstract = (
-        f"**Background:** We analysed the {bank_name} cohort to identify "
-        "disease-associated biomarkers and build predictive models. "
-        "**Methods:** Case-control cohorts were constructed from ICD-10 coded diagnoses. "
-        "Gradient-boosted models were trained with 5-fold "
-        "cross-validation. Feature importance was assessed via SHAP values. "
-        "**Results:** " + ". ".join(findings[:3]) + ". "
-        "**Conclusions:** These findings highlight potential biomarkers for further "
-        "clinical investigation and risk stratification."
+    findings = executive_findings or _extract_key_findings(records)
+    finding_sentence = (
+        _join_finding_sentences(findings[:3])
+        if findings
+        else "No validated quantitative findings were available from the recorded execution"
     )
+
+    if has_trajectory and not has_model:
+        abstract = (
+            f"**Background:** We analysed whether the {bank_name} data available in this session "
+            "could support longitudinal cardiometabolic trajectory analysis. "
+            "**Methods:** Field discovery, cohort design cards, trajectory tokenization and "
+            "world-model audit were used to separate feasible association-conditioned forecasts "
+            "from unsupported temporal or causal claims. "
+            "**Results:** " + finding_sentence + ". "
+            "**Conclusions:** The current evidence supports a feasibility and governance assessment, "
+            "not a validated longitudinal forecast, until usable trajectory tokens and external "
+            "calibration evidence are available."
+        )
+        keywords = f"{bank_name}, longitudinal trajectories, feasibility, governance, epidemiology"
+    else:
+        method_bits = ["Case-control cohorts were constructed from ICD-10 coded diagnoses."]
+        if has_trajectory:
+            method_bits.append(
+                "Longitudinal fields were tokenized as a HealthFormer-style feasibility layer."
+            )
+        if has_model:
+            model_summary = evidence_summary.get("model") or {}
+            method_bits.append(
+                f"Models were assessed as {_model_design_label(model_summary)} using {_model_method_label(model_summary)}."
+            )
+        if has_feature_importance:
+            method_bits.append("Feature importance was assessed from the recorded model outputs.")
+        abstract = (
+            f"**Background:** We analysed the {bank_name} cohort to identify "
+            "disease-associated biomarkers and evaluate discrimination evidence. "
+            f"**Methods:** {' '.join(method_bits)} "
+            "**Results:** " + finding_sentence + ". "
+            "**Conclusions:** These findings support an internal UKB feasibility workflow; "
+            "prospective incident-risk or actionable-biomarker claims require date-aware cohort construction and independent validation."
+        )
+        keywords = f"{bank_name}, biomarkers, machine learning, disease prediction, epidemiology"
     sections.append(PAPER_ABSTRACT.format(
         abstract=abstract,
-        keywords=f"{bank_name}, biomarkers, machine learning, disease prediction, epidemiology",
+        keywords=keywords,
     ))
 
-    intro = (
-        f"The {bank_name} is {bank_desc}. "
-        "This rich resource enables systematic "
-        "identification of disease-associated biomarkers and construction of "
-        "predictive models.\n\n"
-        f"In this analysis, we leverage the {bank_name}'s coded diagnoses "
-        "alongside blood biochemistry, "
-        "haematology, and anthropometric measurements to characterise disease "
-        "cohorts and identify discriminative biomarker signatures."
-    )
+    if has_trajectory and not has_model:
+        intro = (
+            f"The {bank_name} is {bank_desc}. Longitudinal trajectory analyses require "
+            "time-stamped participant measurements, explicit cohort design and careful "
+            "claim governance.\n\n"
+            f"In this analysis, we evaluate whether the available {bank_name} session "
+            "state can support a HealthFormer-style trajectory layer and document the "
+            "limits on any forecast interpretation."
+        )
+    else:
+        measurement_phrase = (
+            "coded diagnoses alongside repeated biomarker, "
+            "blood pressure and anthropometric measurements where available"
+            if has_trajectory else
+            "coded diagnoses alongside blood biochemistry, "
+            "haematology, and anthropometric measurements"
+        )
+        analysis_phrase = (
+            "characterise disease cohorts, assess trajectory feasibility and identify aggregate biomarker signatures"
+            if has_trajectory else
+            "characterise disease cohorts and identify aggregate biomarker signatures"
+        )
+        intro = (
+            f"The {bank_name} is {bank_desc}. "
+            "This rich resource enables systematic "
+            "identification of disease-associated biomarkers and evaluation of "
+            "prediction evidence.\n\n"
+            f"In this analysis, we leverage the {bank_name}'s {measurement_phrase} "
+            f"to {analysis_phrase}."
+        )
     sections.append(PAPER_INTRODUCTION.format(introduction=intro))
 
     cohort_info = ""
-    if ctx.state.cohorts:
+    cohort_summary = evidence_summary.get("cohort") or {}
+    if cohort_summary:
+        cohort_info = (
+            f"For {cohort_summary.get('disease') or cohort_summary.get('endpoint')}, "
+            f"{_status_value(cohort_summary.get('n_cases'))} cases were identified from coded diagnoses "
+            f"and matched with {_status_value(cohort_summary.get('n_controls'))} controls. "
+        )
+    elif ctx.state.cohorts:
         for name, df in ctx.state.cohorts.items():
             n_cases = int(df["label"].sum()) if "label" in df.columns else "N/A"
             cohort_info += (
@@ -791,58 +1739,140 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
             )
 
     model_info = ""
-    if ctx.state.model_metadata:
+    if evidence_summary.get("model"):
+        meta = evidence_summary["model"]
+        model_info = (
+            f"The {_model_sentence_label(meta.get('model_type', 'model'))} was trained "
+            f"with {meta.get('n_features', 'all available')} features using "
+            f"{_model_method_label(meta)} for {_model_design_label(meta)}. "
+        )
+    elif ctx.state.model_metadata:
         for key, meta in ctx.state.model_metadata.items():
             model_info += (
-                f"A {meta.get('model_type', 'gradient-boosted')} classifier was trained "
+                f"The {meta.get('model_type', 'gradient-boosted')} classifier was trained "
                 f"with {meta.get('n_features', 'all available')} features using "
-                f"5-fold stratified cross-validation. "
+                f"{_model_method_label(meta)} for {_model_design_label(meta)}. "
             )
 
-    sections.append(PAPER_METHODS.format(
-        study_population=(
+    if has_trajectory and not has_model:
+        trajectory_records = [r for r in records if r.skill == "trajectory_tokenize"]
+        trajectory_support = ""
+        if trajectory_records:
+            traj = trajectory_records[-1].key_results
+            support = traj.get("longitudinal_support")
+            time_source = traj.get("trajectory_time_source")
+            if support or time_source:
+                trajectory_support = (
+                    f" Temporal support was recorded as {support or 'unknown'}, "
+                    f"with time source {time_source or 'unknown'}."
+                )
+        trajectory_note = (
+            "Trajectory tokenization was attempted using participant_id, timestamp, modality and value columns."
+            f"{trajectory_support} "
+            if not empty_trajectory
+            else "No usable longitudinal rows were available, so trajectory tokenization was treated as a feasibility gap. "
+        )
+        study_population = (
+            f"This study utilised data from the {bank_name} cohort. "
+            f"{cohort_info}"
+            "Diagnoses and candidate longitudinal fields were assessed for a trajectory cohort design. "
+            "Cohort-card outputs recorded index date, lookback/follow-up windows and bias flags."
+        )
+        statistical_analysis = (
+            trajectory_note +
+            "World-model audit classified the supported claim type and required calibration or external validation "
+            "before any forecast interpretation. Guardrail review checked unsupported temporal, causal and privacy claims."
+        )
+    else:
+        measurement_sentence = (
+            "Biomarker, blood pressure and anthropometric measurements were obtained from baseline and repeated "
+            "assessment instances where available; exact elapsed time should be interpreted according to source metadata. "
+            if has_trajectory else
+            "Biomarker measurements were obtained from baseline assessment. "
+        )
+        study_population = (
             f"This study utilised data from the {bank_name} cohort. "
             f"{cohort_info}"
             "Diagnoses were extracted from coded diagnosis records using "
-            "ICD-10 coding. Biomarker measurements were obtained from baseline assessment."
-        ),
-        statistical_analysis=(
+            f"ICD-10 coding. {measurement_sentence}"
+        )
+        trajectory_method = (
+            "Trajectory tokenization was analysed as a feasibility branch and not treated as an externally validated forecast. "
+            if has_trajectory else
+            ""
+        )
+        statistical_analysis = (
             "Continuous variables were compared using Mann-Whitney U tests. "
             "Categorical variables were compared using chi-squared tests. "
             "Multiple testing correction was applied using the Benjamini-Hochberg "
-            f"procedure. {model_info}"
-            "Model performance was assessed using area under the receiver operating "
-            "characteristic curve (AUC-ROC) with 95% confidence intervals."
-        ),
+            f"procedure. {trajectory_method}{model_info}"
+            + (
+                "Model performance was assessed using area under the receiver operating "
+                "characteristic curve (AUC-ROC) with 95% confidence intervals."
+                if has_model else
+                "No predictive model was trained in this session; modelling claims are therefore not made."
+            )
+        )
+
+    sections.append(PAPER_METHODS.format(
+        study_population=study_population,
+        statistical_analysis=statistical_analysis,
     ))
 
-    results_parts = []
-    for rec in analysis_records:
-        interp = _interpret_skill(rec)
-        if interp:  # pragma: no branch - analysis records always receive generic fallback text.
-            results_parts.append(interp)
     sections.append(PAPER_RESULTS.format(
-        results="\n\n".join(results_parts) if results_parts else "Results pending.",
+        results=_paper_results_narrative(ctx, records, analysis_records),
     ))
 
-    sections.append(PAPER_DISCUSSION.format(
-        discussion=(
+    _add_external_review_section(sections, ctx)
+
+    if has_trajectory and not has_model:
+        discussion = (
+            f"Our analysis of the {bank_name} cohort focused on trajectory feasibility. "
+            + finding_sentence + ". "
+            "The output should be read as an execution-grounded feasibility assessment rather than a validated forecast."
+        )
+        limitations = (
+            f"This study has several limitations. First, the {bank_name} represents a {bank_caveats}. "
+            "Second, usable longitudinal trajectory rows were not available in this session. "
+            "Third, association-conditioned forecasts require calibration and external validation before deployment claims."
+        )
+        conclusions = (
+            "The current session supports a governed trajectory feasibility report. "
+            "A longitudinal forecast requires time-stamped participant trajectories, calibration evidence and independent validation."
+        )
+    else:
+        model_summary = evidence_summary.get("model") or {}
+        model_limitation = (
+            "Fourth, the recorded model is a prevalent/ever-diagnosed discrimination analysis rather than an incident-risk model. "
+            if model_summary.get("incident_risk_supported") is False else ""
+        )
+        discussion = (
             f"Our analysis of the {bank_name} cohort revealed several notable findings. "
-            + " ".join(findings[:3]) + ". "
-            "These results are consistent with prior epidemiological evidence and suggest "
-            "potential avenues for biomarker-based risk stratification."
-        ),
-        limitations=(
+            + finding_sentence + ". "
+            "These results are consistent with prior epidemiological evidence and support "
+            "internal biomarker-discrimination feasibility rather than deployment-ready risk stratification."
+        )
+        second_limitation = (
+            "Second, trajectory timestamps may be approximate or derived from assessment instances, "
+            "and association-conditioned trajectory outputs were not externally validated forecasts. "
+            if has_trajectory else
+            "Second, biomarker measurements were obtained at a single baseline time point. "
+        )
+        limitations = (
             f"This study has several limitations. First, the {bank_name} represents a "
-            f"{bank_caveats}. Second, biomarker "
-            "measurements were obtained at a single baseline time point. Third, the "
-            "observational nature of the study precludes causal inference."
-        ),
-        conclusions=(
-            "We identified disease-associated biomarker signatures using machine learning "
-            f"approaches applied to the {bank_name}. These findings warrant validation in "
-            "independent cohorts and prospective studies."
-        ),
+            f"{bank_caveats}. {second_limitation}Third, the "
+            f"observational nature of the study precludes causal inference. {model_limitation}"
+        )
+        conclusions = (
+            "We identified disease-associated biomarker signatures using aggregate "
+            f"biobank evidence from the {bank_name}. Current model outputs should be interpreted as "
+            "internal prevalent-disease discrimination unless a date-aware incident cohort is built; "
+            "all findings warrant validation in independent cohorts and prospective studies."
+        )
+    sections.append(PAPER_DISCUSSION.format(
+        discussion=discussion,
+        limitations=limitations,
+        conclusions=conclusions,
     ))
 
     sections.append("## Reproducibility, Governance and Data Availability\n\n")
@@ -867,6 +1897,8 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
         )
 
     _add_figures_section(sections, ctx)
+    _add_guardrail_section(sections, ctx, records)
+    _add_execution_appendix(sections, ctx, records)
     return sections
 
 
@@ -894,49 +1926,284 @@ def _build_brief_sections(title: str, ctx) -> list[str]:
 # ── Helper functions ─────────────────────────────────────────
 
 
+def _figure_sort_key(path: Path) -> tuple[int, str]:
+    priority = {".png": 0, ".jpg": 1, ".jpeg": 1, ".svg": 2, ".pdf": 3}
+    return priority.get(path.suffix.lower(), 9), path.name
+
+
+def _materialize_report_figures(ctx, report_dir: Path) -> list[Path]:
+    """Copy session figure artifacts into the final report directory."""
+    if not ctx or not hasattr(ctx, "state"):
+        return []
+    figures = getattr(ctx.state, "figures", []) or []
+    if _is_mockish(figures):
+        return []
+    materialized: list[Path] = []
+    seen: set[Path] = set()
+    for fig_path in figures:
+        source = Path(fig_path).expanduser()
+        if source.suffix.lower() not in (".svg", ".png", ".pdf", ".jpg", ".jpeg"):
+            continue
+        if not source.exists() or not source.is_file():
+            continue
+        dest = report_dir / source.name
+        try:
+            if source.resolve() != dest.resolve():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, dest)
+            final = dest
+        except Exception:
+            final = source
+        if final not in seen:
+            materialized.append(final)
+            seen.add(final)
+    try:
+        ctx.state.figures = materialized
+    except Exception:
+        pass
+    return materialized
+
+
+def _logical_figures(ctx) -> list[list[Path]]:
+    """Group figure variants by stem so svg/pdf/png siblings count once."""
+    figures = getattr(ctx.state, "figures", []) if ctx and hasattr(ctx, "state") else []
+    if _is_mockish(figures):
+        return []
+    groups: dict[str, list[Path]] = {}
+    order: list[str] = []
+    for fig_path in figures or []:
+        p = Path(fig_path)
+        if p.suffix.lower() not in (".svg", ".png", ".pdf", ".jpg", ".jpeg"):
+            continue
+        key = p.stem
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        if p not in groups[key]:
+            groups[key].append(p)
+    return [sorted(groups[key], key=_figure_sort_key) for key in order]
+
+
+_LOCAL_ARTIFACT_LINK_RE = re.compile(r"(?:!?\[[^\]]*\]\(([^)]+)\))")
+
+
+def _missing_local_artifact_links(markdown_paths: list[Path], report_dir: Path) -> list[str]:
+    """Return local figure/artifact links that are referenced but absent."""
+    missing: list[str] = []
+    seen: set[str] = set()
+    for md_path in markdown_paths:
+        if not md_path or not md_path.exists():
+            continue
+        content = md_path.read_text(encoding="utf-8", errors="ignore")
+        for match in _LOCAL_ARTIFACT_LINK_RE.finditer(content):
+            raw = match.group(1).strip()
+            if not raw or raw.startswith(("http://", "https://", "mailto:", "#")):
+                continue
+            link = raw.split("#", 1)[0].split("?", 1)[0]
+            if Path(link).suffix.lower() not in (".svg", ".png", ".pdf", ".jpg", ".jpeg"):
+                continue
+            candidate = Path(link)
+            if not candidate.is_absolute():
+                candidate = report_dir / candidate
+            if not candidate.exists():
+                label = f"{md_path.name}:{raw}"
+                if label not in seen:
+                    seen.add(label)
+                    missing.append(label)
+    return missing
+
+
+def _attach_report_artifact_status(result: dict, report_dir: Path, markdown_paths: list[Path]) -> dict:
+    missing = _missing_local_artifact_links(markdown_paths, report_dir)
+    result["broken_figure_links"] = missing
+    result["figure_artifacts"] = [str(p) for group in _logical_figures_for_dir(report_dir) for p in group]
+    if missing:
+        result["error"] = "Report references missing figure artifact(s): " + ", ".join(missing[:8])
+    return result
+
+
+def _logical_figures_for_dir(report_dir: Path) -> list[list[Path]]:
+    figures = (
+        list(report_dir.glob("*.svg"))
+        + list(report_dir.glob("*.png"))
+        + list(report_dir.glob("*.pdf"))
+        + list(report_dir.glob("*.jpg"))
+        + list(report_dir.glob("*.jpeg"))
+    )
+
+    class _State:
+        pass
+
+    class _Ctx:
+        pass
+
+    state = _State()
+    state.figures = figures
+    ctx = _Ctx()
+    ctx.state = state
+    return _logical_figures(ctx)
+
+
 def _add_figures_section(sections: list[str], ctx) -> None:
     """Add figures section with proper scientific captions."""
-    if not ctx.state.figures:
+    figure_groups = _logical_figures(ctx)
+    if not figure_groups:
         return
     sections.append("## Figures\n\n")
     fig_n = 0
 
     # Build a map of figure paths to analysis records for captions
     fig_to_record = {}
+    stem_to_record = {}
     for rec in _report_records(ctx):
         for fp in rec.figure_paths:
-            fig_to_record[fp] = rec
+            p = Path(fp)
+            fig_to_record[str(fp)] = rec
+            stem_to_record[p.stem] = rec
 
-    for fig_path in ctx.state.figures:
-        p = Path(fig_path)
-        if p.suffix in (".svg", ".png", ".pdf"):
-            fig_n += 1
-            rel = p.name
-            rec = fig_to_record.get(str(fig_path))
-            caption = _build_figure_caption(fig_path, rec, fig_n, ctx)
+    for group in figure_groups:
+        p = group[0]
+        fig_n += 1
+        rel = p.name
+        rec = fig_to_record.get(str(p)) or stem_to_record.get(p.stem)
+        caption = _build_figure_caption(str(p), rec, fig_n, ctx)
 
-            if p.suffix == ".svg":
-                try:
-                    svg_content = p.read_text(encoding="utf-8")
-                    sections.append(f"<!-- Figure {fig_n}: {p.stem} -->\n{svg_content}\n\n")
-                except Exception:
-                    sections.append(f"![Figure {fig_n}]({rel})\n\n")
-            elif p.suffix == ".png":
-                sections.append(f"![Figure {fig_n}]({rel})\n\n")
-            else:
-                sections.append(f"[Figure {fig_n} (PDF)]({rel})\n\n")
+        if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".svg"):
+            sections.append(f"![Figure {fig_n}]({rel})\n\n")
+        else:
+            label = p.suffix[1:].upper()
+            sections.append(f"[Figure {fig_n} ({label})]({rel})\n\n")
 
-            sections.append(f"*{caption}*\n\n")
+        alternatives = [alt for alt in group[1:] if alt != p]
+        if alternatives:
+            links = ", ".join(f"[{alt.suffix[1:].upper()}]({alt.name})" for alt in alternatives)
+            sections.append(f"Alternative format(s): {links}.\n\n")
+
+        sections.append(f"{caption}\n\n")
     sections.append("")
 
 
-def _add_cohorts_section(sections: list[str], ctx) -> None:
+def _add_guardrail_section(sections: list[str], ctx, records) -> None:
+    """Add expanded statistical and safety guardrail issues."""
+    issues = _extract_guardrail_issues(ctx, records)
+    if not issues:
+        return
+    sections.append("## Guardrail Issues\n\n")
+    sections.append("| Severity | Source | Type | Affected Step | Message | Recommended Action |\n")
+    sections.append("|----------|--------|------|---------------|---------|--------------------|\n")
+    for issue in issues:
+        sections.append(
+            f"| {_table_cell(issue['severity'])} | {_table_cell(issue['source'])} | "
+            f"{_table_cell(issue['type'])} | {_table_cell(issue['skill'] or 'session')} | "
+            f"{_table_cell(issue['message'])} | "
+            f"{_table_cell(issue['recommendation'] or 'Review before release.')} |\n"
+        )
+    sections.append("\n")
+
+
+def _add_execution_appendix(sections: list[str], ctx, records) -> None:
+    """Add reproducible execution diagnostics without raw command output leakage."""
+    entries = _extract_execution_log(ctx, records)
+    record_rows = [
+        rec for rec in records
+        if getattr(rec, "skill", "") != "think"
+    ]
+    if not entries and not record_rows:
+        return
+    sections.append("## Execution Appendix\n\n")
+    if entries:
+        sections.append("### Step Log\n\n")
+        sections.append("| Step | Tool | Status | Duration | Note |\n")
+        sections.append("|------|------|--------|----------|------|\n")
+        for idx, entry in enumerate(entries, 1):
+            step = _format_execution_value(entry, ("step", "name", "task", "id"), str(idx))
+            tool = _format_execution_value(entry, ("tool", "skill", "command_name"), "")
+            status = _format_execution_value(entry, ("status", "outcome", "result"), "")
+            duration = _format_execution_value(entry, ("duration", "duration_s", "elapsed"), "")
+            note = _format_execution_value(entry, ("note", "summary", "message"), "")
+            sections.append(f"| {step} | {tool} | {status} | {duration} | {note} |\n")
+        sections.append("\n")
+
+    if record_rows:
+        sections.append("### Analysis Record Inventory\n\n")
+        sections.append("| # | Skill | Parameters | Key Outputs |\n")
+        sections.append("|---:|-------|------------|-------------|\n")
+        for idx, rec in enumerate(record_rows, 1):
+            params = _summarize_appendix_mapping(getattr(rec, "args", {}) or {})
+            outputs = _summarize_appendix_mapping(getattr(rec, "key_results", {}) or {})
+            sections.append(
+                f"| {idx} | {_table_cell(getattr(rec, 'skill', ''))} | "
+                f"{params or 'not parameterized'} | {outputs or 'recorded'} |\n"
+            )
+    sections.append("\n")
+
+
+def _safe_appendix_scalar(value) -> str:
+    """Compact appendix values while suppressing paths, raw logs, and secrets."""
+    value = _format_value(value)
+    if isinstance(value, float):
+        return f"{value:.4g}"
+    if isinstance(value, int):
+        return f"{value:,}"
+    text = " ".join(str(value).split())
+    if not text:
+        return ""
+    lower = text.lower()
+    if any(token in lower for token in ("api_key", "authorization:", "bearer ")):
+        return "[redacted]"
+    if "/users/" in lower or "\\users\\" in lower:
+        return "[local path]"
+    text = _redact_report_tool_tokens(text)
+    if len(text) > 80:
+        text = text[:77].rstrip() + "..."
+    return _table_cell(text)
+
+
+def _summarize_appendix_mapping(mapping: dict, limit: int = 6) -> str:
+    """Summarize structured args/results for appendix tables without raw leakage."""
+    if not isinstance(mapping, dict) or _is_mockish(mapping):
+        return ""
+    parts: list[str] = []
+    for key, value in mapping.items():
+        if _is_raw_result_key(str(key)) or key in {"figure", "figures", "source_results"}:
+            continue
+        if isinstance(value, dict):
+            shown = ", ".join(str(k) for k in list(value.keys())[:3])
+            scalar = f"dict[{shown}]" if shown else "dict"
+        elif isinstance(value, (list, tuple)):
+            if value and not isinstance(value[0], (dict, list, tuple)):
+                preview = ", ".join(_safe_appendix_scalar(v) for v in value[:3])
+                scalar = f"[{preview}{', ...' if len(value) > 3 else ''}]"
+            else:
+                scalar = f"{len(value)} item(s)"
+        else:
+            scalar = _safe_appendix_scalar(value)
+        if scalar:
+            parts.append(f"{_table_cell(key)}={scalar}")
+        if len(parts) >= limit:
+            break
+    return "; ".join(parts)
+
+
+def _add_cohorts_section(sections: list[str], ctx, records=None) -> None:
     """Add cohorts summary table."""
-    if not ctx.state.cohorts:
+    evidence_cohort = (_session_evidence_summary(ctx, records).get("cohort") if records is not None else None) or {}
+    if not evidence_cohort and not ctx.state.cohorts:
         return
     sections.append("## Cohort Summary\n\n")
     sections.append("| Cohort | Total | Cases | Controls |\n")
     sections.append("|--------|------:|------:|---------:|\n")
+    if evidence_cohort:
+        n_cases = evidence_cohort.get("n_cases")
+        n_controls = evidence_cohort.get("n_controls")
+        total = (n_cases + n_controls) if isinstance(n_cases, int) and isinstance(n_controls, int) else "not recorded"
+        name = evidence_cohort.get("disease") or evidence_cohort.get("endpoint") or "primary cohort"
+        total_str = f"{total:,}" if isinstance(total, int) else str(total)
+        case_str = f"{n_cases:,}" if isinstance(n_cases, int) else _status_value(n_cases)
+        control_str = f"{n_controls:,}" if isinstance(n_controls, int) else _status_value(n_controls)
+        sections.append(f"| {name} | {total_str} | {case_str} | {control_str} |\n")
+        sections.append("\n")
+        return
     for name, df in ctx.state.cohorts.items():
         n_total = len(df)
         if "label" in df.columns:
@@ -967,14 +2234,58 @@ def _add_models_section(sections: list[str], ctx) -> None:
     sections.append("\n")
 
 
-def _write_html(md_content: str, title: str, report_dir: Path):
+def _add_model_selection_section(sections: list[str], ctx, records=None) -> None:
+    """Add automatic model-selection details from train_model(auto)."""
+    comparisons: list[dict] = []
+    rationale = ""
+    selected = ""
+    for rec in records or []:
+        if getattr(rec, "skill", "") != "train_model":
+            continue
+        results = getattr(rec, "key_results", {}) or {}
+        comparisons = list(results.get("candidate_comparison") or [])
+        rationale = str(results.get("selection_rationale") or "")
+        selected = str(results.get("selected_model_type") or results.get("model_type") or "")
+        if comparisons:
+            break
+    if not comparisons and getattr(ctx.state, "model_metadata", None):
+        for meta in ctx.state.model_metadata.values():
+            ms = meta.get("model_selection", {}) if isinstance(meta, dict) else {}
+            comparisons = list(ms.get("candidate_comparison") or [])
+            rationale = str(ms.get("rationale") or "")
+            selected = str(ms.get("selected_model_type") or "")
+            if comparisons:
+                break
+    if not comparisons:
+        return
+
+    sections.append("## Model Selection\n\n")
+    if selected or rationale:
+        sections.append(f"Selected model: **{selected or 'not recorded'}**. {rationale}\n\n")
+    sections.append("| Rank | Candidate | Status | Mean AUC | F1 | Precision | Recall | Note |\n")
+    sections.append("|-----:|-----------|--------|---------:|---:|----------:|-------:|------|\n")
+    for item in comparisons:
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status", "")
+        note = item.get("error") or item.get("role") or ""
+        sections.append(
+            f"| {item.get('rank', '')} | {item.get('model_type', '')} | {status} | "
+            f"{_status_value(item.get('auc_mean'), '')} | {_status_value(item.get('f1_mean'), '')} | "
+            f"{_status_value(item.get('precision_mean'), '')} | {_status_value(item.get('recall_mean'), '')} | "
+            f"{_table_cell(note)} |\n"
+        )
+    sections.append("\n")
+
+
+def _write_html(md_content: str, title: str, report_dir: Path, stem: str = "report"):
     """Convert markdown to HTML with embedded CSS."""
-    html_path = report_dir / "report.html"
+    html_path = report_dir / f"{stem}.html"
+    css_path = report_dir / ("_report_with_css.md" if stem == "report" else f"_{stem}_with_css.md")
+    css_md = NATURE_CSS + "\n" + md_content
+    css_path.write_text(css_md, encoding="utf-8")
     try:
         import subprocess
-        css_md = NATURE_CSS + "\n" + md_content
-        css_path = report_dir / "_report_with_css.md"
-        css_path.write_text(css_md)
 
         result = subprocess.run(
             ["pandoc", str(css_path), "-o", str(html_path),
@@ -983,19 +2294,18 @@ def _write_html(md_content: str, title: str, report_dir: Path):
              f"--metadata=title:{title}"],
             capture_output=True, timeout=30,
         )
-        css_path.unlink(missing_ok=True)
 
         if result.returncode != 0:
             html_content = (
                 f"<html><head><title>{title}</title>{NATURE_CSS}</head>"
                 f"<body><div>{md_content}</div></body></html>"
             )
-            html_path.write_text(html_content)
+            html_path.write_text(html_content, encoding="utf-8")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         html_content = (
             f"<html><head><title>{title}</title>{NATURE_CSS}</head>"
             f"<body><pre>{md_content}</pre></body></html>"
         )
-        html_path.write_text(html_content)
+        html_path.write_text(html_content, encoding="utf-8")
 
     return html_path

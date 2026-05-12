@@ -1,0 +1,111 @@
+suite: behavioral_always_passes
+policy: always
+cases:
+  - id: trajectory_full_data_and_report_gates
+    kind: planner
+    query: >
+      Build a longitudinal HealthFormer-style trajectory forecast over time for
+      UKB diabetes progression. Use UKB only, choose feasible endpoint and
+      fields, search repeated BMI/HbA1c/glucose/blood pressure measurements,
+      tokenize trajectory data if available, audit whether any forecast claim is
+      supported, fall back to a tabular prediction model if trajectory rows are
+      insufficient, and finish with a technical plus Nature-style dual report.
+    must_include_skills:
+      - ukb_data_inventory
+      - ukb_field_resolve
+      - deep_research
+      - field_search
+      - bank_data_probe
+      - cohort_summary
+      - cohort_card
+      - trajectory_tokenize
+      - missing_data
+      - train_model
+      - evaluate_model
+      - calibration
+      - feature_importance
+      - statistical_review
+      - safety_check
+      - world_model_audit
+      - generate_report
+    nonpositive_or_absent_args:
+      missing_data:
+        - sample_size
+      train_model:
+        - max_train_rows
+        - controls_ratio
+    report_must_follow:
+      - bank_data_probe
+      - trajectory_tokenize
+      - statistical_review
+      - safety_check
+      - world_model_audit
+    required_report_args:
+      format: dual
+
+  - id: paper_replication_table_figure_diff_targets
+    kind: paper_replication
+    source: >
+      DOI 10.1038/example. We performed a prospective cohort study of 12345
+      participants aged 40-69 years. The primary outcome was incident type 2
+      diabetes. Biomarkers included HbA1c, glucose and BMI.
+      Table 1: Baseline biomarker characteristics.
+      Figure 2: Model calibration in the validation cohort.
+    expected_diff_target_types:
+      - table
+      - figure
+    expected_top_level_plan_skills:
+      - replicate_paper
+      - paper_replication_compare
+      - statistical_review
+      - safety_check
+      - world_model_audit
+      - generate_report
+    expected_inner_plan_skills:
+      - paper_replication_compare
+      - statistical_review
+      - safety_check
+      - world_model_audit
+      - generate_report
+
+  - id: published_milton_gold_fixture_route
+    kind: published_paper_gold
+    doi: 10.1038/s41588-024-01898-1
+    min_text_length: 50000
+    query: >
+      Reproduce the closest feasible UKB-only slice of DOI
+      10.1038/s41588-024-01898-1. Use the local paper fixture when available,
+      read the paper, create a replication StudySpec, map the method to a
+      defensible E11 biomarker prediction approximation, train model_type auto,
+      compare paper targets with local numeric and figure artifacts, run
+      statistical_review, safety_check and world_model_audit, and generate a
+      dual technical plus Nature-style report with explicit limitations.
+    must_include_skills:
+      - replicate_paper
+      - read_paper
+      - deep_research
+      - field_search
+      - cohort_summary
+      - missing_data
+      - train_model
+      - evaluate_model
+      - calibration
+      - feature_importance
+      - paper_replication_compare
+      - statistical_review
+      - safety_check
+      - world_model_audit
+      - generate_report
+    comparison_must_follow:
+      - replicate_paper
+      - train_model
+      - evaluate_model
+      - calibration
+      - feature_importance
+    report_must_follow:
+      - paper_replication_compare
+      - statistical_review
+      - safety_check
+      - world_model_audit
+    required_report_args:
+      format: dual

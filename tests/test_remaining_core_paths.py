@@ -24,6 +24,7 @@ class PlotState:
         self.cohorts = {}
         self.model_metadata = {}
         self.figures = []
+        self.records = []
 
 
 def plot_ctx(tmp_path):
@@ -62,17 +63,40 @@ def test_smart_plot_covers_supported_plot_types_and_references(tmp_path, monkeyp
     scatter = smart_mod.smart_plot("scatter", "cohort:E11", ctx=ctx)
     roc = smart_mod.smart_plot("roc", "model:E11_xgb", ctx=ctx)
     km = smart_mod.smart_plot("km", "cohort:E11", ctx=ctx)
+    ctx.state.records = [
+        SimpleNamespace(skill="cohort_summary", key_results={"n_cases": 6, "n_controls": 6}),
+        SimpleNamespace(skill="trajectory_tokenize", key_results={"n_tokens": 42, "n_participants": 12}),
+        SimpleNamespace(skill="train_model", key_results={"auc_mean": 0.81, "model_type": "lgbm", "incident_risk_supported": False}),
+        SimpleNamespace(skill="evaluate_model", key_results={"mean_auc": 0.80}),
+        SimpleNamespace(skill="calibration", key_results={"ece": 0.05}),
+        SimpleNamespace(skill="feature_importance", key_results={"top_features": [{"feature": "HbA1c", "importance": 10.0}]}),
+        SimpleNamespace(skill="statistical_review", key_results={"overall_assessment": "WARNING"}),
+        SimpleNamespace(skill="safety_check", key_results={"overall": "PASS"}),
+        SimpleNamespace(skill="world_model_audit", key_results={"safety_status": "PARTIAL", "allowed_claim_type": "association_conditioned_forecast"}),
+    ]
+    summary = smart_mod.smart_plot("summary", "session", title="Session diagnostics", ctx=ctx)
     fallback = smart_mod.smart_plot("waterfall", "raw:anything", ctx=ctx)
 
     assert bar["style"] == "nature"
     assert bar["reference_hints"]["search_results"] == [{"title": "ref"}, {"title": "ref2"}, {"title": "ref3"}]
+    assert bar["selection_metadata"]["selected_style"] == "nature"
+    assert bar["selection_metadata"]["palette"] == {
+        "control": "#0072B2",
+        "case": "#D55E00",
+    }
     assert violin["style"] == "icml"
+    assert violin["selection_metadata"]["style_reason"] == "explicit style 'icml' requested"
     assert heatmap["figures"][0].endswith("smart_heatmap_E11.png")
+    assert heatmap["selection_metadata"]["figure_width"] == "double"
     assert scatter["plot_type"] == "scatter"
     assert roc["figures"][0].endswith("smart_roc_E11_xgb.png")
     assert km["plot_type"] == "km"
+    assert summary["figures"][0].endswith("smart_summary_session.png")
+    assert summary["selection_metadata"]["render_path"] == "inline"
+    assert summary["selection_metadata"]["figure_width"] == "double"
     assert fallback["figures"][0].endswith("smart_waterfall_anything.png")
-    assert len(ctx.state.figures) == 14
+    assert fallback["selection_metadata"]["render_path"] == "placeholder"
+    assert len(ctx.state.figures) == 16
     plt.close("all")
 
 
@@ -155,7 +179,7 @@ def test_min_sample_reuses_cohort_skips_oversized_counts_and_plots(tmp_path, mon
     )
     calls = []
 
-    def fake_build_cohort(dm, icd10_code, controls_ratio=4):
+    def fake_build_cohort(dm, icd10_code, controls_ratio=0):
         calls.append((icd10_code, controls_ratio))
         return min_sample_cohort()
 
@@ -176,7 +200,7 @@ def test_min_sample_reuses_cohort_skips_oversized_counts_and_plots(tmp_path, mon
     result = min_sample_mod.min_sample("E11", case_counts="10,20,50", n_repeats=2, ctx=ctx)
     reused = min_sample_mod.min_sample("E11", case_counts="10", n_repeats=1, ctx=ctx)
 
-    assert calls == [("E11", 4)]
+    assert calls == [("E11", 0)]
     assert result["total_available_cases"] == 30
     assert result["sample_sizes_tested"] == [10, 20]
     assert result["results"]["10"]["mean"] == 0.75
@@ -187,7 +211,7 @@ def test_min_sample_reuses_cohort_skips_oversized_counts_and_plots(tmp_path, mon
 
 
 def test_min_sample_skips_cross_validation_failures(tmp_path, monkeypatch):
-    state = SimpleNamespace(cohorts={"E11_1:4": min_sample_cohort(n_cases=12, n_controls=48)}, figures=[])
+    state = SimpleNamespace(cohorts={"E11_1:all": min_sample_cohort(n_cases=12, n_controls=48)}, figures=[])
     ctx = SimpleNamespace(
         report_dir=tmp_path,
         state=state,
@@ -267,9 +291,12 @@ def test_build_cohort_parameterized_queries_death_cases_and_explicit_fields():
     )
 
     default = build_cohort(dm, "E11", controls_ratio=1, random_state=1)
+    full_controls = build_cohort(dm, "E11", random_state=1)
     explicit = build_cohort(dm, "E11", controls_ratio=1, biomarker_fields=["30740"], random_state=1)
 
     assert default["label"].sum() == 3
+    assert full_controls["label"].sum() == 3
+    assert len(full_controls) == 5
     assert "30740-0.0" in default.columns
     assert "41270-0.0" not in default.columns
     assert explicit.columns.tolist() == ["eid", "30740-0.0", "label"]

@@ -56,7 +56,7 @@ from biobank_agent.registry import skill
                 "Annotation sources to use. Supported: opentargets, uniprot, gtex, "
                 "clinicaltrials, cellxgene."
             ),
-            "default": DEFAULT_ANNOTATION_SOURCES,
+            "default": ["opentargets", "uniprot", "gtex", "clinicaltrials", "cellxgene"],
         },
         "source_mode": {
             "type": "string",

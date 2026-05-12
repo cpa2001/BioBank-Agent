@@ -1,7 +1,7 @@
 """Intelligent error suggestion engine for skill recovery.
 
 Analyzes errors and provides multi-strategy recovery suggestions:
-- Parameter adjustment (reduce data size, simplify models)
+- Parameter adjustment (simplify models without silently reducing data volume)
 - Resource management (reduce memory footprint, parallelize)
 - Data validation (check input formats, verify data availability)
 - Fallback strategies (alternative algorithms, graceful degradation)
@@ -15,6 +15,11 @@ from biobank_agent.registry import skill
 logger = logging.getLogger(__name__)
 
 
+def _suggestion_reduces_data_volume(fix: str) -> bool:
+    text = (fix or "").lower()
+    return "sample size" in text or "sample_size" in text or "reduce data size" in text
+
+
 def _suggest_fixes_for_error(error_type: str, error_message: str, skill_name: str) -> list[str]:
     """Generate intelligent fix suggestions based on error type and context.
     
@@ -26,7 +31,7 @@ def _suggest_fixes_for_error(error_type: str, error_message: str, skill_name: st
     # Memory errors
     if error_type == "MemoryError" or "memory" in error_msg_lower:
         fixes.extend([
-            "Reduce sample size (pass lower value to sample_size parameter)",
+            "Reduce computational complexity (fewer folds/repeats or smaller top_n) before considering explicit sampling",
             "Reduce n_repeats or n_folds for cross-validation",
             "Process data in chunks instead of all at once",
             "Use @retry_on_error decorator to reduce complexity on retry",
@@ -162,8 +167,6 @@ def suggest_error_fix(
         # Suggest reducing computational complexity
         if "n_folds" in current_parameters:
             parameter_mutations["n_folds"] = max(2, current_parameters["n_folds"] - 1)
-        if "sample_size" in current_parameters:
-            parameter_mutations["sample_size"] = max(10, current_parameters["sample_size"] // 2)
         if "n_repeats" in current_parameters:
             parameter_mutations["n_repeats"] = max(1, current_parameters["n_repeats"] - 1)
         if "top_n" in current_parameters:
@@ -178,9 +181,11 @@ def suggest_error_fix(
     all_fixes = []
     seen = set()
     
-    # Prioritize known fixes (already worked)
+    # Prioritize known fixes (already worked), except stale suggestions that
+    # silently reduce data volume. Biobank workflows should keep all eligible
+    # rows unless a user explicitly asks for sampling.
     for fix in known_fixes:
-        if fix and fix not in seen:
+        if fix and not _suggestion_reduces_data_volume(fix) and fix not in seen:
             all_fixes.append({"source": "from_history", "suggestion": fix})
             seen.add(fix)
     

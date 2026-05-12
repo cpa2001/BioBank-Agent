@@ -95,7 +95,21 @@ DEBATE_ROUNDS=2
 
 ---
 
-## 7. Skills Inventory (58 registered)
+## 7. Report and Eval Gates
+
+| Component | Behavior |
+|-----------|----------|
+| `generate_report(format="technical")` | Human-facing key findings first; methods, execution logs, and diagnostics in appendices |
+| `generate_report(format="nature")` | IMRaD report with abstract, methods, results, discussion, references, and data availability |
+| Executive finding filter | Removes raw logs, local paths, reviewer chatter, placeholders, and unsupported causal claims from lead findings |
+| Plan execution log | `/plan` steps execute through the agent recorder and are visible to generated report appendices |
+| `report_20_case` | 20 UKB-oriented synthetic aggregate cases for fast report regression |
+| `live_ukb_report_20` | 20 live UKB probes; fails closed when real UKB data access is unavailable |
+| Review loop | Codex/GPT-5.5 xhigh is the default reviewer; Claude Code is optional via `--include-claude` |
+
+---
+
+## 8. Skills Inventory (58 registered)
 
 ### Cohort, Data, and Descriptive Analysis
 field_search, prevalence, cohort_summary, cohort_card, phenotype_harmonize,
@@ -125,7 +139,7 @@ claude_check_execution, git_clean_push
 
 ---
 
-## 8. CLI Commands
+## 9. CLI Commands
 
 ```
 /plan <goal>      — Enter plan mode with DAG decomposition
@@ -140,7 +154,7 @@ claude_check_execution, git_clean_push
 
 ---
 
-## 9. Design Principles
+## 10. Design Principles
 
 | Principle | Implementation |
 |-----------|---------------|

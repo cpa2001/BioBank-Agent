@@ -40,7 +40,7 @@ def test_register_execute_injects_context_and_unregisters():
     result = reg.execute("echo", args, ctx=ctx)
 
     assert result == {"value": 3, "ctx": "ctx"}
-    assert args["ctx"] is ctx
+    assert "ctx" not in args
     assert "echo" in reg
     assert len(reg) == 1
     assert reg.list_skills() == [{"name": "echo", "description": "Echo values"}]

@@ -109,6 +109,11 @@ class ReproducibilityHarness:
         self.code_version = code_version or self._detect_git_version()
         self._audit_log: list[AuditEntry] = []
         self._last_entry_id: str = ""
+        # Codex review MAJOR #2: dedupe checkpoint disk writes by
+        # context_hash within the same harness session — long plans
+        # produce many tool calls, often with identical (skill, args,
+        # outputs) shapes, and we don't need a fresh JSON per duplicate.
+        self._checkpoint_disk_cache: set[str] = set()
 
     @staticmethod
     def _detect_git_version() -> str:
@@ -185,15 +190,18 @@ class ReproducibilityHarness:
         self._audit_log.append(entry)
         self._last_entry_id = context_hash
 
-        # Persist checkpoint
-        checkpoint_file = self.checkpoint_dir / f"{context_hash}.json"
-        try:
-            checkpoint_file.write_text(
-                json.dumps(asdict(context), indent=2, default=str),
-                encoding="utf-8",
-            )
-        except OSError as e:
-            logger.warning("Failed to write checkpoint %s: %s", context_hash[:8], e)
+        # Persist checkpoint (dedupe by context_hash — see MAJOR #2).
+        if context_hash not in self._checkpoint_disk_cache:
+            checkpoint_file = self.checkpoint_dir / f"{context_hash}.json"
+            if not checkpoint_file.exists():
+                try:
+                    checkpoint_file.write_text(
+                        json.dumps(asdict(context), indent=2, default=str),
+                        encoding="utf-8",
+                    )
+                except OSError as e:
+                    logger.warning("Failed to write checkpoint %s: %s", context_hash[:8], e)
+            self._checkpoint_disk_cache.add(context_hash)
 
         logger.debug(
             "Checkpoint %s for skill '%s' (inputs=%s, outputs=%s)",

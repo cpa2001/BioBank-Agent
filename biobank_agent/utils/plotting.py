@@ -37,6 +37,75 @@ PALETTE = [
 PALETTE_SEQ = "viridis"    # sequential colourmap
 PALETTE_DIV = "RdBu_r"     # diverging colourmap
 
+# Stable semantic colours for common biomedical plot roles. These helpers keep
+# case/control, risk, and significance colours consistent across skills.
+SEMANTIC_PALETTE = {
+    "primary": PALETTE[0],
+    "secondary": PALETTE[4],
+    "control": PALETTE[0],
+    "controls": PALETTE[0],
+    "case": PALETTE[1],
+    "cases": PALETTE[1],
+    "positive": PALETTE[2],
+    "negative": PALETTE[1],
+    "neutral": "#999999",
+    "low_risk": PALETTE[0],
+    "medium_risk": PALETTE[3],
+    "high_risk": PALETTE[1],
+    "significant": PALETTE[1],
+    "non_significant": "#999999",
+    "observed": PALETTE[0],
+    "expected": "#666666",
+    "reference": "#666666",
+    "missing": "#BDBDBD",
+}
+
+SEMANTIC_ALIASES = {
+    "label_0": "control",
+    "label_1": "case",
+    "non-significant": "non_significant",
+    "nonsignificant": "non_significant",
+    "risk_low": "low_risk",
+    "risk_medium": "medium_risk",
+    "risk_high": "high_risk",
+}
+
+
+def _normalise_semantic_role(role: str) -> str:
+    key = str(role).strip().lower().replace(" ", "_").replace("-", "_")
+    return SEMANTIC_ALIASES.get(key, key)
+
+
+def semantic_color(role: str, default: str | None = None) -> str:
+    """Return the stable colour assigned to a semantic plot role."""
+    key = _normalise_semantic_role(role)
+    if key in SEMANTIC_PALETTE:
+        return SEMANTIC_PALETTE[key]
+    return default if default is not None else PALETTE[0]
+
+
+def semantic_palette(
+    roles: Sequence[str],
+    default_cycle: Sequence[str] | None = None,
+) -> dict[str, str]:
+    """Map semantic roles to stable colours, cycling for unknown roles."""
+    cycle = list(default_cycle or PALETTE)
+    assigned: dict[str, str] = {}
+    unknown_idx = 0
+    for role in roles:
+        key = _normalise_semantic_role(role)
+        if key in SEMANTIC_PALETTE:
+            assigned[str(role)] = SEMANTIC_PALETTE[key]
+        else:
+            assigned[str(role)] = cycle[unknown_idx % len(cycle)]
+            unknown_idx += 1
+    return assigned
+
+
+def case_control_palette() -> dict[str, str]:
+    """Return the canonical control/case colour mapping."""
+    return semantic_palette(["control", "case"])
+
 # ── Nature style ────────────────────────────────────────────────
 
 NATURE_RC: dict = {

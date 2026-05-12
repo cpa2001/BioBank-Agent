@@ -28,8 +28,9 @@ logger = logging.getLogger(__name__)
         },
         "model_type": {
             "type": "string",
-            "description": "Model type for training: 'xgboost', 'lightgbm', or 'catboost'",
-            "default": "xgboost",
+            "description": "Model type for training: 'auto', 'xgb', 'lgbm', or 'catboost'",
+            "default": "auto",
+            "enum": ["auto", "xgb", "lgbm", "catboost", "xgboost", "lightgbm"],
         },
     },
     required=["icd10_code"],
@@ -37,7 +38,7 @@ logger = logging.getLogger(__name__)
 def discover(
     icd10_code: str,
     discovery_depth: str = "standard",
-    model_type: str = "xgboost",
+    model_type: str = "auto",
     *,
     ctx=None,
 ) -> dict:
@@ -71,11 +72,19 @@ def discover(
             model_type=model_type,
             ctx=ctx,
         )
+        if model_result.get("error"):
+            raise RuntimeError(model_result["error"])
+        trained_model_key = model_result.get("model_key")
+        trained_model_type = model_result.get("selected_model_type") or model_result.get("model_type", model_type)
         steps_completed.append("model_trained")
         results["model"] = {
-            "type": model_type,
-            "auc": model_result.get("mean_auc", model_result.get("auc")),
+            "type": trained_model_type,
+            "requested_type": model_type,
+            "model_key": trained_model_key,
+            "auc": model_result.get("mean_auc", model_result.get("auc_mean", model_result.get("auc"))),
             "n_features": model_result.get("n_features"),
+            "selection_rationale": model_result.get("selection_rationale"),
+            "fallback": model_result.get("fallback"),
         }
         if model_result.get("figures"):
             all_figures.extend(model_result["figures"])
@@ -87,7 +96,7 @@ def discover(
     logger.info("Discovery Step 3: Feature importance analysis")
     try:
         from biobank_agent.skills.feature_importance import feature_importance
-        model_key = f"{icd10_code}:{model_type}"
+        model_key = results.get("model", {}).get("model_key") or f"{icd10_code}_{model_type}"
         fi_result = feature_importance(model_key=model_key, ctx=ctx)
         steps_completed.append("features_ranked")
         top_features = fi_result.get("top_features", [])[:10]

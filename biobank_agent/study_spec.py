@@ -266,9 +266,18 @@ class StudySpec(BaseModel):
         if not self.modalities:
             return available_skills  # No restriction if no modalities specified
 
-        # Always allow core skills (prevalence, cohort, train_model, evaluate, etc.)
-        core_skills = {"prevalence", "cohort_summary", "train_model", "evaluate_model",
-                       "missing_data", "feature_importance", "risk_factors"}
+        # Always allow orchestration/report/guardrail skills. StudySpec should
+        # constrain scientific scope, not remove the machinery needed to prove,
+        # audit, repair and report the scoped analysis.
+        core_skills = {
+            "think", "project_doc", "deep_research", "field_search",
+            "prevalence", "cohort_summary", "cohort_card", "missing_data",
+            "train_model", "evaluate_model", "calibration",
+            "feature_importance", "risk_factors", "smart_plot",
+            "statistical_review", "safety_check", "world_model_audit",
+            "generate_report", "environment_repair", "shell_exec",
+            "python_exec", "create_skill",
+        }
 
         allowed_prefixes: set[str] = set()
         for mod in self.modalities:

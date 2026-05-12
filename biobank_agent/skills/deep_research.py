@@ -235,6 +235,12 @@ def _search_literature(topic: str, max_sources: int, ctx: Any) -> list[dict]:
             f"{topic} scientific study",
             f"{topic} {bank_name}",
         ]
+        if _needs_biobank_literature_filter(topic):
+            queries.extend([
+                f"{topic} PubMed",
+                f"{topic} cohort study biomarkers",
+                f"site:pubmed.ncbi.nlm.nih.gov {topic}",
+            ])
         all_results: list[dict] = _curated_sources_for_topic(topic, max_sources)
         for q in queries:
             res = web_search(
@@ -243,6 +249,8 @@ def _search_literature(topic: str, max_sources: int, ctx: Any) -> list[dict]:
                 ctx=ctx,
             )
             all_results.extend(res.get("results", []))
+            if len(_dedupe_sources(all_results)) >= max_sources:
+                break
 
         # Fallback passes for long/noisy topics that often return zero hits.
         if not all_results:
@@ -268,7 +276,7 @@ def _search_literature(topic: str, max_sources: int, ctx: Any) -> list[dict]:
 
         # Biomedical API fallback when credible search-engine results are empty/sparse.
         needs_filter = _needs_biobank_literature_filter(topic)
-        threshold = max(3, max_sources // 3)
+        threshold = min(max_sources, max(8, max_sources // 2)) if needs_filter else max(3, max_sources // 3)
         if (needs_filter and len(filtered) < threshold) or (not needs_filter and len(all_results) < threshold):
             pmc_results = _search_europe_pmc(topic=topic, max_results=max_sources)
             filtered = _filter_literature_sources(filtered + pmc_results, topic)
@@ -278,6 +286,21 @@ def _search_literature(topic: str, max_sources: int, ctx: Any) -> list[dict]:
     except Exception as exc:
         logger.warning("Literature search failed: %s", exc)
         return []
+
+
+def _planned_search_attempts(topic: str, bank_name: str) -> list[str]:
+    attempts = [
+        f"{topic} scientific study",
+        f"{topic} {bank_name}",
+    ]
+    if _needs_biobank_literature_filter(topic):
+        attempts.extend([
+            f"{topic} PubMed",
+            f"{topic} cohort study biomarkers",
+            f"site:pubmed.ncbi.nlm.nih.gov {topic}",
+            "Europe PMC API fallback",
+        ])
+    return attempts
 
 
 def _fetch_abstracts(sources: list[dict], max_fetch: int, ctx: Any) -> list[dict]:
@@ -457,6 +480,7 @@ def deep_research(topic: str, max_sources: int = 10, *, ctx=None) -> dict:
 
     # Step 1: Search literature
     sources = _search_literature(topic, max_sources, ctx)
+    min_expected_sources = min(max_sources, 8 if _needs_biobank_literature_filter(topic) else 3)
 
     # Step 2: Fetch abstracts for top results (limit network calls)
     max_fetch = min(5, len(sources))
@@ -501,6 +525,12 @@ def deep_research(topic: str, max_sources: int = 10, *, ctx=None) -> dict:
             for s in sources
         ],
         "n_sources": len(sources),
+        "status": "READY" if len(sources) >= min_expected_sources else "PARTIAL",
+        "min_expected_sources": min_expected_sources,
+        "search_attempts": _planned_search_attempts(topic, bank_name),
+        "warnings": [] if len(sources) >= min_expected_sources else [
+            f"Only {len(sources)} credible source(s) found; expected at least {min_expected_sources} for this research topic."
+        ],
         "biobank_relevant_fields": biobank_fields,
         "n_biobank_fields": len(biobank_fields),
         "brief": brief,

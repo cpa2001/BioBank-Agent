@@ -23,10 +23,15 @@ from biobank_agent.utils.stats import log_rank_test
             "type": "string",
             "description": "ICD10 code prefix (e.g. 'E11')",
         },
+        "controls_ratio": {
+            "type": "integer",
+            "description": "Controls per case for optional downsampling. Use 0 or omit to include all eligible controls.",
+            "default": 0,
+        },
     },
     required=["icd10_code"],
 )
-def survival(icd10_code: str, *, ctx=None) -> dict:
+def survival(icd10_code: str, controls_ratio: int = 0, *, ctx=None) -> dict:
     dm = ctx.dm
     diag_col = ctx.settings.diagnoses_code_col
     id_col = ctx.settings.subject_id_col
@@ -115,10 +120,14 @@ def survival(icd10_code: str, *, ctx=None) -> dict:
 
     # Separate cases and controls
     cases = ages[ages["is_case"] == 1]
-    controls = ages[ages["is_case"] == 0].sample(
-        min(len(cases) * 4, len(ages[ages["is_case"] == 0])),
-        random_state=42
-    )
+    all_controls = ages[ages["is_case"] == 0]
+    if controls_ratio and controls_ratio > 0:
+        controls = all_controls.sample(
+            min(len(cases) * controls_ratio, len(all_controls)),
+            random_state=42,
+        )
+    else:
+        controls = all_controls
 
     # Fit KM curves
     try:
@@ -166,6 +175,8 @@ def survival(icd10_code: str, *, ctx=None) -> dict:
             "disease": icd10_name(icd10_code),
             "n_cases": len(cases),
             "n_controls": len(controls),
+            "controls_ratio": controls_ratio,
+            "controls_sampling_applied": bool(controls_ratio and controls_ratio > 0),
             "case_deaths": int(cases["is_dead"].sum()),
             "control_deaths": int(controls["is_dead"].sum()),
             "case_mortality_rate": round(float(cases["is_dead"].mean()) * 100, 2),

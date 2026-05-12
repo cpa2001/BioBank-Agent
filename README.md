@@ -6,7 +6,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1098%20passed-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1148%20passed-brightgreen.svg)](#testing)
 
 *Natural language interface to large-scale biobank cohorts — from hypothesis to publication-quality report.*
 
@@ -22,14 +22,14 @@ Biobank Agent is an LLM-powered scientific discovery system designed for populat
 - **Hypothesis-driven discovery** — automated pipelines from cohort building through feature importance to PheWAS
 - **Genetic target hypotheses** — genetics-first rare-variant burden ranking from GeneBass-like summary statistics, with therapeutic direction, pathway convergence, and validation caveats
 - **Target annotation and enrichment** — biobank target lists can be interpreted with Open Targets, UniProt, GTEx, ClinicalTrials.gov, optional CELLxGENE snapshots, and local GMT enrichment without changing the genetic ranking
-- **Predictive modelling** — XGBoost/LightGBM/CatBoost with cross-validation, calibration, and SHAP explanations
+- **Predictive modelling** — automatic model selection across XGBoost/LightGBM/CatBoost with stratified CV, calibration, and SHAP explanations
 - **Literature integration** — search papers, read PDFs, cross-reference findings with biobank data
-- **Publication-quality output** — Nature/ICML-style SVG+PDF figures, dual-format reports (technical & IMRaD)
+- **Publication-quality output** — Nature/ICML-style SVG+PDF figures, dual-format reports (technical & IMRaD), executive findings, and reproducible appendices
 - **Self-evolution** — learns from errors, records analysis pipelines, generates new skills at runtime
-- **Plan mode** — structured multi-step planning with stage gates for complex analyses
+- **Plan mode** — structured multi-step planning with checkpoints, resume support, execution logs, and report-visible provenance
 - **Native multi-agent routing** — auto-detects complex tasks and coordinates multiple frontier models
 - **Project documentation access** — a read-only `project_doc` skill exposes README, data reference, architecture, guide, and plugin Markdown to the agent
-- **Local Codex/Claude bridge** — optional `@skill` tools call this workstation's Codex and Claude Code CLIs for independent planning and execution review
+- **Codex-first external review** — optional `@skill` tools call local Codex and Claude Code CLIs; Codex/GPT-5.5 xhigh is the default review gate, with Claude as an optional secondary reviewer
 
 Currently validated on **UK Biobank** (502K participants, 4,971 phenotype fields, 6.9M diagnosis records). Architecture supports extension to FinnGen, China Kadoorie Biobank, and other population cohorts.
 
@@ -63,6 +63,29 @@ biobank> Run local GMT enrichment for the top LDL target genes
 biobank> Read this paper and compare with our cohort data
 biobank> /plan Comprehensive cardiovascular risk analysis
 biobank> Generate a Nature-quality report for all analyses
+```
+
+## Reports and Evaluation
+
+Reports are generated in two public-facing styles:
+
+- `format="technical"` / `format="report"`: executive findings first, methods and diagnostics in appendices, with guardrail issues and execution logs separated from biological interpretation.
+- `format="nature"` / `format="paper"`: IMRaD structure with abstract, methods, results, discussion, references, data availability, and non-causal interpretation caveats.
+
+The report generator filters raw logs, reviewer chatter, local paths, unresolved placeholders, and unsupported causal claims from the lead findings. Detailed execution records remain available in the appendix for audit and replay.
+
+Evaluation suites distinguish offline report quality from live UKB execution:
+
+- `report_20_case`: 20 deterministic UKB-oriented synthetic aggregate report cases for fast report regression testing.
+- `live_ukb_report_20`: 20 live UK Biobank workflow probes that fail closed unless a real UKB data manager and field catalog are configured.
+- `agent_report_workflow`: staged agent workflow checks for literature grounding, cohort/model execution, guardrails, and final report generation.
+
+Codex is the default external review gate:
+
+```bash
+biobank eval --suite report_20_case --review-loop --reviewer codex-gpt-5.5-xhigh
+biobank eval --suite report_20_case --review-loop --reviewer codex-gpt-5.5-xhigh --include-claude
+biobank eval --suite live_ukb_report_20 --review-loop
 ```
 
 ## Architecture
@@ -138,6 +161,11 @@ biobank_agent/
 | `/codex-check [focus]` | Ask Codex to review execution/code |
 | `/claude-plan <task>` | Ask Claude Code for a read-only plan |
 | `/claude-check [focus]` | Ask Claude Code to review execution/code |
+| `/mcp-list` | List configured MCP servers and loaded remote tools |
+| `/mcp-start` | Start configured MCP servers and register remote tools |
+| `/mcp-health [--repair]` | Probe MCP servers and optionally reconnect unhealthy ones |
+| `/mcp-call <tool> [json]` | Call a loaded MCP tool directly for audit/debugging |
+| `/mcp-stop` | Stop MCP clients and unregister remote tools |
 
 ## Local Agent Plugins
 
@@ -146,7 +174,7 @@ Biobank Agent includes repo-local plugin bundles:
 - Codex: `plugins/biobank-agent` with marketplace metadata in `.agents/plugins/marketplace.json`
 - Claude Code: `plugins/biobank-agent-claude` with marketplace metadata in `.claude-plugin/marketplace.json`
 
-Inside Biobank Agent, the corresponding skills are `external_agent_status`, `codex_plan`, `codex_check_execution`, `claude_plan`, and `claude_check_execution`. These default to read-only planning/review modes and are covered by mocked tests, so the suite does not spend real model quota.
+Inside Biobank Agent, the corresponding skills are `external_agent_status`, `codex_plan`, `codex_check_execution`, `claude_plan`, and `claude_check_execution`. Codex review is the default for eval review loops; Claude Code is available as an explicit opt-in second opinion. These skills default to read-only planning/review modes and are covered by mocked tests, so the suite does not spend real model quota.
 
 Before using Claude Code from inside Biobank Agent, authenticate Claude Code on
 the workstation:
@@ -160,6 +188,8 @@ After login, verify the bridge from the Biobank Agent shell:
 
 ```text
 /external-agents
+/codex-plan Draft a guarded report workflow
+/codex-check Check report guardrails
 /claude-plan Draft a guarded report workflow
 /claude-check Check report guardrails
 ```
@@ -218,8 +248,12 @@ pytest tests/ -v                          # All tests
 pytest tests/ -v -m "not integration"     # Skip API-dependent tests
 biobank eval --suite skill_schemas --mode baseline
 biobank eval --suite report_quality --mode baseline
+biobank eval --suite report_20_case --mode baseline
+biobank eval --suite live_ukb_report_20 --mode baseline
 biobank eval --suite agent_report_workflow --mode baseline
 ```
+
+Current local regression status: `1148 passed, 11 skipped`.
 
 ## Platform Support
 

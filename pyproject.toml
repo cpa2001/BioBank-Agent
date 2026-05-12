@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "biobank-agent"
-version = "2.3.0"
+version = "3.0.0-rc1"
 description = "Autonomous scientific discovery agent for population-scale biobank research"
 readme = "README.md"
 license = {text = "MIT"}
@@ -46,7 +46,7 @@ dependencies = [
     "httpx>=0.27",
     "html2text>=2024.2",
     "beautifulsoup4>=4.12",
-    "duckduckgo-search>=6.0",
+    "ddgs>=9.14.2",
     "pyyaml>=6.0",
 ]
 
@@ -71,6 +71,14 @@ literature = [
 structured = [
     "instructor>=1.0",
 ]
+tui = [
+    "textual>=0.80",
+]
+tracing = [
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
+]
 enrichment = [
     "gseapy>=1.1",
 ]
@@ -88,6 +96,10 @@ all = [
     "neo4j>=5.0",
     "paper-qa>=5.0",
     "instructor>=1.0",
+    "textual>=0.80",
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
     "gseapy>=1.1",
     "cellxgene-census>=1.15; python_version < '3.13'",
     "coverage>=7.6",
@@ -100,7 +112,10 @@ biobank = "biobank_agent.cli:main"
 include = ["biobank_agent*"]
 
 [tool.pytest.ini_options]
-markers = ["integration: Integration tests requiring real LLM API"]
+markers = [
+    "integration: Integration tests requiring real LLM API",
+    "usually: Soft behavioral evaluations intended for scheduled or manual runs",
+]
 
 [tool.coverage.run]
 source = ["biobank_agent"]

@@ -39,6 +39,16 @@ logger = logging.getLogger(__name__)
             "type": "string",
             "description": "Python code implementing the skill (will be indented into function body)",
         },
+        "activate": {
+            "type": "boolean",
+            "description": "Request activation into custom_skills after validation. Requires explicit approval in ctx.",
+            "default": False,
+        },
+        "approved": {
+            "type": "boolean",
+            "description": "True only after explicit user approval for this generated skill activation.",
+            "default": False,
+        },
     },
     required=["name", "description", "parameters", "code_body"],
 )
@@ -47,6 +57,8 @@ def create_skill(
     description: str,
     parameters: str,
     code_body: str,
+    activate: bool = False,
+    approved: bool = False,
     *,
     ctx=None,
 ) -> dict:
@@ -119,6 +131,12 @@ def create_skill(
             "error": f"Failed to generate skill code: {e}",
         }
     
+    if ctx is None or not getattr(ctx, "settings", None):
+        return {
+            "status": "validation_failed",
+            "error": "create_skill requires an agent ctx with settings.",
+        }
+
     # Save to temporary location for review
     try:
         temp_skill_dir = ctx.settings.reports_dir / "generated_skills"
@@ -134,22 +152,35 @@ def create_skill(
             "error": f"Failed to save skill file: {e}",
         }
 
-    # Auto-activate: copy to custom_skills/ and hot-reload into registry
+    # Activation is deliberately opt-in. Generated code is first-class output,
+    # but turning it into an executable tool requires explicit user approval
+    # represented by both call args and a trusted ctx flag.
     activated = False
-    try:
-        custom_dir = ctx.settings.custom_skills_dir
-        custom_dir.mkdir(parents=True, exist_ok=True)
-        active_path = custom_dir / f"{name}.py"
-        active_path.write_text(skill_code)
+    active_path = None
+    activation_allowed = bool(
+        activate
+        and approved
+        and (
+            getattr(ctx, "allow_skill_activation", False)
+            or getattr(getattr(ctx, "state", None), "custom_data", {}).get("allow_skill_activation")
+        )
+    )
+    if activation_allowed:
+        try:
+            custom_dir = ctx.settings.custom_skills_dir
+            custom_dir.mkdir(parents=True, exist_ok=True)
+            active_path = custom_dir / f"{name}.py"
+            active_path.write_text(skill_code)
 
-        # Hot-reload into the running registry
-        from biobank_agent.registry import discover_custom_skills
-        n_loaded = discover_custom_skills(custom_dir)
-        if n_loaded > 0:
-            activated = True
-            logger.info("Skill '%s' hot-loaded into registry", name)
-    except Exception as e:
-        logger.warning("Auto-activation failed (skill still saved for manual review): %s", e)
+            # Hot-reload into the running registry
+            from biobank_agent.registry import discover_custom_skills, get_registry
+            n_loaded = discover_custom_skills(custom_dir)
+            registry = get_registry()
+            if n_loaded > 0 or name in registry:
+                activated = True
+                logger.info("Skill '%s' hot-loaded into registry", name)
+        except Exception as e:
+            logger.warning("Activation failed (skill still saved for manual review): %s", e)
 
     if activated:
         message = (
@@ -160,18 +191,32 @@ def create_skill(
         )
     else:
         message = (
-            f"Skill '{name}' generated and saved.\n\n"
+            f"Skill '{name}' generated and saved for review.\n\n"
             f"Next steps:\n"
             f"1. Review the code at: {skill_path}\n"
-            f"2. If approved, move to: biobank_agent/skills/{name}.py\n"
-            f"3. Restart the agent to import and use the skill\n\n"
-            f"Generated skill is INACTIVE until moved to biobank_agent/skills/"
+            f"2. If approved, run an activation flow that sets activate=true "
+            f"and approved=true with ctx.allow_skill_activation.\n\n"
+            f"Generated skill is INACTIVE until explicitly activated."
         )
+
+    schema = None
+    try:
+        from biobank_agent.registry import get_registry
+        schema = next(
+            (s for s in get_registry().tool_schemas() if s.get("function", {}).get("name") == name),
+            None,
+        )
+    except Exception:
+        schema = None
 
     return {
         "status": "success",
+        "skill_name": name,
         "generated_skill_path": str(skill_path),
+        "active_path": str(active_path) if activated and active_path else None,
         "activated": activated,
+        "schema": schema,
+        "activation_error": "" if activated else "Skill saved but not activated.",
         "code": skill_code,
         "message": message,
     }

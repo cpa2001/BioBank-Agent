@@ -25,6 +25,7 @@ class ModelState:
         self.labels = None
         self.figures = []
         self.cohorts = {}
+        self.custom_data = {}
 
 
 def model_ctx(tmp_path):
@@ -196,6 +197,31 @@ def test_calibration_errors_and_success(tmp_path, monkeypatch):
     plt.close("all")
 
 
+def test_calibration_prefers_holdout_evaluation_cache(tmp_path, monkeypatch):
+    ctx = model_ctx(tmp_path)
+    model, X, y = fitted_logistic_model()
+    ctx.state.models["E11_lr"] = model
+    ctx.state.feature_matrix = X
+    ctx.state.labels = y
+    ctx.state.custom_data["model_evaluation"] = {
+        "E11_lr": {
+            "evaluation_scope": "holdout_validation",
+            "y_true": np.array([0, 0, 1, 1]),
+            "y_prob": np.array([0.1, 0.2, 0.8, 0.9]),
+            "n": 4,
+        }
+    }
+    monkeypatch.setattr(calibration_mod, "save_figure", fake_save_figure)
+
+    result = calibration_mod.calibration("E11_lr", n_bins=2, ctx=ctx)
+
+    assert result["evaluation_scope"] == "holdout_validation"
+    assert result["n_evaluation"] == 4
+    assert result["warning"] == ""
+    assert result["brier_score"] < 0.05
+    plt.close("all")
+
+
 def training_cohort(n_cases=120, n_controls=480):
     labels = np.array([1] * n_cases + [0] * n_controls)
     n = len(labels)
@@ -251,7 +277,7 @@ def test_train_model_reuses_cached_cohort_and_rejects_unknown_estimator(tmp_path
     with pytest.raises(ValueError, match="Unknown model type"):
         train_mod._get_estimator("bad")
 
-    ctx.state.cohorts["E11_1:4"] = training_cohort()
+    ctx.state.cohorts["E11_1:all"] = training_cohort()
     monkeypatch.setattr(train_mod, "_get_estimator", lambda model_type: SimpleNamespace(model_type=model_type))
     monkeypatch.setattr(
         train_mod,
@@ -269,6 +295,91 @@ def test_train_model_reuses_cached_cohort_and_rejects_unknown_estimator(tmp_path
 
     assert result["model_key"] == "E11_lgbm"
     assert ctx.state.models["E11_lgbm"].name == "b"
+
+
+def test_train_model_auto_compares_candidates_and_stores_selection(tmp_path, monkeypatch):
+    ctx = model_ctx(tmp_path)
+    monkeypatch.setattr(train_mod, "build_cohort", lambda *args, **kwargs: training_cohort())
+    monkeypatch.setattr(train_mod, "_get_estimator", lambda model_type: SimpleNamespace(model_type=model_type))
+
+    estimators = {
+        "xgb": [SimpleNamespace(name="xgb0"), SimpleNamespace(name="xgb1"), SimpleNamespace(name="xgb2")],
+        "lgbm": [SimpleNamespace(name="lgbm0"), SimpleNamespace(name="lgbm1"), SimpleNamespace(name="lgbm2")],
+        "catboost": [SimpleNamespace(name="cat0"), SimpleNamespace(name="cat1"), SimpleNamespace(name="cat2")],
+        "sklearn_rf": [SimpleNamespace(name="rf0"), SimpleNamespace(name="rf1"), SimpleNamespace(name="rf2")],
+        "logistic": [SimpleNamespace(name="log0"), SimpleNamespace(name="log1"), SimpleNamespace(name="log2")],
+    }
+    aucs = {
+        "xgb": np.array([0.70, 0.71, 0.72]),
+        "lgbm": np.array([0.80, 0.84, 0.82]),
+        "catboost": np.array([0.75, 0.74, 0.76]),
+        "sklearn_rf": np.array([0.77, 0.78, 0.79]),
+        "logistic": np.array([0.69, 0.68, 0.70]),
+    }
+    cv_kwargs = []
+
+    def fake_cross_validate(estimator, *args, **kwargs):
+        cv_kwargs.append(kwargs)
+        scores = aucs[estimator.model_type]
+        return {
+            "test_auc": scores,
+            "test_f1": np.array([0.5, 0.6, 0.7]),
+            "test_precision": np.array([0.4, 0.5, 0.6]),
+            "test_recall": np.array([0.7, 0.8, 0.9]),
+            "estimator": estimators[estimator.model_type],
+        }
+
+    monkeypatch.setattr(train_mod, "cross_validate", fake_cross_validate)
+
+    result = train_mod.train_model("E11", model_type="auto", n_folds=3, ctx=ctx)
+
+    assert result["model_key"] == "E11_lgbm"
+    assert result["requested_model_type"] == "auto"
+    assert result["selected_model_type"] == "lgbm"
+    assert result["candidate_comparison"][0]["model_type"] == "xgb"
+    assert {c["model_type"] for c in result["candidate_comparison"]} == {"xgb", "lgbm", "catboost", "sklearn_rf", "logistic"}
+    assert result["model_selection"]["candidate_order"] == ["xgb", "lgbm", "catboost", "sklearn_rf", "logistic"]
+    assert "highest mean CV AUC" in result["selection_rationale"]
+    assert result["performance_grade"] == "good"
+    assert result["optimization_status"] == "good_enough_for_internal_reporting"
+    assert result["fallback"]["used"] is False
+    assert ctx.state.models["E11_lgbm"] is estimators["lgbm"][1]
+    assert ctx.state.model_metadata["E11_lgbm"]["model_selection"]["selected_model_type"] == "lgbm"
+    assert all(kwargs["n_jobs"] == 1 for kwargs in cv_kwargs)
+
+
+def test_train_model_auto_falls_back_when_boosted_candidates_fail(tmp_path, monkeypatch):
+    ctx = model_ctx(tmp_path)
+    monkeypatch.setattr(train_mod, "build_cohort", lambda *args, **kwargs: training_cohort())
+
+    def fail_get_estimator(model_type):
+        raise ImportError(f"{model_type} unavailable")
+
+    monkeypatch.setattr(train_mod, "_get_estimator", fail_get_estimator)
+    monkeypatch.setattr(train_mod, "_get_fallback_estimator", lambda: SimpleNamespace(model_type="sklearn_rf"))
+    fallback_estimators = [SimpleNamespace(name="rf0"), SimpleNamespace(name="rf1")]
+
+    def fake_cross_validate(estimator, *args, **kwargs):
+        assert estimator.model_type == "sklearn_rf"
+        return {
+            "test_auc": np.array([0.63, 0.66]),
+            "test_f1": np.array([0.5, 0.55]),
+            "test_precision": np.array([0.45, 0.50]),
+            "test_recall": np.array([0.6, 0.65]),
+            "estimator": fallback_estimators,
+        }
+
+    monkeypatch.setattr(train_mod, "cross_validate", fake_cross_validate)
+
+    result = train_mod.train_model("E11", model_type="auto", n_folds=2, ctx=ctx)
+
+    assert result["model_key"] == "E11_sklearn_rf"
+    assert result["selected_model_type"] == "sklearn_rf"
+    assert result["fallback"]["used"] is True
+    assert result["fallback"]["reason"] == "no automatic candidate completed cross-validation"
+    assert [c["status"] for c in result["candidate_comparison"][:5]] == ["failed", "failed", "failed", "failed", "failed"]
+    assert result["candidate_comparison"][-1]["role"] == "fallback"
+    assert ctx.state.models["E11_sklearn_rf"] is fallback_estimators[1]
 
 
 def test_get_estimator_optional_model_backends(monkeypatch):
@@ -289,12 +400,24 @@ def test_get_estimator_optional_model_backends(monkeypatch):
     monkeypatch.setitem(sys.modules, "catboost", SimpleNamespace(CatBoostClassifier=FakeCatBoostClassifier))
 
     xgb = train_mod._get_estimator("xgb")
+    xgb_alias = train_mod._get_estimator("xgboost")
     lgbm = train_mod._get_estimator("lgbm")
+    lgbm_alias = train_mod._get_estimator("lightgbm")
     catboost = train_mod._get_estimator("catboost")
+    rf = train_mod._get_estimator("rf")
+    logistic = train_mod._get_estimator("logreg")
 
     assert isinstance(xgb, FakeXGBClassifier)
+    assert isinstance(xgb_alias, FakeXGBClassifier)
     assert xgb.kwargs["eval_metric"] == "logloss"
+    assert xgb.kwargs["n_jobs"] == 1
     assert isinstance(lgbm, FakeLGBMClassifier)
+    assert rf.n_estimators == 200
+    assert hasattr(logistic, "fit")
+    assert isinstance(lgbm_alias, FakeLGBMClassifier)
     assert lgbm.kwargs["is_unbalance"] is True
+    assert lgbm.kwargs["n_jobs"] == 1
     assert isinstance(catboost, FakeCatBoostClassifier)
     assert catboost.kwargs["auto_class_weights"] == "Balanced"
+    assert catboost.kwargs["thread_count"] == 1
+    assert catboost.kwargs["allow_writing_files"] is False

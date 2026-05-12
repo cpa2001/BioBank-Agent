@@ -119,7 +119,7 @@ def phewas(field_id: str, min_cases: int = 500, *, ctx=None) -> dict:
     ax.set_xticks(x_ticks)
     ax.set_xticklabels(x_labels, fontsize=5)
     ax.set_xlabel("ICD10 Chapter")
-    ax.set_ylabel("-log₁₀(p)")
+    ax.set_ylabel(r"$-\log_{10}(p)$")
     ax.set_title(f"PheWAS: {biomarker_name} (field {field_id})")
     fig.tight_layout()
     paths = save_figure(fig, f"phewas_{field_id}", ctx.report_dir)

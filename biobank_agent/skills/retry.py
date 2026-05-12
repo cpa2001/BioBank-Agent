@@ -110,10 +110,10 @@ def retry_on_error(
 def _modify_parameters_for_retry(kwargs: Dict[str, Any], attempt_number: int) -> None:
     """Modify kwargs to reduce computational complexity for retry.
     
-    Intelligently reduces parameters that commonly cause failures:
+    Intelligently reduces computational parameters that commonly cause failures:
     - n_folds: Cross-validation folds (reduce by 1, min 2)
     - n_repeats: Repetitions (reduce by 1, min 1)
-    - sample_size: Sample size (divide by 2, min 10)
+    - sample_size: never reduced automatically; full-data analysis remains the default
     - top_n: Number of top items (cap at 10)
     - n_cases_min: Minimum case threshold (reduce by 10%)
     
@@ -139,14 +139,6 @@ def _modify_parameters_for_retry(kwargs: Dict[str, Any], attempt_number: int) ->
         kwargs["n_repeats"] = max(1, kwargs["n_repeats"] - 1)
         logger.debug(
             f"n_repeats: {old_val} → {kwargs['n_repeats']}"
-        )
-    
-    # Reduce sample size
-    if "sample_size" in kwargs:
-        old_val = kwargs["sample_size"]
-        kwargs["sample_size"] = max(10, kwargs["sample_size"] // 2)
-        logger.debug(
-            f"sample_size: {old_val} → {kwargs['sample_size']}"
         )
     
     # Cap top_n at reasonable value

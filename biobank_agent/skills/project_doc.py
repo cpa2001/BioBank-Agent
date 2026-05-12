@@ -24,6 +24,11 @@ _DOC_DIRS = (
 )
 _TEXT_EXTENSIONS = {".md", ".mdx", ".txt"}
 _EXCLUDED_PARTS = {"deep_research", "__pycache__"}
+_SENSITIVE_DOC_PATTERNS = (
+    (re.compile(r"\b[a-z0-9_]*api[_\-\s]?key\b", re.IGNORECASE), "API credential"),
+    (re.compile(r"\b[a-z0-9_]*secret[_\-\s]?key\b", re.IGNORECASE), "secret credential"),
+    (re.compile(r"\b[a-z0-9_]*access[_\-\s]?token\b", re.IGNORECASE), "access credential"),
+)
 
 
 def _within_repo(path: Path) -> bool:
@@ -95,10 +100,18 @@ def _title_for(path: Path, text: str | None = None) -> str:
     return path.stem
 
 
+def _sanitize_doc_text(text: str) -> str:
+    """Remove sensitive configuration token names before docs hit transcripts."""
+    safe = str(text or "")
+    for pattern, replacement in _SENSITIVE_DOC_PATTERNS:
+        safe = pattern.sub(replacement, safe)
+    return safe
+
+
 def _snippet(text: str, query: str, max_len: int = 360) -> tuple[str, int | None]:
     if not query:
         preview = re.sub(r"\s+", " ", text).strip()
-        return preview[:max_len], None
+        return _sanitize_doc_text(preview[:max_len]), None
 
     lower = text.lower()
     query_lower = query.lower()
@@ -111,7 +124,7 @@ def _snippet(text: str, query: str, max_len: int = 360) -> tuple[str, int | None
     start = max(0, idx - max_len // 3)
     end = min(len(text), start + max_len)
     snippet = re.sub(r"\s+", " ", text[start:end]).strip()
-    return snippet, line_no
+    return _sanitize_doc_text(snippet), line_no
 
 
 def _score(text: str, query: str, path: Path) -> int:
@@ -213,12 +226,13 @@ def project_doc(
             }
         text = doc_path.read_text(encoding="utf-8", errors="replace")
         rel = doc_path.relative_to(_REPO_ROOT).as_posix()
+        content = _sanitize_doc_text(text[:max_chars])
         return {
             "status": "success",
             "mode": "read",
             "path": rel,
             "title": _title_for(doc_path, text),
-            "content": text[:max_chars],
+            "content": content,
             "truncated": len(text) > max_chars,
             "chars": len(text),
         }
@@ -251,7 +265,7 @@ def project_doc(
     return {
         "status": "success",
         "mode": "search",
-        "query": query,
+        "query": _sanitize_doc_text(query),
         "total": len(matches),
         "results": matches[:limit],
     }

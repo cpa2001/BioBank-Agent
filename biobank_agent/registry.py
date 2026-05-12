@@ -17,6 +17,7 @@ Usage in a skill file::
 
 from __future__ import annotations
 
+import ast
 import importlib
 import logging
 import pkgutil
@@ -79,7 +80,7 @@ class SkillRegistry:
 
     # ── Execution ────────────────────────────────────────
 
-    def execute(self, name: str, args: dict, ctx: Any = None) -> Any:
+    def execute(self, name: str, args: dict | None, ctx: Any = None) -> Any:
         """Execute a skill by name, injecting ctx if the function accepts it."""
         if name not in self._callables:
             if name in self._module_paths:
@@ -99,9 +100,10 @@ class SkillRegistry:
                 raise ValueError(f"Unknown skill: {name}")
 
         func = self._callables[name]
+        call_args = dict(args or {})
         if ctx is not None:
-            args["ctx"] = ctx
-        return func(**args)
+            call_args["ctx"] = ctx
+        return func(**call_args)
 
     # ── Schema access ────────────────────────────────────
 
@@ -182,7 +184,13 @@ def skill(
 # ── Auto-discovery ──────────────────────────────────────────
 
 def autodiscover_skills(package_path: str = "biobank_agent.skills") -> None:
-    """Import all modules in the skills package to trigger @skill decorators."""
+    """Discover skills without importing heavy analysis modules.
+
+    The production skill package is schema-first: we can read literal
+    ``@skill(...)`` decorators with ``ast`` and register lazy module paths.
+    This keeps CLI startup and `/skills` fast, while preserving the old
+    eager-import behavior for ad-hoc test packages and non-literal edge cases.
+    """
     try:
         pkg = importlib.import_module(package_path)
     except ImportError:
@@ -190,6 +198,15 @@ def autodiscover_skills(package_path: str = "biobank_agent.skills") -> None:
         return
 
     pkg_dir = Path(pkg.__file__).parent
+    if package_path == "biobank_agent.skills":
+        _autodiscover_builtin_skills(package_path, pkg_dir)
+        return
+
+    _autodiscover_eager(package_path, pkg_dir)
+
+
+def _autodiscover_eager(package_path: str, pkg_dir: Path) -> None:
+    """Legacy eager import discovery, kept for third-party/test packages."""
     for finder, module_name, is_pkg in pkgutil.iter_modules([str(pkg_dir)]):
         if module_name.startswith("_"):
             continue
@@ -199,6 +216,84 @@ def autodiscover_skills(package_path: str = "biobank_agent.skills") -> None:
             logger.debug("Loaded skill module: %s", full_name)
         except Exception as e:
             logger.warning("Failed to load skill %s: %s", full_name, e)
+
+
+def _autodiscover_builtin_skills(package_path: str, pkg_dir: Path) -> None:
+    """Register built-in skills lazily from decorator schemas."""
+    for file_path in sorted(pkg_dir.glob("*.py")):
+        module_name = file_path.stem
+        if module_name.startswith("_"):
+            continue
+        module_path = f"{package_path}.{module_name}"
+        try:
+            loaded = _register_lazy_schemas_from_file(file_path, module_path)
+        except Exception as e:
+            loaded = False
+            logger.debug("AST skill discovery failed for %s: %s", module_path, e)
+        if loaded:
+            continue
+        try:
+            importlib.import_module(module_path)
+            logger.debug("Loaded skill module: %s", module_path)
+        except Exception as e:
+            logger.warning("Failed to load skill %s: %s", module_path, e)
+
+
+def _register_lazy_schemas_from_file(file_path: Path, module_path: str) -> bool:
+    """Parse literal @skill decorators and register their schemas lazily.
+
+    Returns True when the file was handled without import. Files with no skill
+    decorators are still handled; helper modules should not slow startup.
+    """
+    tree = ast.parse(file_path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            parsed = _schema_from_skill_decorator(decorator)
+            if parsed is None:
+                continue
+            name, schema = parsed
+            _registry.register_lazy(name, module_path, schema)
+    return True
+
+
+def _schema_from_skill_decorator(decorator: ast.AST) -> tuple[str, dict] | None:
+    if not isinstance(decorator, ast.Call):
+        return None
+    func_name = getattr(decorator.func, "id", None)
+    if func_name != "skill":
+        return None
+
+    values: dict[str, Any] = {}
+    for keyword in decorator.keywords:
+        if keyword.arg is None:
+            continue
+        values[keyword.arg] = ast.literal_eval(keyword.value)
+
+    name = values.get("name")
+    description = values.get("description")
+    parameters = values.get("parameters")
+    if not isinstance(name, str) or not isinstance(description, str) or not isinstance(parameters, dict):
+        raise ValueError("skill decorator must define literal name, description and parameters")
+
+    required = values.get("required")
+    if required is None:
+        required = [p for p, pdef in parameters.items() if isinstance(pdef, dict) and "default" not in pdef]
+
+    schema = {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": {pname: {k: v for k, v in pdef.items()} for pname, pdef in parameters.items()},
+                "required": list(required),
+            },
+        },
+    }
+    return name, schema
 
 
 def discover_custom_skills(custom_dir: Path) -> int:

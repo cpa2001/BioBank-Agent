@@ -268,12 +268,12 @@ Analyze and respond with this exact JSON format:
                     new_value=max(2, args["n_folds"] - 1),
                     reason="Reduce folds due to insufficient data",
                 ))
-            if "controls_ratio" in args and isinstance(args["controls_ratio"], int) and args["controls_ratio"] > 1:
+            if "controls_ratio" in args and isinstance(args["controls_ratio"], int) and args["controls_ratio"] > 0:
                 corrections.append(Correction(
                     param="controls_ratio",
                     old_value=args["controls_ratio"],
-                    new_value=max(1, args["controls_ratio"] // 2),
-                    reason="Reduce control ratio to get more balanced cohort",
+                    new_value=0,
+                    reason="Use all eligible controls instead of downsampling the control cohort",
                 ))
             if corrections:
                 return ReflectionResult(
@@ -285,10 +285,12 @@ Analyze and respond with this exact JSON format:
                     summary="Fast-path: reduce parameters for small datasets",
                 )
 
-        # Memory/timeout errors — reduce scope
+        # Memory/timeout errors — reduce computational knobs, but do not reduce
+        # data volume automatically. Biobank analyses default to full eligible
+        # data; sampling is only applied when the user explicitly requests it.
         if error_type in ("MemoryError", "TimeoutError"):
             corrections = []
-            for key in ("top_n", "sample_size", "n_folds"):
+            for key in ("top_n", "n_folds"):
                 if key in args and isinstance(args[key], int):
                     corrections.append(Correction(
                         param=key,

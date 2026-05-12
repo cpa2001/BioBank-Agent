@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional, TYPE_CHECKING
+
+from .core.evolution.patch_classifier import classify
 
 if TYPE_CHECKING:
     from .memory import LongTermMemory
@@ -49,6 +52,16 @@ class ParamSuggestion:
     suggested_value: Any
     reason: str
     confidence: float = 0.0
+
+
+@dataclass
+class FailurePattern:
+    """Repeated failure cluster mined from recent tool executions."""
+    skill_name: str
+    error_signature: str
+    count: int
+    examples: list[dict] = field(default_factory=list)
+    suggested_action: str = ""
 
 
 class ToolLearner:
@@ -109,6 +122,7 @@ class ToolLearner:
             "skill": skill_name,
             "args": {k: v for k, v in args.items() if k != "ctx"},
             "success": not is_error,
+            "error": str(result.get("error", ""))[:300] if is_error else "",
             "elapsed_s": elapsed_s,
             "timestamp": datetime.now().isoformat(),
         })
@@ -199,6 +213,86 @@ class ToolLearner:
 
         return None
 
+    def mine_failure_patterns(self, min_count: int = 3) -> list[FailurePattern]:
+        """Mine repeated ``(skill, error_signature)`` failures from recent history.
+
+        This is intentionally deterministic and local: it gives `/evolve`
+        something auditable to show before any LLM-generated patch or
+        auto-merge path is considered.
+        """
+        clusters: dict[tuple[str, str], list[dict]] = defaultdict(list)
+        for item in self._history:
+            if item.get("success"):
+                continue
+            skill = str(item.get("skill", ""))
+            signature = self._normalise_error_signature(str(item.get("error", "")))
+            if not skill or not signature:
+                continue
+            clusters[(skill, signature)].append(item)
+
+        patterns: list[FailurePattern] = []
+        for (skill, signature), examples in clusters.items():
+            if len(examples) < min_count:
+                continue
+            patterns.append(FailurePattern(
+                skill_name=skill,
+                error_signature=signature,
+                count=len(examples),
+                examples=examples[-3:],
+                suggested_action=self._suggest_failure_action(skill, signature),
+            ))
+        patterns.sort(key=lambda p: (-p.count, p.skill_name, p.error_signature))
+        return patterns
+
+    def suggest_workflow(self, query: str) -> list[str]:
+        """Suggest a reusable workflow skeleton for a broad user query."""
+        q = (query or "").lower()
+        steps: list[str] = []
+        if any(t in q for t in ("literature", "paper", "related work", "research status")):
+            steps.extend(["deep_research", "literature_qa"])
+        if any(t in q for t in ("field", "biomarker", "phenotype", "trajectory", "longitudinal")):
+            steps.extend(["field_search", "cohort_card"])
+        if any(t in q for t in ("cohort", "icd", "case", "control", "prevalence")):
+            steps.extend(["cohort_summary", "missing_data"])
+        if any(t in q for t in ("model", "predict", "auc", "calibration", "risk")):
+            steps.extend([
+                "train_model",
+                "evaluate_model",
+                "calibration",
+                "feature_importance",
+            ])
+        if any(t in q for t in ("trajectory", "longitudinal", "forecast")):
+            steps.extend(["trajectory_tokenize", "world_model_audit"])
+        steps.extend(["statistical_review", "safety_check", "generate_report"])
+
+        seen: set[str] = set()
+        return [s for s in steps if not (s in seen or seen.add(s))]
+
+    def auto_propose_skill_improvement(self, min_count: int = 3) -> list[dict]:
+        """Return auditable improvement proposals for repeated failures.
+
+        This does not edit code. It creates deterministic candidate patch
+        plans that can be written under ``reports/generated_skills`` and
+        reviewed by a human before any custom skill or code change exists.
+        """
+        proposals = []
+        for pattern in self.mine_failure_patterns(min_count=min_count):
+            target_path, patch = self._candidate_patch_plan(pattern)
+            assessment = classify(patch)
+            proposals.append({
+                "skill": pattern.skill_name,
+                "failure_count": pattern.count,
+                "error_signature": pattern.error_signature,
+                "suggested_action": pattern.suggested_action,
+                "risk": assessment.risk.value,
+                "risk_reason": assessment.reason,
+                "target_path": target_path,
+                "candidate_patch": patch,
+                "candidate_patch_required": True,
+                "apply_mode": "manual_review",
+            })
+        return proposals
+
     def summary(self) -> str:
         """Compact summary for system prompt injection."""
         if not self._stats:
@@ -219,3 +313,52 @@ class ToolLearner:
             parts.append(f"  Low performers: {names}")
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _normalise_error_signature(error: str) -> str:
+        text = " ".join((error or "").strip().split())
+        if not text:
+            return ""
+        lowered = text.lower()
+        for token in ("traceback", "file \"", "/users/", "line "):
+            if token in lowered:
+                lowered = lowered.split(token, 1)[0].strip() or lowered
+        return lowered[:120]
+
+    @staticmethod
+    def _suggest_failure_action(skill: str, signature: str) -> str:
+        sig = signature.lower()
+        if "unexpected keyword" in sig or "schema" in sig:
+            return "tighten schema validation and planner argument aliases"
+        if "field" in sig or "not found" in sig:
+            return "insert field_search or semantic field resolution before this skill"
+        if "memory" in sig or "oom" in sig or "timeout" in sig:
+            return "try a smaller explicit sample only after recording full-dataset infeasibility"
+        if skill == "generate_report":
+            return "verify report prerequisites and artifact paths before marking plan done"
+        return "review repeated failure and consider a targeted custom skill only after tests"
+
+    @staticmethod
+    def _candidate_patch_plan(pattern: FailurePattern) -> tuple[str, str]:
+        slug = re.sub(r"[^a-zA-Z0-9_]+", "_", pattern.skill_name).strip("_").lower() or "skill"
+        target_path = f"reports/generated_skills/{slug}_repair_plan.md"
+        body = (
+            f"# Evolution proposal: {pattern.skill_name}\n\n"
+            f"- Failure count: {pattern.count}\n"
+            f"- Error signature: `{pattern.error_signature}`\n"
+            f"- Suggested action: {pattern.suggested_action}\n"
+            "- Apply mode: manual review only\n\n"
+            "## Required Review\n\n"
+            "1. Confirm this failure is still reproducible with the current code.\n"
+            "2. Prefer planner/schema fixes before creating a new skill.\n"
+            "3. If a custom skill is justified, add tests that fail before the change.\n"
+            "4. Move any approved custom skill manually after review.\n"
+        )
+        diff_lines = [
+            "--- /dev/null",
+            f"+++ b/{target_path}",
+            "@@",
+            *[f"+{line}" for line in body.splitlines()],
+            "",
+        ]
+        return target_path, "\n".join(diff_lines)

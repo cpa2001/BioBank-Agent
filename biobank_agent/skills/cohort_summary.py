@@ -21,17 +21,17 @@ import numpy as np
         },
         "controls_ratio": {
             "type": "integer",
-            "description": "Controls per case (default 4)",
-            "default": 4,
+            "description": "Controls per case. Use 0 or omit to include all eligible controls.",
+            "default": 0,
         },
     },
     required=["icd10_code"],
 )
-def cohort_summary(icd10_code: str, controls_ratio: int = 4, *, ctx=None) -> dict:
+def cohort_summary(icd10_code: str, controls_ratio: int = 0, *, ctx=None) -> dict:
     dm = ctx.dm
 
     # Build or reuse cohort
-    cohort_key = f"{icd10_code}_1:{controls_ratio}"
+    cohort_key = f"{icd10_code}_1:{controls_ratio or 'all'}"
     if cohort_key in ctx.state.cohorts:
         df = ctx.state.cohorts[cohort_key]
     else:
@@ -96,6 +96,8 @@ def cohort_summary(icd10_code: str, controls_ratio: int = 4, *, ctx=None) -> dic
         "disease_name": disease_name,
         "n_cases": n_cases,
         "n_controls": n_controls,
+        "controls_ratio": controls_ratio,
+        "controls_sampling_applied": bool(controls_ratio and controls_ratio > 0),
         "n_features": df.shape[1] - 2,
         "sex": sex_info,
         "age": age_stats,

@@ -319,11 +319,42 @@ def test_world_model_pass_causal_target_trial_and_graph_recording():
     assert world_model_audit("forecast HbA1c", available_tokens=5, ctx=None)["task"] == "forecast HbA1c"
 
 
+def test_world_model_audit_infers_available_tokens_from_session_trajectory():
+    state = SessionState()
+    state.records.append(
+        AnalysisRecord(
+            timestamp="2026-05-11T00:00:00",
+            skill="trajectory_tokenize",
+            args={},
+            key_results={
+                "status": "READY",
+                "n_tokens": 1234,
+                "modalities": ["bmi", "hba1c"],
+                "trajectory_time_source": "synthetic_assessment_instance_dates",
+            },
+            figure_paths=[],
+        )
+    )
+    ctx = SimpleNamespace(state=state, memory=None)
+
+    audit = world_model_audit("forecast HbA1c trajectory", ctx=ctx)
+
+    assert audit["available_tokens"] == 1234
+    assert audit["input_modalities"] == ["bmi", "hba1c"]
+    assert "sparse_context" not in audit["ood_flags"]
+    assert audit["session_context_inferred"]["available_tokens"] == "trajectory_tokenize.n_tokens"
+    assert audit["safety_status"] == "PARTIAL"
+    assert audit["allowed_claim_type"] == "association_conditioned_forecast"
+
+
 def test_trajectory_tokenize_empty_rows_json_and_memory_recording():
     missing = trajectory_tokenize(ctx=SimpleNamespace(state=SimpleNamespace(custom_data={})))
     missing_no_ctx = trajectory_tokenize()
-    assert missing["error"].startswith("No trajectory rows supplied")
-    assert missing_no_ctx["error"].startswith("No trajectory rows supplied")
+    assert missing["status"] == "PARTIAL"
+    assert missing["n_tokens"] == 0
+    assert missing["blocking_reasons"][0].startswith("No longitudinal trajectory rows")
+    assert missing_no_ctx["status"] == "PARTIAL"
+    assert "error" not in missing_no_ctx
 
     calls = []
     ctx = SimpleNamespace(
@@ -336,11 +367,95 @@ def test_trajectory_tokenize_empty_rows_json_and_memory_recording():
 
     result = trajectory_tokenize(rows_json=pd.Series(rows).to_json(orient="values"), max_bins=3, ctx=ctx)
     ctx_rows = trajectory_tokenize(ctx=SimpleNamespace(state=SimpleNamespace(custom_data={"trajectory_rows": rows})))
+    unknown_target = trajectory_tokenize(
+        rows_json=pd.Series(rows).to_json(orient="values"),
+        target_modality="hba1c",
+        target_timestamp="2030-01-01",
+    )
 
     assert result["status"] == "READY"
     assert result["future_query"] is None
     assert calls[0][0][0] == "trajectory_dataset"
     assert ctx_rows["status"] == "READY"
+    assert unknown_target["status"] == "READY"
+    assert unknown_target["future_query"] is None
+    assert "Unknown target modality" in unknown_target["future_query_error"]
+
+
+def test_trajectory_tokenize_auto_extracts_repeated_biomarker_columns_from_dm():
+    class FakeDM:
+        subject_id_col = "eid"
+
+        def list_parquet_columns(self):
+            return ["eid", "21001-0.0", "21001-1.0", "30750-0.0", "30750-1.0"]
+
+        def resolve_field_id(self, value):
+            return {"bmi": "21001", "hba1c": "30750"}.get(value, value)
+
+        def field_column(self, field_id, source="biomarkers"):
+            return f"{field_id}-0.0"
+
+        def query(self, sql):
+            assert "USING SAMPLE" not in sql
+            return pd.DataFrame({
+                "eid": [1, 2],
+                "21001-0.0": [25.1, 30.2],
+                "21001-1.0": [26.0, 29.8],
+                "30750-0.0": [35.0, 42.0],
+                "30750-1.0": [36.0, 41.5],
+            })
+
+    ctx = SimpleNamespace(
+        dm=FakeDM(),
+        state=SimpleNamespace(custom_data={}),
+        memory=SimpleNamespace(upsert_node=lambda *args, **kwargs: None),
+    )
+
+    result = trajectory_tokenize(ctx=ctx, target_modality="bmi", target_timestamp="2030-01-01")
+
+    assert result["status"] == "READY"
+    assert result["n_participants"] == 2
+    assert result["n_tokens"] == 8
+    assert result["longitudinal_support"] == "multi_timepoint"
+    assert result["trajectory_time_source"] == "synthetic_assessment_instance_dates"
+    assert set(result["modalities"]) == {"bmi", "hba1c"}
+    assert result["future_query"]["target_modality"] == "bmi"
+    assert result["auto_extraction"]["columns_used"] == [
+        "21001-0.0",
+        "21001-1.0",
+        "30750-0.0",
+        "30750-1.0",
+    ]
+
+
+def test_trajectory_tokenize_auto_extracts_single_timepoint_as_partial():
+    class FakeDM:
+        subject_id_col = "participant_id"
+
+        def list_parquet_columns(self):
+            return ["participant_id", "bmi", "hba1c"]
+
+        def resolve_field_id(self, value):
+            return value
+
+        def field_column(self, field_id, source="biomarkers"):
+            return field_id
+
+        def query(self, sql):
+            return pd.DataFrame({
+                "participant_id": ["p1", "p2"],
+                "bmi": [24.0, 28.0],
+                "hba1c": [34.0, 39.0],
+            })
+
+    ctx = SimpleNamespace(dm=FakeDM(), state=SimpleNamespace(custom_data={}))
+
+    result = trajectory_tokenize(ctx=ctx)
+
+    assert result["status"] == "PARTIAL"
+    assert result["n_tokens"] == 4
+    assert result["longitudinal_support"] == "single_timepoint"
+    assert result["auto_extraction"]["status"] == "READY"
 
 
 def test_new_skills_autodiscover_and_execute(tmp_path: Path):

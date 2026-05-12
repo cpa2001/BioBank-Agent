@@ -7,6 +7,8 @@ Works with scientific papers, UK Biobank documentation, and general PDFs.
 from __future__ import annotations
 
 import logging
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,11 @@ def _extract_tables_from_page(page: Any) -> list[list[list[str]]]:
     """
     tables: list[list[list[str]]] = []
     try:
-        tab_finder = page.find_tables()
+        # Some PyMuPDF builds print a layout-package recommendation directly
+        # to stdout/stderr from find_tables(). Keep the CLI clean; real table
+        # extraction failures are handled by the surrounding exception block.
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            tab_finder = page.find_tables()
         for table in tab_finder.tables:
             extracted = table.extract()
             # Clean up None cells

@@ -379,6 +379,12 @@ class TestCreateSkill:
         
         assert result["status"] == "success"
         assert "generated_skill_path" in result
+        assert result["skill_name"] == "my_analysis"
+        assert "active_path" in result
+        assert result["active_path"] is None
+        assert result["activated"] is False
+        assert "schema" in result
+        assert "activation_error" in result
         assert "code" in result
         assert "@skill" in result["code"]
         assert "my_analysis" in result["code"]
@@ -412,8 +418,17 @@ class TestCreateSkill:
 
         ctx.settings.reports_dir = tmp_path / "reports_ok"
         ctx.settings.custom_skills_dir = tmp_path / "custom_ok"
+        ctx.allow_skill_activation = True
         monkeypatch.setattr("biobank_agent.registry.discover_custom_skills", lambda custom_dir: 1)
-        activated = create_mod.create_skill("activated_skill", "Activated", params, "return {}", ctx=ctx)
+        activated = create_mod.create_skill(
+            "activated_skill",
+            "Activated",
+            params,
+            "return {}",
+            activate=True,
+            approved=True,
+            ctx=ctx,
+        )
         assert activated["status"] == "success"
         assert activated["activated"] is True
         assert "activated" in activated["message"]
@@ -421,10 +436,24 @@ class TestCreateSkill:
         blocked_custom = tmp_path / "custom_file"
         blocked_custom.write_text("file", encoding="utf-8")
         ctx.settings.custom_skills_dir = blocked_custom
-        fallback = create_mod.create_skill("manual_skill", "Manual", params, "return {}", ctx=ctx)
+        fallback = create_mod.create_skill(
+            "manual_skill",
+            "Manual",
+            params,
+            "return {}",
+            activate=True,
+            approved=True,
+            ctx=ctx,
+        )
         assert fallback["status"] == "success"
         assert fallback["activated"] is False
         assert "Generated skill is INACTIVE" in fallback["message"]
+
+        ctx.settings.custom_skills_dir = tmp_path / "custom_not_requested"
+        not_requested = create_mod.create_skill("review_only", "Review", params, "return {}", ctx=ctx)
+        assert not_requested["status"] == "success"
+        assert not_requested["activated"] is False
+        assert not (tmp_path / "custom_not_requested" / "review_only.py").exists()
 
 
 class TestSkillGeneratorSecurity:

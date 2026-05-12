@@ -75,6 +75,7 @@ def test_phewas_success_and_no_results_path(tmp_path, monkeypatch):
     assert result["top_associations"][0]["code"] == "E11"
     assert result["figure"].endswith("phewas_30740.png")
     assert len(ctx.state.figures) == 2
+    assert plt.gcf().axes[0].get_ylabel() == r"$-\log_{10}(p)$"
 
     none = phewas_mod.phewas("30740", min_cases=250, ctx=ctx)
     assert none["error"] == "No diseases with >= 250 cases found"
@@ -127,6 +128,7 @@ def test_survival_uses_lifelines_and_actual_death_dates(tmp_path, monkeypatch):
 
     assert result["n_cases"] == 4
     assert result["n_controls"] == 8
+    assert result["controls_sampling_applied"] is False
     assert result["case_deaths"] == 1
     assert result["control_deaths"] == 1
     assert result["log_rank_p"] == 0.0123
@@ -302,6 +304,33 @@ def test_embedding_umap_success_with_fake_backend(tmp_path, monkeypatch):
     assert result["method"] == "umap"
     assert result["n_subjects"] == 6
     assert result["figure"].endswith("embedding_umap.png")
+    plt.close("all")
+
+
+def test_embedding_default_uses_full_model_cohort(tmp_path, monkeypatch):
+    ctx = analysis_ctx(tmp_path)
+    ctx.state.feature_matrix = pd.DataFrame({
+        "a": np.linspace(0, 1, 12),
+        "b": np.linspace(1, 0, 12),
+    })
+    ctx.state.labels = pd.Series([0, 1] * 6)
+    monkeypatch.setattr(embedding_mod, "save_figure", fake_save_figure)
+
+    class FakeUMAP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def fit_transform(self, X):
+            return np.column_stack([np.arange(len(X)), np.arange(len(X)) * -1])
+
+    monkeypatch.setitem(sys.modules, "umap", SimpleNamespace(UMAP=FakeUMAP))
+
+    result = embedding_mod.embedding(method="umap", ctx=ctx)
+
+    assert result["n_subjects"] == 12
+    assert result["requested_sample_size"] == 0
+    assert result["sampling_applied"] is False
+    assert result["n_cases"] + result["n_controls"] == 12
     plt.close("all")
 
 

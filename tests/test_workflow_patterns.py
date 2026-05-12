@@ -600,15 +600,15 @@ class TestWorkflowPatternIntegration:
             AnalysisRecord(
                 timestamp=datetime.now().isoformat(),
                 skill="build_cohort",
-                args={"icd10_code": "E11", "controls_ratio": 4},
-                key_results={"n_cases": 500, "n_controls": 2000},
+                args={"icd10_code": "E11", "controls_ratio": 0},
+                key_results={"n_cases": 500, "n_controls": 499500},
                 figure_paths=[],
                 interpretation="Cohort built successfully"
             ),
             AnalysisRecord(
                 timestamp=datetime.now().isoformat(),
                 skill="train_model",
-                args={"n_folds": 5, "sample_size": 2500},
+                args={"n_folds": 5, "max_train_rows": 0},
                 key_results={"auc": 0.85},
                 figure_paths=["roc.png"],
                 interpretation="Model trained successfully"

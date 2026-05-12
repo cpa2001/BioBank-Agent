@@ -10,6 +10,8 @@ for comprehensive field coverage.
 
 from __future__ import annotations
 
+import csv
+import json
 import logging
 import time
 from pathlib import Path
@@ -43,6 +45,17 @@ CATEGORY_CSVS = {
     "Online_Follow_up": "ukb672073_Online_Follow_up.csv",
 }
 
+FULL_UKB_SOURCES = {
+    "main_672073": "UKB/ukb672073.csv",
+    "main_671626": "UKB/ukb671626.csv",
+    "category_population_characteristics": "UKB_info/ukb672073_Population_Characteristics.csv",
+    "category_biological_samples": "UKB_info/ukb672073_Biological_Samples.csv",
+    "category_additional_exposures": "UKB_info/ukb672073_Additional_Exposures.csv",
+    "category_genomics": "UKB_info/ukb672073_Genomics.csv",
+    "category_health_related_outcomes": "UKB_info/ukb672073_Health_Related_Outcomes.csv",
+    "category_online_follow_up": "UKB_info/ukb672073_Online_Follow_up.csv",
+}
+
 
 def _get_csv_columns(conn: duckdb.DuckDBPyConnection, csv_path: Path) -> list[str]:
     """Read column names from a CSV header without loading data."""
@@ -52,6 +65,17 @@ def _get_csv_columns(conn: duckdb.DuckDBPyConnection, csv_path: Path) -> list[st
         f"read_csv_auto('{safe_path}', header=true, sample_size=1))"
     ).df()
     return header_df["column_name"].tolist()
+
+
+def _get_csv_header(csv_path: Path) -> list[str]:
+    """Read only the CSV header with Python's csv module.
+
+    DuckDB's DESCRIBE path is convenient but can still inspect enough content
+    to be slow on 50GB UKB main CSVs. Header parsing is deterministic and
+    avoids touching participant rows during dry-runs and planning.
+    """
+    with open(csv_path, newline="", encoding="utf-8", errors="replace") as handle:
+        return next(csv.reader(handle))
 
 
 def _extract_field_ids(columns: list[str]) -> set[str]:
@@ -64,6 +88,226 @@ def _extract_field_ids(columns: list[str]) -> set[str]:
         if fid.isdigit():
             field_ids.add(fid)
     return field_ids
+
+
+def _field_id_for_column(column: str) -> str:
+    return str(column).split("-")[0].strip('"')
+
+
+def _select_field_columns(columns: list[str], field_ids: set[str] | None = None) -> list[str]:
+    selected = ["eid"] if "eid" in columns else []
+    for col in columns:
+        if col == "eid":
+            continue
+        fid = _field_id_for_column(col)
+        if not fid.isdigit():
+            continue
+        if field_ids is not None and fid not in field_ids:
+            continue
+        selected.append(col)
+    return selected
+
+
+def _chunk_columns(selected: list[str], chunk_cols: int) -> list[list[str]]:
+    id_col = "eid" if "eid" in selected else selected[0]
+    payload = [c for c in selected if c != id_col]
+    size = max(1, int(chunk_cols))
+    return [[id_col, *payload[i:i + size]] for i in range(0, len(payload), size)]
+
+
+def _write_manifest(output_dir: Path, manifest: dict) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "manifest.json"
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    return path
+
+
+def _source_path(raw_dir: Path, source_key: str) -> Path:
+    try:
+        rel = FULL_UKB_SOURCES[source_key]
+    except KeyError as exc:
+        raise ValueError(f"Unknown UKB source: {source_key}") from exc
+    return raw_dir / rel
+
+
+def full_ukb_inventory(
+    raw_dir: Path,
+    *,
+    sources: Optional[list[str]] = None,
+    field_ids: Optional[list[str]] = None,
+    chunk_cols: int = 500,
+) -> dict:
+    """Dry-run inventory for a full UKB feature-store build.
+
+    This only reads CSV headers and file metadata. It is safe to run before a
+    large conversion and is also used by the agent to understand which fields
+    are available outside the existing Milton parquet subset.
+    """
+    source_keys = sources or list(FULL_UKB_SOURCES)
+    wanted = {str(fid).strip() for fid in field_ids or [] if str(fid).strip()}
+    field_filter = wanted or None
+    rows: list[dict] = []
+    all_fields: set[str] = set()
+    total_cols = 0
+    total_selected = 0
+    for source_key in source_keys:
+        csv_path = _source_path(raw_dir, source_key)
+        if not csv_path.exists():
+            rows.append({
+                "source_key": source_key,
+                "csv_path": str(csv_path),
+                "status": "MISSING",
+                "n_cols": 0,
+                "n_fields": 0,
+                "n_selected_cols": 0,
+                "n_chunks": 0,
+            })
+            continue
+        columns = _get_csv_header(csv_path)
+        fields = _extract_field_ids(columns)
+        selected = _select_field_columns(columns, field_filter)
+        selected_fields = _extract_field_ids(selected)
+        all_fields.update(fields)
+        total_cols += len(columns)
+        total_selected += max(0, len(selected) - (1 if "eid" in selected else 0))
+        rows.append({
+            "source_key": source_key,
+            "csv_path": str(csv_path),
+            "status": "READY",
+            "size_bytes": csv_path.stat().st_size,
+            "n_cols": len(columns),
+            "n_fields": len(fields),
+            "n_selected_cols": len(selected),
+            "n_selected_fields": len(selected_fields),
+            "n_chunks": len(_chunk_columns(selected, chunk_cols)) if len(selected) > 1 else 0,
+        })
+    return {
+        "status": "READY" if any(r["status"] == "READY" for r in rows) else "MISSING",
+        "raw_dir": str(raw_dir),
+        "sources": rows,
+        "n_sources": len(rows),
+        "n_ready_sources": sum(1 for r in rows if r["status"] == "READY"),
+        "n_total_columns": total_cols,
+        "n_total_fields": len(all_fields),
+        "n_selected_feature_columns": total_selected,
+        "chunk_cols": int(chunk_cols),
+        "field_filter": sorted(wanted),
+    }
+
+
+def build_full_ukb_feature_store(
+    raw_dir: Path,
+    output_dir: Path,
+    *,
+    sources: Optional[list[str]] = None,
+    field_ids: Optional[list[str]] = None,
+    chunk_cols: int = 500,
+    resume: bool = True,
+    sample_size: Optional[int] = None,
+    dry_run: bool = False,
+    callback=None,
+) -> dict:
+    """Build a partitioned parquet feature store from the full UKB CSV export.
+
+    The output is deliberately split by source file and column chunk instead of
+    one huge wide table. Skills can materialize only the columns they need,
+    while the manifest still proves full-field availability.
+    """
+    raw_dir = Path(raw_dir)
+    output_dir = Path(output_dir)
+    inventory = full_ukb_inventory(
+        raw_dir,
+        sources=sources,
+        field_ids=field_ids,
+        chunk_cols=chunk_cols,
+    )
+    if dry_run:
+        return {**inventory, "dry_run": True, "output_dir": str(output_dir), "manifest": None}
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    feature_filter = {str(fid).strip() for fid in field_ids or [] if str(fid).strip()} or None
+    manifest = {
+        "schema_version": 1,
+        "kind": "ukb_full_feature_store",
+        "raw_dir": str(raw_dir),
+        "output_dir": str(output_dir),
+        "chunk_cols": int(chunk_cols),
+        "sample_size": int(sample_size) if sample_size else 0,
+        "field_filter": sorted(feature_filter or []),
+        "sources": {},
+    }
+
+    for source in inventory["sources"]:
+        source_key = source["source_key"]
+        if source["status"] != "READY":
+            manifest["sources"][source_key] = source
+            continue
+        csv_path = Path(source["csv_path"])
+        columns = _get_csv_header(csv_path)
+        selected = _select_field_columns(columns, feature_filter)
+        chunks = _chunk_columns(selected, chunk_cols) if len(selected) > 1 else []
+        source_dir = output_dir / "sources" / source_key
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source_payload = {
+            **source,
+            "chunks": [],
+        }
+        manifest["sources"][source_key] = source_payload
+        safe_csv = _escape_path(csv_path)
+        conn = duckdb.connect(":memory:")
+        for idx, chunk in enumerate(chunks):
+            out_path = source_dir / f"chunk-{idx:04d}.parquet"
+            if resume and out_path.exists() and out_path.stat().st_size > 0:
+                status = "SKIPPED_EXISTS"
+                n_rows = conn.execute(
+                    f"SELECT COUNT(*) FROM read_parquet('{_escape_path(out_path)}')"
+                ).fetchone()[0]
+            else:
+                if callback:
+                    callback(source_key, f"writing chunk {idx + 1}/{len(chunks)} ({len(chunk)} columns)")
+                col_str = ", ".join(f'"{c}"' for c in chunk)
+                limit_clause = f"LIMIT {int(sample_size)}" if sample_size else ""
+                tmp_path = out_path.with_name(out_path.name + ".tmp")
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                conn.execute(
+                    f"COPY (SELECT {col_str} FROM read_csv_auto('{safe_csv}', header=true, "
+                    f"all_varchar=true) {limit_clause}) "
+                    f"TO '{_escape_path(tmp_path)}' (FORMAT PARQUET, COMPRESSION SNAPPY)"
+                )
+                tmp_path.replace(out_path)
+                n_rows = conn.execute(
+                    f"SELECT COUNT(*) FROM read_parquet('{_escape_path(out_path)}')"
+                ).fetchone()[0]
+                status = "WRITTEN"
+            chunk_fields = sorted(_extract_field_ids(chunk))
+            source_payload["chunks"].append({
+                "chunk_index": idx,
+                "path": str(out_path),
+                "status": status,
+                "n_rows": int(n_rows),
+                "n_cols": len(chunk),
+                "n_fields": len(chunk_fields),
+                "fields": chunk_fields,
+                "columns": chunk,
+            })
+            source_payload["status"] = "IN_PROGRESS"
+            source_payload["n_chunks_written"] = len(source_payload["chunks"])
+            _write_manifest(output_dir, manifest)
+        conn.close()
+        source_payload["status"] = "READY" if chunks else "NO_SELECTED_COLUMNS"
+        source_payload["n_chunks_written"] = len(source_payload["chunks"])
+        _write_manifest(output_dir, manifest)
+
+    total_chunks = sum(len(src.get("chunks", [])) for src in manifest["sources"].values())
+    manifest["status"] = "READY" if total_chunks else "EMPTY"
+    manifest["n_chunks"] = total_chunks
+    manifest["n_selected_feature_columns"] = sum(
+        max(0, int(src.get("n_selected_cols", 0) or 0) - 1)
+        for src in manifest["sources"].values()
+    )
+    manifest["manifest_path"] = str(_write_manifest(output_dir, manifest))
+    return manifest
 
 
 def build_field_parquet(

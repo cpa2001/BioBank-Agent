@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from biobank_agent.data.features import BLOOD_BIOCHEMISTRY, BLOOD_COUNT, ALL_BIOMARKERS
 from biobank_agent.registry import skill
 from biobank_agent.utils.plotting import apply_nature_style, save_figure
+from ._column_select import biomarker_select_expressions
 
 
 @skill(
@@ -20,11 +21,18 @@ from biobank_agent.utils.plotting import apply_nature_style, save_figure
             "default": "biochemistry",
             "enum": ["biochemistry", "blood_count", "all"],
         },
+        "sample_size": {
+            "type": "integer",
+            "description": "Optional subject sample size. Use 0 or omit to analyse the full biomarker table.",
+            "default": 0,
+        },
     },
     required=[],
 )
-def correlation(group: str = "biochemistry", *, ctx=None) -> dict:
+def correlation(group: str = "biochemistry", sample_size: int = 0, *, ctx=None) -> dict:
     dm = ctx.dm
+    if sample_size in (None, 0):
+        sample_size = int(getattr(ctx.settings, "default_analysis_sample_size", 0) or 0)
 
     groups = {
         "biochemistry": BLOOD_BIOCHEMISTRY,
@@ -32,19 +40,15 @@ def correlation(group: str = "biochemistry", *, ctx=None) -> dict:
         "all": ALL_BIOMARKERS,
     }
     fields = groups.get(group, BLOOD_BIOCHEMISTRY)
-    field_ids = list(fields.keys())
+    cols, col_names, column_source = biomarker_select_expressions(dm, fields)
+    if len(cols) < 2:
+        return {"error": "Need at least two numeric biomarker columns for correlation analysis."}
 
-    # Build column select
-    cols = []
-    col_names = []
-    for fid in field_ids:
-        col = f'"{fid}-0.0"'
-        name = fields[fid]
-        cols.append(f'{col} AS "{name}"')
-        col_names.append(name)
-
-    sql = f"SELECT {', '.join(cols)} FROM biomarkers USING SAMPLE 50000"
+    sample_clause = f" USING SAMPLE {int(sample_size)}" if sample_size and int(sample_size) > 0 else ""
+    sql = f"SELECT {', '.join(cols)} FROM biomarkers{sample_clause}"
     df = dm.query(sql)
+    n_subjects = int(len(df))
+    sampling_applied = bool(sample_size and int(sample_size) > 0)
 
     # Compute correlation
     corr = df.corr()
@@ -83,8 +87,12 @@ def correlation(group: str = "biochemistry", *, ctx=None) -> dict:
 
     return {
         "group": group,
-        "n_features": len(field_ids),
-        "n_subjects_sampled": 50000,
+        "n_features": len(col_names),
+        "n_subjects_sampled": n_subjects,
+        "n_subjects_analyzed": n_subjects,
+        "requested_sample_size": int(sample_size or 0),
+        "sampling_applied": sampling_applied,
+        "column_source": column_source,
         "top_correlations": pairs[:15],
         "figures": [str(p) for p in paths],
     }

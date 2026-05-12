@@ -46,6 +46,12 @@ def feature_importance(model_key: str = "", top_n: int = 20,
     model = ctx.state.models[model_key]
     meta = ctx.state.model_metadata.get(model_key, {})
     feature_names = meta.get("feature_names", [])
+    requested_method = method
+    fallback_warning = ""
+
+    if method == "shap" and ctx.state.feature_matrix is None:
+        method = "tree"
+        fallback_warning = "SHAP was requested but the stored feature matrix is unavailable; used tree-based importance instead."
 
     if method == "shap" and ctx.state.feature_matrix is not None:
         try:
@@ -60,8 +66,9 @@ def feature_importance(model_key: str = "", top_n: int = 20,
                 shap_arr = shap_arr[..., 1]  # (samples, features, classes) → positive class
             importance = np.abs(shap_arr).mean(axis=0)
             importance_type = "SHAP"
-        except (ImportError, Exception):
+        except (ImportError, Exception) as exc:
             method = "tree"  # fallback
+            fallback_warning = f"SHAP was requested but unavailable or failed; used tree-based importance instead ({exc})."
 
     if method == "tree":
         importance = model.feature_importances_
@@ -95,7 +102,11 @@ def feature_importance(model_key: str = "", top_n: int = 20,
 
     return {
         "model_key": model_key,
+        "requested_method": requested_method,
+        "effective_method": method,
         "importance_type": importance_type,
         "top_features": [{"feature": n, "importance": round(v, 4)} for n, v in top_features],
+        "top_feature": top_features[0][0] if top_features else "",
+        "warning": fallback_warning,
         "figure": str(paths[0]),
     }

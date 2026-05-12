@@ -27,18 +27,23 @@ from biobank_agent.utils.stats import mann_whitney
                            "Example: '30740,30750,30690' or 'glucose,cholesterol'",
             "default": "",
         },
+        "controls_ratio": {
+            "type": "integer",
+            "description": "Controls per case when building the cohort. Use 0 or omit to include all eligible controls.",
+            "default": 0,
+        },
     },
     required=["icd10_code"],
 )
-def biomarker_dist(icd10_code: str, biomarkers: str = "", *, ctx=None) -> dict:
+def biomarker_dist(icd10_code: str, biomarkers: str = "", controls_ratio: int = 0, *, ctx=None) -> dict:
     dm = ctx.dm
 
     # Build or reuse cohort
-    cohort_key = f"{icd10_code}_1:4"
+    cohort_key = f"{icd10_code}_1:{controls_ratio or 'all'}"
     if cohort_key in ctx.state.cohorts:
         df = ctx.state.cohorts[cohort_key]
     else:
-        df = build_cohort(dm, icd10_code, controls_ratio=4)
+        df = build_cohort(dm, icd10_code, controls_ratio=controls_ratio)
         ctx.state.cohorts[cohort_key] = df
 
     # Select biomarkers
@@ -118,6 +123,10 @@ def biomarker_dist(icd10_code: str, biomarkers: str = "", *, ctx=None) -> dict:
     return {
         "icd10_code": icd10_code,
         "disease": icd10_name(icd10_code),
+        "n_cases": int((df["label"] == 1).sum()),
+        "n_controls": int((df["label"] == 0).sum()),
+        "controls_ratio": controls_ratio,
+        "controls_sampling_applied": bool(controls_ratio and controls_ratio > 0),
         "comparisons": results,
         "figure": str(paths[0]) if n_plots > 0 else None,
     }

@@ -4,12 +4,15 @@ Benchmarks:
   - SkillSchemaBenchmark: Verify all skill schemas are valid OpenAI format
   - BiomedQABenchmark: 20 golden biomedical Q&A pairs
   - SkillCallBenchmark: Verify the right skills are called for common queries
+  - Report20CaseBenchmark: Offline UKB-oriented synthetic report regression
+  - LiveUKBReport20Benchmark: Live UKB workflow probes with fail-closed preflight
 """
 
 from __future__ import annotations
 
 import tempfile
 import time
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,6 +41,46 @@ PUBLIC_REPORT_REFERENCES = [
         "doi": "10.1038/s41467-023-43575-7",
         "journal": "Nature Communications",
     },
+]
+
+
+DEFAULT_REPORT_SCENARIO = {
+    "title": "UK Biobank E11 HbA1c biomarker prediction report",
+    "icd10": "E11",
+    "disease": "type 2 diabetes",
+    "field_id": "30750",
+    "field_name": "HbA1c",
+    "n_cases": 12450,
+    "n_controls": 49800,
+    "n_features": 54,
+    "auc": 0.842,
+    "auc_95ci": "[0.831, 0.853]",
+    "p_value": 2.1e-28,
+    "effect_size": 0.42,
+}
+
+
+REPORT_20_CASE_SCENARIOS = [
+    {"id": "report_e11_hba1c", "title": "UK Biobank type 2 diabetes HbA1c prediction report", "icd10": "E11", "disease": "type 2 diabetes", "field_id": "30750", "field_name": "HbA1c", "n_cases": 12450, "n_controls": 49800, "n_features": 54, "auc": 0.842, "auc_95ci": "[0.831, 0.853]", "p_value": 2.1e-28, "effect_size": 0.42, "format": "paper"},
+    {"id": "report_i10_bmi_bp", "title": "UK Biobank hypertension BMI and blood pressure technical report", "icd10": "I10", "disease": "essential hypertension", "field_id": "21001", "field_name": "BMI", "n_cases": 38200, "n_controls": 76400, "n_features": 42, "auc": 0.781, "auc_95ci": "[0.773, 0.789]", "p_value": 4.6e-34, "effect_size": 0.31, "format": "report"},
+    {"id": "report_i21_ldl", "title": "UK Biobank myocardial infarction LDL prediction report", "icd10": "I21", "disease": "myocardial infarction", "field_id": "30780", "field_name": "LDL direct", "n_cases": 8950, "n_controls": 35800, "n_features": 49, "auc": 0.806, "auc_95ci": "[0.792, 0.820]", "p_value": 8.8e-19, "effect_size": 0.27, "format": "paper"},
+    {"id": "report_n18_creatinine", "title": "UK Biobank chronic kidney disease creatinine technical report", "icd10": "N18", "disease": "chronic kidney disease", "field_id": "30700", "field_name": "Creatinine", "n_cases": 6420, "n_controls": 25680, "n_features": 47, "auc": 0.827, "auc_95ci": "[0.811, 0.843]", "p_value": 1.5e-22, "effect_size": 0.36, "format": "report"},
+    {"id": "report_c34_crp", "title": "UK Biobank lung cancer CRP risk report", "icd10": "C34", "disease": "lung cancer", "field_id": "30710", "field_name": "C-reactive protein", "n_cases": 3180, "n_controls": 12720, "n_features": 46, "auc": 0.768, "auc_95ci": "[0.744, 0.792]", "p_value": 6.2e-12, "effect_size": 0.24, "format": "paper"},
+    {"id": "report_j44_fev1", "title": "UK Biobank COPD lung function technical report", "icd10": "J44", "disease": "chronic obstructive pulmonary disease", "field_id": "3063", "field_name": "FEV1", "n_cases": 7120, "n_controls": 28480, "n_features": 38, "auc": 0.814, "auc_95ci": "[0.799, 0.829]", "p_value": 3.9e-17, "effect_size": 0.33, "format": "report"},
+    {"id": "report_f32_crp", "title": "UK Biobank depression inflammatory biomarker report", "icd10": "F32", "disease": "depressive episode", "field_id": "30710", "field_name": "C-reactive protein", "n_cases": 18100, "n_controls": 72400, "n_features": 52, "auc": 0.712, "auc_95ci": "[0.702, 0.722]", "p_value": 2.7e-09, "effect_size": 0.12, "format": "paper"},
+    {"id": "report_k76_alt", "title": "UK Biobank liver disease ALT technical report", "icd10": "K76", "disease": "liver disease", "field_id": "30620", "field_name": "Alanine aminotransferase", "n_cases": 5300, "n_controls": 21200, "n_features": 44, "auc": 0.793, "auc_95ci": "[0.776, 0.810]", "p_value": 9.4e-21, "effect_size": 0.29, "format": "report"},
+    {"id": "report_g20_urate", "title": "UK Biobank Parkinson disease urate prediction report", "icd10": "G20", "disease": "Parkinson disease", "field_id": "30880", "field_name": "Urate", "n_cases": 2140, "n_controls": 8560, "n_features": 35, "auc": 0.741, "auc_95ci": "[0.712, 0.770]", "p_value": 1.1e-06, "effect_size": -0.18, "format": "paper"},
+    {"id": "report_m81_vitd", "title": "UK Biobank osteoporosis vitamin D technical report", "icd10": "M81", "disease": "osteoporosis", "field_id": "30890", "field_name": "Vitamin D", "n_cases": 6900, "n_controls": 27600, "n_features": 41, "auc": 0.759, "auc_95ci": "[0.742, 0.776]", "p_value": 5.8e-13, "effect_size": -0.21, "format": "report"},
+    {"id": "report_c50_igf1", "title": "UK Biobank breast cancer IGF-1 report", "icd10": "C50", "disease": "breast cancer", "field_id": "30770", "field_name": "IGF-1", "n_cases": 10420, "n_controls": 41680, "n_features": 45, "auc": 0.733, "auc_95ci": "[0.720, 0.746]", "p_value": 3.2e-10, "effect_size": 0.16, "format": "paper"},
+    {"id": "report_i63_apob", "title": "UK Biobank ischaemic stroke ApoB technical report", "icd10": "I63", "disease": "ischaemic stroke", "field_id": "30640", "field_name": "Apolipoprotein B", "n_cases": 5120, "n_controls": 20480, "n_features": 48, "auc": 0.776, "auc_95ci": "[0.758, 0.794]", "p_value": 1.9e-14, "effect_size": 0.22, "format": "report"},
+    {"id": "report_i50_ntprobnp", "title": "UK Biobank heart failure biomarker report", "icd10": "I50", "disease": "heart failure", "field_id": "30700", "field_name": "Creatinine", "n_cases": 7820, "n_controls": 31280, "n_features": 50, "auc": 0.818, "auc_95ci": "[0.802, 0.834]", "p_value": 4.1e-20, "effect_size": 0.34, "format": "paper"},
+    {"id": "report_e78_cholesterol", "title": "UK Biobank lipid disorder cholesterol technical report", "icd10": "E78", "disease": "lipid disorder", "field_id": "30690", "field_name": "Cholesterol", "n_cases": 22900, "n_controls": 91600, "n_features": 43, "auc": 0.794, "auc_95ci": "[0.785, 0.803]", "p_value": 7.7e-31, "effect_size": 0.28, "format": "report"},
+    {"id": "report_m10_urate", "title": "UK Biobank gout urate prediction report", "icd10": "M10", "disease": "gout", "field_id": "30880", "field_name": "Urate", "n_cases": 6100, "n_controls": 24400, "n_features": 39, "auc": 0.856, "auc_95ci": "[0.842, 0.870]", "p_value": 5.4e-39, "effect_size": 0.58, "format": "paper"},
+    {"id": "report_k50_albumin", "title": "UK Biobank Crohn disease albumin technical report", "icd10": "K50", "disease": "Crohn disease", "field_id": "30600", "field_name": "Albumin", "n_cases": 3020, "n_controls": 12080, "n_features": 37, "auc": 0.752, "auc_95ci": "[0.727, 0.777]", "p_value": 8.2e-08, "effect_size": -0.19, "format": "report"},
+    {"id": "report_m05_crp", "title": "UK Biobank rheumatoid arthritis CRP report", "icd10": "M05", "disease": "rheumatoid arthritis", "field_id": "30710", "field_name": "C-reactive protein", "n_cases": 4480, "n_controls": 17920, "n_features": 40, "auc": 0.771, "auc_95ci": "[0.751, 0.791]", "p_value": 2.6e-15, "effect_size": 0.25, "format": "paper"},
+    {"id": "report_e03_shbg", "title": "UK Biobank hypothyroidism SHBG technical report", "icd10": "E03", "disease": "hypothyroidism", "field_id": "30830", "field_name": "SHBG", "n_cases": 15200, "n_controls": 60800, "n_features": 36, "auc": 0.724, "auc_95ci": "[0.714, 0.734]", "p_value": 6.9e-11, "effect_size": -0.14, "format": "report"},
+    {"id": "report_g47_bmi", "title": "UK Biobank sleep disorder BMI report", "icd10": "G47", "disease": "sleep disorder", "field_id": "21001", "field_name": "BMI", "n_cases": 8200, "n_controls": 32800, "n_features": 42, "auc": 0.746, "auc_95ci": "[0.731, 0.761]", "p_value": 4.4e-16, "effect_size": 0.23, "format": "paper"},
+    {"id": "report_n39_cystatin", "title": "UK Biobank urinary disorder cystatin C technical report", "icd10": "N39", "disease": "urinary disorder", "field_id": "30720", "field_name": "Cystatin C", "n_cases": 9600, "n_controls": 38400, "n_features": 41, "auc": 0.769, "auc_95ci": "[0.756, 0.782]", "p_value": 7.3e-18, "effect_size": 0.26, "format": "report"},
 ]
 
 
@@ -286,15 +329,16 @@ class ReportQualityBenchmark(Benchmark):
         """Generate a report from synthetic records and score the artifact."""
         from biobank_agent.skills.report import generate_report
 
-        report_format = "paper" if "paper" in case.tags else "report"
+        scenario = dict(getattr(case, "metadata", {}) or {})
+        report_format = scenario.get("format") or ("paper" if "paper" in case.tags else "report")
         with tempfile.TemporaryDirectory(prefix=f"biobank_report_eval_{case.id}_") as tmp:
             root = Path(tmp)
-            ctx = self._build_ctx(root)
+            ctx = self._build_ctx(root, scenario)
             result = generate_report(
                 title=(
-                    "Biomarker prediction and proteomic risk signatures in UK Biobank"
+                    scenario.get("title", "Biomarker prediction and proteomic risk signatures in UK Biobank")
                     if report_format == "paper"
-                    else "UK Biobank Proteomic Risk Technical Report"
+                    else scenario.get("title", "UK Biobank Proteomic Risk Technical Report")
                 ),
                 format=report_format,
                 ctx=ctx,
@@ -308,7 +352,7 @@ class ReportQualityBenchmark(Benchmark):
                 if token.lower() not in lower:
                     errors.append(f"Missing expected report content: {token}")
 
-            checks = self._report_checks(text)
+            checks = self._report_checks(text, md_path)
             for name, passed in checks.items():
                 if not passed:
                     errors.append(f"Report quality check failed: {name}")
@@ -316,6 +360,7 @@ class ReportQualityBenchmark(Benchmark):
             metadata = {
                 "tags": case.tags,
                 "format": report_format,
+                "benchmark_kind": case.metadata.get("benchmark_kind", "synthetic_aggregate"),
                 "report_path": str(md_path),
                 "quality_checks": checks,
                 "quality_score": report_quality_score(text),
@@ -331,7 +376,7 @@ class ReportQualityBenchmark(Benchmark):
                 case_id=case.id,
                 passed=not errors,
                 actual_skills=["generate_report"],
-                actual_text=text[:5000],
+                actual_text=text,
                 errors=errors,
                 elapsed_s=0.0,
                 metadata=metadata,
@@ -348,35 +393,170 @@ class ReportQualityBenchmark(Benchmark):
         return max(0.0, min(1.0, 0.4 * structural + 0.6 * checklist - missing_penalty))
 
     @staticmethod
-    def _report_checks(text: str) -> dict[str, bool]:
+    def _report_checks(text: str, report_path: Path | None = None) -> dict[str, bool]:
         lower = text.lower()
-        return {
+        main_lower = lower.split("## execution appendix", 1)[0]
+        raw_log_tokens = (
+            "traceback",
+            "returncode",
+            "stdout",
+            "stderr",
+            "/users/",
+            "api_key",
+            "authorization:",
+        )
+        placeholder_tokens = (
+            "[citation_needed]",
+            "references to be added",
+            "results pending",
+            "todo",
+            "analysis completed -- see details below",
+            "top finding: .",
+            "auc = n/a",
+        )
+        signature_tokens = (
+            "chen pengan",
+            "chinese university",
+            "generated by:",
+            " biobank agent v",
+        )
+        weak_main_body_tokens = (
+            "analysis completed",
+            "top finding: .",
+            "see details below",
+            "returncode=",
+            "dict[",
+        )
+        unresolved_missing_patterns = (
+            r"\bN/A\b",
+            r"=\s*\?",
+            r"\?\s*%",
+            r"\?\s+significant",
+            r"\?\s+completed",
+        )
+        executive_pos = lower.find("executive findings")
+        first_body_positions = [
+            pos for pos in (
+                lower.find("## abstract"),
+                lower.find("## executive summary"),
+                lower.find("## methods"),
+                lower.find("## 1."),
+            )
+            if pos >= 0
+        ]
+        first_body_pos = min(first_body_positions) if first_body_positions else len(lower)
+        checks = {
             "has_nature_sections": all(k in lower for k in ("abstract", "methods", "results", "discussion"))
             or all(k in lower for k in ("key findings", "executive summary", "methodology notes")),
+            "has_executive_findings_upfront": executive_pos >= 0 and executive_pos < first_body_pos,
             "has_quantitative_statistics": all(k in lower for k in ("auc", "95% ci")) and (
                 "p <" in lower or "p =" in lower
             ),
             "has_sample_sizes": "n =" in lower or "n_cases" in lower or "cases" in lower,
             "has_figures_or_captions": "figure" in lower,
             "has_governance": "reproducibility" in lower and "governance" in lower,
+            "has_execution_appendix": "execution appendix" in lower and "analysis record inventory" in lower,
             "has_data_access_or_availability": "data availability" in lower or "data access agreement" in lower,
             "has_noncausal_caveat": "not causal" in lower or "precludes causal inference" in lower,
             "has_small_cell_guardrail": "small-cell" in lower or "suppression" in lower,
             "has_public_references": all(ref["doi"].lower() in lower for ref in PUBLIC_REPORT_REFERENCES[:2]),
-            "no_placeholders": all(
-                bad not in lower
-                for bad in ("[citation_needed]", "references to be added", "results pending", "todo")
+            "no_placeholders": all(bad not in lower for bad in placeholder_tokens),
+            "no_raw_logs_or_secrets": all(bad not in lower for bad in raw_log_tokens),
+            "no_signature_or_generator_trace": all(bad not in lower for bad in signature_tokens),
+            "no_weak_main_body": all(bad not in main_lower for bad in weak_main_body_tokens),
+            "no_unresolved_missing_values_in_main_body": all(
+                not re.search(pattern, main_lower, re.IGNORECASE)
+                for pattern in unresolved_missing_patterns
             ),
+            "no_unresolved_critical_guardrails": "severity | type | message | recommendation" not in lower
+            or "| critical |" not in lower,
         }
+        figure_numbers = re.findall(r"(?m)^\*{0,3}\s*figure\s+(\d+)\.", lower)
+        checks["no_duplicate_figure_numbers"] = len(figure_numbers) == len(set(figure_numbers))
+        if report_path:
+            checks["figure_links_resolvable"] = ReportQualityBenchmark._figure_links_resolvable(text, Path(report_path))
+        return checks
 
     @staticmethod
-    def _build_ctx(root: Path):
+    def _figure_links_resolvable(text: str, report_path: Path) -> bool:
+        report_dir = report_path.parent
+        for link in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", text):
+            if link.startswith(("http://", "https://", "data:")):
+                continue
+            target = (report_dir / link).resolve()
+            if not target.exists():
+                return False
+        return True
+
+    @staticmethod
+    def _build_ctx(root: Path, scenario: dict | None = None):
+        scenario = {**DEFAULT_REPORT_SCENARIO, **(scenario or {})}
+        icd10 = str(scenario["icd10"])
+        disease = str(scenario["disease"])
+        field_id = str(scenario["field_id"])
+        field_name = str(scenario["field_name"])
+        n_cases = int(scenario["n_cases"])
+        n_controls = int(scenario["n_controls"])
+        n_features = int(scenario["n_features"])
+        auc = float(scenario["auc"])
+        auc_95ci = str(scenario["auc_95ci"])
+        p_value = float(scenario["p_value"])
+        effect_size = float(scenario["effect_size"])
+        slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in f"{icd10}_{field_id}").strip("_")
+        model_key = f"{slug}_auto"
+        executive_findings = [
+            (
+                f"{field_name} stratified {disease} risk in UK Biobank with "
+                f"AUC = {auc:.3f} ({auc_95ci}) across {n_cases:,} cases and "
+                f"{n_controls:,} controls."
+            ),
+            (
+                f"The {icd10} analysis should be interpreted as observational "
+                "biobank evidence: it supports risk stratification and hypothesis "
+                "generation, not a causal biomarker claim."
+            ),
+            (
+                "Guardrail review retained the aggregate findings for reporting "
+                "with small-cell suppression and reproducibility caveats."
+            ),
+        ]
+        execution_log = [
+            {
+                "step": "Literature grounding",
+                "tool": "deep_research",
+                "status": "success",
+                "duration_s": "offline fixture",
+                "note": "Public UK Biobank paper references attached.",
+            },
+            {
+                "step": "Cohort construction",
+                "tool": "cohort_summary",
+                "status": "success",
+                "duration_s": "offline fixture",
+                "note": f"{n_cases:,} cases and {n_controls:,} controls.",
+            },
+            {
+                "step": "Model selection",
+                "tool": "train_model",
+                "status": "success",
+                "duration_s": "offline fixture",
+                "note": "Auto-selection compared candidate model families before report synthesis.",
+            },
+            {
+                "step": "Guardrail review",
+                "tool": "statistical_review + safety_check",
+                "status": "success",
+                "duration_s": "offline fixture",
+                "note": "Aggregate release caveats recorded.",
+            },
+        ]
+
         report_dir = root / "report"
         report_dir.mkdir(parents=True, exist_ok=True)
-        fig_path = report_dir / "figure_roc.svg"
+        fig_path = report_dir / f"figure_{slug}_roc.svg"
         fig_path.write_text(
             '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="240">'
-            '<text x="10" y="20">AUC = 0.842</text></svg>',
+            f'<text x="10" y="20">AUC = {auc:.3f}</text></svg>',
             encoding="utf-8",
         )
 
@@ -384,7 +564,7 @@ class ReportQualityBenchmark(Benchmark):
             SimpleNamespace(
                 timestamp="2026-01-01T00:00:00",
                 skill="deep_research",
-                args={"topic": "UK Biobank biomarker disease prediction"},
+                args={"topic": f"UK Biobank {disease} {field_name} biomarker disease prediction"},
                 key_results={
                     "sources": PUBLIC_REPORT_REFERENCES,
                     "n_sources": len(PUBLIC_REPORT_REFERENCES),
@@ -406,36 +586,42 @@ class ReportQualityBenchmark(Benchmark):
             SimpleNamespace(
                 timestamp="2026-01-01T00:02:00",
                 skill="cohort_summary",
-                args={"icd10_code": "E11", "controls_ratio": 4},
-                key_results={"n_cases": 12450, "n_controls": 49800, "n_features": 54},
+                args={"icd10_code": icd10, "disease": disease, "controls_ratio": 0},
+                key_results={
+                    "n_cases": n_cases,
+                    "n_controls": n_controls,
+                    "n_features": n_features,
+                    "controls_sampling_applied": False,
+                },
                 figure_paths=[],
             ),
             SimpleNamespace(
                 timestamp="2026-01-01T00:03:00",
                 skill="train_model",
-                args={"icd10_code": "E11", "model_type": "xgb", "n_folds": 5},
+                args={"icd10_code": icd10, "disease": disease, "model_type": "auto", "n_folds": 5},
                 key_results={
-                    "model_key": "E11_xgb",
-                    "mean_auc": 0.842,
-                    "auc_95ci": "[0.831, 0.853]",
-                    "n_cases": 12450,
-                    "n_controls": 49800,
-                    "n_features": 54,
-                    "fold_aucs": [0.835, 0.846, 0.841, 0.849, 0.839],
+                    "model_key": model_key,
+                    "model_type": "auto-selected gradient boosted model",
+                    "mean_auc": auc,
+                    "auc_95ci": auc_95ci,
+                    "n_cases": n_cases,
+                    "n_controls": n_controls,
+                    "n_features": n_features,
+                    "fold_aucs": [round(auc - 0.007, 3), round(auc + 0.004, 3), auc, round(auc + 0.007, 3), round(auc - 0.003, 3)],
                 },
                 figure_paths=[str(fig_path)],
             ),
             SimpleNamespace(
                 timestamp="2026-01-01T00:04:00",
                 skill="biomarker_dist",
-                args={"field_id": "30750", "field_name": "HbA1c"},
-                key_results={"p_value": 2.1e-28, "effect_size": 0.42},
+                args={"field_id": field_id, "field_name": field_name},
+                key_results={"p_value": p_value, "effect_size": effect_size},
                 figure_paths=[],
             ),
             SimpleNamespace(
                 timestamp="2026-01-01T00:05:00",
                 skill="phewas",
-                args={"field_id": "30750", "min_cases": 500},
+                args={"field_id": field_id, "field_name": field_name, "min_cases": 500},
                 key_results={"n_significant": 18, "n_fields_tested": 3213, "correction": "fdr"},
                 figure_paths=[],
             ),
@@ -459,25 +645,29 @@ class ReportQualityBenchmark(Benchmark):
             {
                 "eid": range(100),
                 "label": [1] * 20 + [0] * 80,
-                "30750-0.0": [65.0] * 20 + [39.0] * 80,
+                f"{field_id}-0.0": [65.0] * 20 + [39.0] * 80,
             }
         )
         state = SimpleNamespace(
             records=records,
             figures=[str(fig_path)],
-            cohorts={"E11_1:4": cohort},
-            models={"E11_xgb": object()},
+            cohorts={f"{icd10}_1:all": cohort},
+            models={model_key: object()},
             model_metadata={
-                "E11_xgb": {
-                    "model_type": "xgb",
-                    "mean_auc": 0.842,
-                    "auc_mean": 0.842,
-                    "auc_95ci": "[0.831, 0.853]",
-                    "n_cases": 12450,
-                    "n_features": 54,
+                model_key: {
+                    "model_type": "auto-selected gradient boosted model",
+                    "mean_auc": auc,
+                    "auc_mean": auc,
+                    "auc_95ci": auc_95ci,
+                    "n_cases": n_cases,
+                    "n_features": n_features,
                 }
             },
             provenances=[SimpleNamespace(provenance_id="prov1")],
+            executive_findings=executive_findings,
+            execution_log=execution_log,
+            custom_data={"execution_log": execution_log},
+            guardrail_issues=[],
         )
         settings = SimpleNamespace(
             biobank_name="UK Biobank",
@@ -485,6 +675,242 @@ class ReportQualityBenchmark(Benchmark):
             biobank_caveats="healthy volunteer bias, predominantly middle-aged recruitment, and ancestry imbalance",
         )
         return SimpleNamespace(report_dir=report_dir, state=state, settings=settings)
+
+
+class Report20CaseBenchmark(ReportQualityBenchmark):
+    """Twenty deterministic, UKB-oriented synthetic report cases.
+
+    The cases cover common ICD10 outcomes and UK Biobank field IDs while staying
+    fully offline: each run synthesizes aggregate-only records and then applies
+    the same report-quality checks used by the smaller report benchmark.
+    """
+
+    name = "report_20_case"
+
+    def __init__(self) -> None:
+        self.cases = []
+        for scenario in REPORT_20_CASE_SCENARIOS:
+            report_format = scenario.get("format", "paper")
+            if report_format == "paper":
+                expected_sections = ["Abstract", "Methods", "Results", "Discussion"]
+                tags = ["report", "paper", "ukb_oriented_synthetic", "public_literature", "complex"]
+            else:
+                expected_sections = ["Key Findings", "Executive Summary", "Methodology Notes"]
+                tags = ["report", "technical", "ukb_oriented_synthetic", "public_literature", "complex"]
+            self.cases.append(TestCase(
+                id=str(scenario["id"]),
+                query=(
+                    f"Generate a UK Biobank report for {scenario['disease']} "
+                    f"({scenario['icd10']}) using field {scenario['field_id']} "
+                    f"({scenario['field_name']}) with public-paper references."
+                ),
+                expected_contains=[
+                    "UK Biobank",
+                    "References",
+                    "10.1038/s41588-024-01898-1",
+                    "10.1038/s41586-023-06592-6",
+                    "not causal",
+                    "Reproducibility",
+                    *expected_sections,
+                ],
+                tags=tags,
+                metadata={"benchmark_kind": "ukb_oriented_synthetic", **dict(scenario)},
+            ))
+
+    def run_case(self, case: TestCase, agent) -> TestResult:
+        """Generate both Nature-style and technical reports for each UKB case."""
+        from biobank_agent.skills.report import generate_report
+
+        scenario = dict(getattr(case, "metadata", {}) or {})
+        errors: list[str] = []
+        checks: dict[str, bool] = {}
+        outputs: dict[str, str] = {}
+        texts: dict[str, str] = {}
+        with tempfile.TemporaryDirectory(prefix=f"biobank_report20_{case.id}_") as tmp:
+            root = Path(tmp)
+            for report_format in ("paper", "report"):
+                ctx = self._build_ctx(root / report_format, {**scenario, "format": report_format})
+                result = generate_report(
+                    title=scenario.get("title", "UK Biobank long-horizon discovery report"),
+                    format=report_format,
+                    ctx=ctx,
+                )
+                md_path = Path(result["markdown"])
+                text = md_path.read_text(encoding="utf-8")
+                outputs[report_format] = str(md_path)
+                texts[report_format] = text
+                format_checks = self._report_checks(text, md_path)
+                for name, passed in format_checks.items():
+                    checks[f"{report_format}:{name}"] = passed
+                    if not passed:
+                        errors.append(f"{report_format} report quality check failed: {name}")
+
+            combined = "\n\n--- TECHNICAL REPORT ---\n\n".join([
+                texts.get("paper", ""),
+                texts.get("report", ""),
+            ])
+            lower = combined.lower()
+            for token in case.expected_contains:
+                if token.lower() not in lower:
+                    errors.append(f"Missing expected report content across dual outputs: {token}")
+
+            metadata = {
+                "tags": case.tags,
+                "format": "dual",
+                "formats": ["paper", "report"],
+                "benchmark_kind": case.metadata.get("benchmark_kind", "ukb_oriented_synthetic"),
+                "report_paths": outputs,
+                "quality_checks": checks,
+                "quality_score": report_quality_score(combined),
+                "public_references": [r["doi"] for r in PUBLIC_REPORT_REFERENCES],
+                "claim_count": 2,
+                "evidence_count": len(PUBLIC_REPORT_REFERENCES),
+                "safety_status": "PASS",
+            }
+
+            return TestResult(
+                case_id=case.id,
+                passed=not errors,
+                actual_skills=["generate_report"],
+                actual_text=combined,
+                errors=errors,
+                elapsed_s=0.0,
+                metadata=metadata,
+            )
+
+
+class LiveUKBReport20Benchmark(Benchmark):
+    """Twenty live UK Biobank workflow probes that fail closed without data access.
+
+    This benchmark is intentionally separate from ``report_20_case``. It should
+    only be used when the configured local environment exposes a usable UKB data
+    manager/catalog; otherwise every case reports a data-preflight failure rather
+    than pretending that a synthetic aggregate report exercised real UKB data.
+    """
+
+    name = "live_ukb_report_20"
+
+    def __init__(self) -> None:
+        self.cases = [
+            TestCase(
+                id=str(scenario["id"]).replace("report_", "live_"),
+                query=(
+                    "Run a live UKB-only long-horizon workflow for "
+                    f"{scenario['disease']} ({scenario['icd10']}) using field "
+                    f"{scenario['field_id']} ({scenario['field_name']}), including cohort construction, "
+                    "auto model selection, guardrail review, and final report generation."
+                ),
+                expected_skills=[
+                    "cohort_summary",
+                    "train_model",
+                    "statistical_review",
+                    "safety_check",
+                    "generate_report",
+                ],
+                expected_contains=["UK Biobank", "not causal", "Reproducibility"],
+                tags=["report", "live_ukb", "long_horizon", "complex"],
+                metadata=dict(scenario),
+            )
+            for scenario in REPORT_20_CASE_SCENARIOS
+        ]
+
+    def run_case(self, case: TestCase, agent) -> TestResult:
+        preflight = self._preflight(agent)
+        if not preflight["ok"]:
+            return TestResult(
+                case_id=case.id,
+                passed=False,
+                errors=[preflight["reason"]],
+                elapsed_s=0.0,
+                metadata={
+                    "tags": case.tags,
+                    "benchmark_kind": "live_ukb",
+                    "data_preflight": "FAIL",
+                    "preflight": preflight,
+                    "claim_count": 1,
+                    "evidence_count": 0,
+                    "safety_status": "FAIL",
+                },
+            )
+
+        t0 = time.time()
+        try:
+            response = agent.run(case.query)
+            actual_skills = [r.skill for r in getattr(agent.state, "records", []) if r.skill != "think"]
+            lower = str(response).lower()
+            errors = [
+                f"Expected skill '{skill}' not called"
+                for skill in case.expected_skills
+                if skill not in actual_skills
+            ]
+            for token in case.expected_contains:
+                if token.lower() not in lower:
+                    errors.append(f"Expected response/report content: {token}")
+            passed = not errors
+            return TestResult(
+                case_id=case.id,
+                passed=passed,
+                actual_skills=actual_skills[-12:],
+                actual_text=str(response)[:5000],
+                errors=errors,
+                elapsed_s=time.time() - t0,
+                metadata={
+                    "tags": case.tags,
+                    "benchmark_kind": "live_ukb",
+                    "data_preflight": "PASS",
+                    "preflight": preflight,
+                    "claim_count": 1,
+                    "evidence_count": 1 if passed else 0,
+                    "safety_status": "PASS" if passed else "FAIL",
+                },
+            )
+        except Exception as e:
+            return TestResult(
+                case_id=case.id,
+                passed=False,
+                errors=[f"Live UKB workflow failed: {type(e).__name__}: {str(e)[:300]}"],
+                elapsed_s=time.time() - t0,
+                metadata={
+                    "tags": case.tags,
+                    "benchmark_kind": "live_ukb",
+                    "data_preflight": "PASS",
+                    "preflight": preflight,
+                    "claim_count": 1,
+                    "evidence_count": 0,
+                    "safety_status": "FAIL",
+                },
+            )
+
+    @staticmethod
+    def _preflight(agent) -> dict:
+        settings = getattr(agent, "settings", None)
+        bank_id = str(getattr(settings, "bank_id", "") or "").lower()
+        if bank_id and bank_id != "ukb":
+            return {"ok": False, "reason": f"Configured bank_id is {bank_id}, expected ukb"}
+
+        dm = getattr(agent, "dm", None)
+        if dm is None:
+            return {"ok": False, "reason": "Agent has no data manager; cannot run live UKB benchmark"}
+
+        catalog = getattr(agent, "catalog", None)
+        if catalog is None:
+            return {"ok": False, "reason": "Agent has no field catalog; cannot verify UKB fields"}
+
+        data_dir = Path(getattr(settings, "data_dir", "") or "")
+        if str(data_dir) and not data_dir.exists():
+            return {"ok": False, "reason": f"Configured data_dir does not exist: {data_dir}"}
+
+        count_subjects = getattr(dm, "count_subjects", None)
+        if callable(count_subjects):
+            try:
+                n_subjects = int(count_subjects())
+                if n_subjects <= 0:
+                    return {"ok": False, "reason": "Data manager reports zero subjects"}
+                return {"ok": True, "reason": "live UKB data manager and catalog available", "n_subjects": n_subjects}
+            except Exception as e:
+                return {"ok": False, "reason": f"Data manager preflight failed: {type(e).__name__}: {str(e)[:200]}"}
+
+        return {"ok": False, "reason": "Data manager cannot report subject count; live UKB benchmark unavailable"}
 
 
 class AgentReportWorkflowBenchmark(Benchmark):

@@ -215,18 +215,32 @@ class TemporalRule:
 # Default temporal rules for biobank research safety
 TEMPORAL_RULES: list[TemporalRule] = [
     TemporalRule(
-        name="prevalence_before_training",
-        before="prevalence",
+        name="cohort_summary_before_training",
+        before="cohort_summary",
         after="train_model",
         severity="WARN",
-        reason="Must verify disease prevalence (n_cases ≥ 100) before training predictive models",
+        reason="Must define cohort and verify sample sizes before training predictive models",
     ),
     TemporalRule(
         name="safety_before_report",
         before="safety_check",
-        after="report",
+        after="generate_report",
         severity="WARN",
         reason="Safety review required before generating publication-ready reports",
+    ),
+    TemporalRule(
+        name="statistical_review_before_report",
+        before="statistical_review",
+        after="generate_report",
+        severity="WARN",
+        reason="Statistical review required before publication-ready reports",
+    ),
+    TemporalRule(
+        name="world_model_audit_before_report",
+        before="world_model_audit",
+        after="generate_report",
+        severity="WARN",
+        reason="World-model audit required before making final report claims",
     ),
     TemporalRule(
         name="cohort_before_survival",
@@ -234,13 +248,6 @@ TEMPORAL_RULES: list[TemporalRule] = [
         after="survival",
         severity="WARN",
         reason="Must define and validate cohort before running survival analysis",
-    ),
-    TemporalRule(
-        name="cohort_before_training",
-        before="cohort_summary",
-        after="train_model",
-        severity="WARN",
-        reason="Must define cohort (verify sample sizes) before training models",
     ),
     TemporalRule(
         name="prevalence_before_gwas",

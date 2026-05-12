@@ -198,8 +198,8 @@ def test_reflexion_result_retry_rules_and_fast_paths():
     )
 
     assert insufficient.known_fix_used is True
-    assert insufficient.corrected_args == {"n_folds": 4, "controls_ratio": 2}
-    assert timeout.corrected_args == {"top_n": 10, "sample_size": 500, "n_folds": 2}
+    assert insufficient.corrected_args == {"n_folds": 4, "controls_ratio": 0}
+    assert timeout.corrected_args == {"top_n": 10, "n_folds": 2}
     assert timeout.error_category == "external"
 
     prompt = engine._build_reflection_prompt(
@@ -259,13 +259,13 @@ def test_reflexion_branch_variants_without_llm_roundtrip():
     )
     assert fenced_without_json.corrected_args == {"top_n": 4}
 
-    insufficient_no_corrections = engine._fast_path_fix(
+    insufficient_controls_ratio_one = engine._fast_path_fix(
         "train_model",
         {"n_folds": 2, "controls_ratio": 1},
         "RuntimeError",
         "insufficient cases",
     )
-    assert insufficient_no_corrections is None
+    assert insufficient_controls_ratio_one.corrected_args == {"controls_ratio": 0}
 
     insufficient_controls_only = engine._fast_path_fix(
         "train_model",
@@ -273,7 +273,7 @@ def test_reflexion_branch_variants_without_llm_roundtrip():
         "RuntimeError",
         "too few cases",
     )
-    assert insufficient_controls_only.corrected_args == {"controls_ratio": 1}
+    assert insufficient_controls_only.corrected_args == {"controls_ratio": 0}
 
     memory_without_integer_args = engine._fast_path_fix(
         "phewas",

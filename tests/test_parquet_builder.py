@@ -11,8 +11,10 @@ from biobank_agent.data.parquet_builder import (
     _get_csv_columns,
     _quote_identifier,
     batch_rebuild,
+    build_full_ukb_feature_store,
     build_category_parquet,
     build_field_parquet,
+    full_ukb_inventory,
     register_extended_parquet,
 )
 
@@ -77,6 +79,41 @@ def test_build_category_parquet_writes_only_new_fields(tmp_path):
     assert result["n_rows"] == 2
     assert result["n_cols"] == 2
     assert result["new_fields"] == ["30750"]
+
+
+def test_full_ukb_inventory_and_feature_store_build_are_chunked(tmp_path):
+    raw = tmp_path / "raw"
+    _write_csv(
+        raw / "UKB" / "ukb672073.csv",
+        "eid,6153-0.0,6153-0.1,2443-0.0,21001-0.0\n1,1,2,1,25\n2,3,4,0,30\n",
+    )
+
+    inventory = full_ukb_inventory(
+        raw,
+        sources=["main_672073"],
+        field_ids=["6153", "2443"],
+        chunk_cols=2,
+    )
+    assert inventory["status"] == "READY"
+    assert inventory["sources"][0]["n_selected_cols"] == 4
+    assert inventory["sources"][0]["n_chunks"] == 2
+
+    result = build_full_ukb_feature_store(
+        raw,
+        tmp_path / "store",
+        sources=["main_672073"],
+        field_ids=["6153", "2443"],
+        chunk_cols=2,
+    )
+    assert result["status"] == "READY"
+    assert result["n_chunks"] == 2
+    assert (tmp_path / "store" / "manifest.json").exists()
+    first_chunk = result["sources"]["main_672073"]["chunks"][0]
+    df = duckdb.connect(":memory:").execute(
+        f"SELECT * FROM read_parquet('{first_chunk['path']}')"
+    ).df()
+    assert len(df) == 2
+    assert "eid" in df.columns
 
 
 def test_batch_rebuild_handles_unknown_missing_success_and_callback(tmp_path):

@@ -43,6 +43,13 @@ def safety_check(scope: str = "last", k: int = 5, *, ctx=None) -> dict:
     """Check analyses for privacy and data protection compliance."""
     issues = []
     records = ctx.state.records
+    settings = getattr(ctx, "settings", None)
+    data_deidentified = bool(getattr(settings, "data_deidentified", False))
+    disclosure_control_mode = str(getattr(settings, "disclosure_control_mode", "external")).lower()
+    deidentified_internal = (
+        data_deidentified
+        and disclosure_control_mode in {"internal", "research", "off"}
+    )
 
     if not records:
         return {"issues": [], "overall": "NO DATA", "message": "No analyses to check."}
@@ -57,7 +64,7 @@ def safety_check(scope: str = "last", k: int = 5, *, ctx=None) -> dict:
             predictions = r.key_results.get("predictions", [])
             if predictions and len(predictions) < k:
                 issues.append({
-                    "severity": "CRITICAL",
+                    "severity": "WARNING" if deidentified_internal else "CRITICAL",
                     "type": "k_anonymity_violation",
                     "skill": r.skill,
                     "message": (
@@ -72,7 +79,7 @@ def safety_check(scope: str = "last", k: int = 5, *, ctx=None) -> dict:
             n_cases = r.key_results.get("n_cases", 0)
             if isinstance(n_cases, (int, float)) and 0 < n_cases < MIN_CELL_COUNT:
                 issues.append({
-                    "severity": "CRITICAL",
+                    "severity": "INFO" if deidentified_internal else "CRITICAL",
                     "type": "min_cell_count",
                     "skill": r.skill,
                     "message": (
@@ -122,7 +129,7 @@ def safety_check(scope: str = "last", k: int = 5, *, ctx=None) -> dict:
             n_cases = r.key_results.get("n_cases")
             if isinstance(n_cases, (int, float)) and 0 < n_cases < MIN_CELL_COUNT:
                 issues.append({
-                    "severity": "CRITICAL",
+                    "severity": "INFO" if deidentified_internal else "CRITICAL",
                     "type": "min_cell_count",
                     "skill": r.skill,
                     "message": f"Cohort card reports only {int(n_cases)} cases.",
@@ -218,4 +225,7 @@ def safety_check(scope: str = "last", k: int = 5, *, ctx=None) -> dict:
         "issues": issues,
         "k_threshold": k,
         "scope": scope,
+        "data_deidentified": data_deidentified,
+        "internal_data_preserved": deidentified_internal,
+        "disclosure_control_mode": disclosure_control_mode,
     }

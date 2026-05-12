@@ -1,6 +1,8 @@
 """CLI command tests — verify all slash commands in _handle_command."""
 
 import json
+import os
+import sys
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,8 +15,180 @@ from prompt_toolkit.document import Document
 from rich.console import Console
 
 
+def test_collect_pasted_plan_lines_merges_available_stdin(monkeypatch):
+    """Multi-line pasted /plan goals should be one command, not refinements."""
+    from biobank_agent.cli import _collect_pasted_command_lines
+
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"I am giving you this paper PDF: /tmp/paper.pdf\nAct as an autonomous replication agent.\n")
+    os.close(write_fd)
+    with os.fdopen(read_fd, "r", encoding="utf-8") as stream:
+        monkeypatch.setattr(sys, "stdin", stream)
+        merged = _collect_pasted_command_lines("/plan Paper reproduction task:")
+
+    assert merged == (
+        "/plan Paper reproduction task:\n"
+        "I am giving you this paper PDF: /tmp/paper.pdf\n"
+        "Act as an autonomous replication agent."
+    )
+
+
+def test_collect_pasted_plan_lines_does_not_swallow_next_command(monkeypatch):
+    """Queued slash commands after /plan should remain executable."""
+    from biobank_agent import cli
+    from biobank_agent.planner import PlanState
+
+    cli._PENDING_STDIN_LINES.clear()
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"/plan-exit\nquit\n")
+    os.close(write_fd)
+    with os.fdopen(read_fd, "r", encoding="utf-8") as stream:
+        monkeypatch.setattr(sys, "stdin", stream)
+        merged = cli._collect_pasted_command_lines("/plan Paper reproduction task:")
+        pending = cli._read_query(None, SimpleNamespace(is_active=False, state=PlanState.INACTIVE))
+
+    assert merged == "/plan Paper reproduction task:"
+    assert pending == "/plan-exit"
+    assert cli._PENDING_STDIN_LINES == []
+
+
+def test_plan_paste_header_heuristic_is_narrow():
+    """Only likely pasted plan headers get the longer drain window."""
+    from biobank_agent.cli import _looks_like_plan_paste_start
+
+    assert _looks_like_plan_paste_start("/plan Paper reproduction task:")
+    assert _looks_like_plan_paste_start("/plan 论文复现:")
+    assert not _looks_like_plan_paste_start("/skills")
+    assert not _looks_like_plan_paste_start("/plan Train a model for E11 and generate the final report")
+
+
+def test_absorb_pasted_plan_continuation_updates_review_plan():
+    """A split pasted /plan block should update the plan goal, not trigger refine."""
+    from biobank_agent.cli import _absorb_pasted_plan_continuation
+    from biobank_agent.planner import LongHorizonPlan, PlanState, PlanStep
+
+    saved = {"called": False}
+    planner = SimpleNamespace(
+        state=PlanState.REVIEW,
+        goal="Paper reproduction task:",
+        plan=LongHorizonPlan(
+            goal="Paper reproduction task:",
+            steps=[
+                PlanStep(
+                    id="s1",
+                    skill="read_paper",
+                    args={"paper_path_or_doi": "Paper reproduction task:"},
+                )
+            ],
+        ),
+        revision=1,
+        validate_current_plan=lambda: [],
+        _save_plan_file=lambda: saved.update(called=True),
+        _awaiting_pasted_plan_continuation=True,
+    )
+
+    absorbed = _absorb_pasted_plan_continuation(
+        planner,
+        "I am giving you this paper PDF: /tmp/s41588-024-01898-1.pdf",
+    )
+
+    assert absorbed is True
+    assert "/tmp/s41588-024-01898-1.pdf" in planner.goal
+    assert planner.plan.goal == planner.goal
+    assert planner.plan.steps[0].args["paper_path_or_doi"] == "/tmp/s41588-024-01898-1.pdf"
+    assert planner.revision == 2
+    assert planner._needs_replan_from_pasted_goal is True
+    assert saved["called"] is True
+
+
+def test_refresh_plan_from_pasted_goal_replans_before_approval():
+    """Approval should use the complete pasted prompt, not the first header line."""
+    from biobank_agent.cli import _refresh_plan_from_pasted_goal
+    from biobank_agent.planner import LongHorizonPlan, PlanState, PlanStep
+
+    captured = {}
+
+    class FakePlanner:
+        def decompose(self, goal, available_skills, tool_schemas):
+            captured["goal"] = goal
+            return LongHorizonPlan(
+                goal=goal,
+                steps=[
+                    PlanStep(
+                        id="s1",
+                        skill="read_paper",
+                        args={"paper_path_or_doi": "/tmp/paper.pdf"},
+                    )
+                ],
+            )
+
+    saved = {"called": False}
+    planner = SimpleNamespace(
+        state=PlanState.REVIEW,
+        goal="Paper reproduction task:\nI am giving you this paper PDF: /tmp/paper.pdf",
+        plan=LongHorizonPlan(goal="Paper reproduction task:", steps=[]),
+        revision=2,
+        planner=FakePlanner(),
+        available_skills=["read_paper"],
+        tool_schemas={},
+        validate_current_plan=lambda: [],
+        _save_plan_file=lambda: saved.update(called=True),
+        _needs_replan_from_pasted_goal=True,
+        _awaiting_pasted_plan_continuation=True,
+    )
+
+    message = _refresh_plan_from_pasted_goal(planner)
+
+    assert "pasted multi-line goal" in message
+    assert captured["goal"].endswith("/tmp/paper.pdf")
+    assert planner.plan.goal == captured["goal"]
+    assert planner.revision == 3
+    assert planner._needs_replan_from_pasted_goal is False
+    assert planner._awaiting_pasted_plan_continuation is False
+    assert saved["called"] is True
+
+
+def test_stream_agent_response_renders_message_and_tool_events(mock_agent, cli_capture_console, monkeypatch):
+    """Normal CLI turns should consume AsyncAgent events instead of waiting silently."""
+    from biobank_agent.cli import _stream_agent_response
+    from biobank_agent.core.events import AgentEvent, AgentEventType
+    from biobank_agent.core.runtime import AsyncAgent
+
+    mock_agent.settings.async_runtime_enabled = True
+
+    monkeypatch.setattr(AsyncAgent, "is_safe_for_async", staticmethod(lambda agent: (True, "")))
+    monkeypatch.setattr(AsyncAgent, "__init__", lambda self, legacy: None)
+
+    async def fake_stream_events(self, query):
+        yield AgentEvent.make(AgentEventType.MESSAGE_DELTA, text="partial answer")
+        yield AgentEvent.make(
+            AgentEventType.TOOL_STARTED,
+            tool_call_id="c1",
+            skill="prevalence",
+            args={"icd10_code": "E11"},
+        )
+        yield AgentEvent.make(
+            AgentEventType.TOOL_RESULT,
+            tool_call_id="c1",
+            skill="prevalence",
+            summary={"n_cases": 100},
+        )
+        yield AgentEvent.make(AgentEventType.TURN_FINISHED, final_text="partial answer")
+
+    monkeypatch.setattr(AsyncAgent, "stream_events", fake_stream_events)
+
+    text, streamed = _stream_agent_response(mock_agent, "test")
+
+    assert streamed is True
+    assert text == "partial answer"
+    output = cli_capture_console.getvalue()
+    assert "partial answer" in output
+    assert "prevalence(icd10_code)" in output
+    assert "n_cases" in output
+
+
 @pytest.fixture
-def mock_agent():
+def mock_agent(tmp_path):
     """Create a mock Agent with enough state for CLI commands."""
     agent = MagicMock()
     agent.settings = MagicMock()
@@ -23,8 +197,15 @@ def mock_agent():
     agent.settings.llm_base_url = "http://relay.local"
     agent.settings.data_dir = "/fake/data"
     agent.settings.biobank_name = "Test Biobank"
-    agent.settings.reports_dir = MagicMock()
-    agent.settings.reports_dir.__truediv__ = MagicMock(return_value=MagicMock())
+    agent.settings.plans_dir = tmp_path / "plans"
+    agent.settings.plans_dir.mkdir(parents=True, exist_ok=True)
+    agent.settings.reports_dir = tmp_path / "reports"
+    agent.settings.reports_dir.mkdir(parents=True, exist_ok=True)
+    agent.settings.plan_clarification_enabled = True
+    agent.settings.plan_external_council_enabled = False
+    agent.settings.plan_external_council_timeout_s = 12
+    agent.settings.plan_review_hook_mode = "never"
+    agent.settings.plan_review_hook_agents = "codex,claude"
     agent.registry = MagicMock()
     agent.registry.__len__ = MagicMock(return_value=43)
     agent.registry.list_skills.return_value = [
@@ -39,6 +220,7 @@ def mock_agent():
     agent.state.model_metadata = {}
     agent.state.token_usage = MagicMock(prompt_tokens=100, completion_tokens=50)
     agent.state.last_orchestration = {}
+    agent.state.custom_data = {}
     agent.state.context_summary.return_value = "context summary"
     agent.messages = []
     agent.memory = MagicMock()
@@ -59,12 +241,22 @@ def mock_agent():
 
 @pytest.fixture
 def mock_planner():
-    """Create a mock PlanMode."""
+    """Create a mock PlanMode compatible with new state machine."""
+    from biobank_agent.planner import PlanState
+
     planner = MagicMock()
     planner.is_active = False
     planner.status = "INACTIVE"
-    planner.current_plan = None
+    planner.state = PlanState.INACTIVE
+    planner.current_plan_file = None
+    planner.plan = None
+    planner.goal = ""
+    planner.revision = 0
     planner.list_plans.return_value = []
+    planner.start.return_value = "Plan generated with 2 steps."
+    planner.identify_clarifications.return_value = []
+    planner.validation_issues = []
+    planner.validation_summary.return_value = "No validation errors."
     return planner
 
 
@@ -164,9 +356,301 @@ class TestSlashCommands:
 
     def test_plan_with_arg(self, mock_agent, mock_planner):
         from biobank_agent.cli import _handle_command
-        mock_planner.enter.return_value = "Plan mode activated."
+        from biobank_agent.planner import PlanState, LongHorizonPlan, PlanStep
+
+        mock_planner.state = PlanState.INACTIVE
+        mock_planner.is_active = False
+        # After start(), plan should exist for display
+        mock_planner.plan = LongHorizonPlan(
+            goal="test task",
+            steps=[PlanStep(id="s1", skill="think", description="Test step")],
+        )
+        mock_planner.revision = 1
+        mock_planner.start.return_value = "Plan generated with 1 steps."
         _handle_command("/plan test task", mock_agent, mock_planner, {})
-        mock_planner.enter.assert_called_with("test task")
+        mock_planner.start.assert_called_with("test task")
+
+    def test_plan_skip_refuses_required_and_allows_optional(self, mock_agent, cli_capture_console, tmp_path):
+        from biobank_agent.cli import _handle_command
+        from biobank_agent.planner import LongHorizonPlan, PlanMode, PlanState, PlanStep
+
+        planner = PlanMode(plans_dir=tmp_path / "plans")
+        planner.state = PlanState.PAUSED
+        planner.goal = "skip test"
+        planner.plan = LongHorizonPlan(
+            goal="skip test",
+            steps=[
+                PlanStep(id="s1", skill="cohort_summary", description="Required", criticality="required"),
+                PlanStep(id="s2", skill="field_search", description="Diagnostic", criticality="diagnostic"),
+            ],
+        )
+
+        _handle_command("/plan-skip s1", mock_agent, planner, {})
+        _handle_command("/plan-skip s2", mock_agent, planner, {})
+
+        assert planner.plan.steps[0].status == "pending"
+        assert planner.plan.steps[1].status == "skipped"
+        output = cli_capture_console.getvalue()
+        assert "Refusing to skip required step" in output
+        assert "Skipped s2" in output
+
+    def test_collect_external_planning_council_records_codex_and_unavailable_claude(self, mock_agent, cli_capture_console):
+        from biobank_agent.cli import _collect_external_planning_council
+
+        mock_agent.settings.plan_external_council_enabled = True
+        mock_agent.settings.plan_external_council_timeout_s = 12
+        mock_agent.registry.execute.side_effect = [
+            {
+                "agents": {
+                    "codex": {"available": True, "version": "codex test"},
+                    "claude": {
+                        "available": False,
+                        "error": "auth required",
+                        "remediation": "Run claude auth login",
+                    },
+                }
+            },
+            {
+                "agent": "codex",
+                "status": "success",
+                "available": True,
+                "elapsed_s": 1.2,
+                "stdout": "Add model training, calibration, report quality gates.",
+            },
+        ]
+
+        records = _collect_external_planning_council(mock_agent, "design a prediction study")
+
+        assert records == [
+            {
+                "agent": "codex",
+                "status": "success",
+                "available": True,
+                "elapsed_s": 1.2,
+                "summary": "Add model training, calibration, report quality gates.",
+                "stdout": "Add model training, calibration, report quality gates.",
+                "stderr": "",
+                "error": "",
+                "command_display": "",
+                "prompt_hash": "",
+            },
+            {
+                "agent": "claude",
+                "status": "unavailable",
+                "available": False,
+                "error": "auth required",
+                "summary": "Run claude auth login",
+                "remediation": "Run claude auth login",
+                "command_display": "",
+            },
+            {
+                "agent": "gemini",
+                "status": "unavailable",
+                "available": False,
+                "error": "External planner unavailable",
+                "summary": "",
+                "remediation": "",
+                "command_display": "",
+            },
+        ]
+        assert mock_agent.registry.execute.call_args_list[0].args[:2] == (
+            "external_agent_status",
+            {"agent": "all"},
+        )
+        assert mock_agent.registry.execute.call_args_list[1].args[:2] == (
+            "codex_plan",
+            {"task": "design a prediction study", "timeout_s": 12},
+        )
+        assert "Planning council: 1/3" in cli_capture_console.getvalue()
+
+    def test_collect_external_planning_council_emits_events(self, mock_agent):
+        from biobank_agent.cli import _collect_external_planning_council
+
+        mock_agent.settings.plan_external_council_enabled = True
+        mock_agent.registry.execute.side_effect = [
+            {"agents": {"codex": {"available": False, "error": "missing"}, "claude": {"available": False}}},
+        ]
+        events = []
+
+        records = _collect_external_planning_council(
+            mock_agent,
+            "task",
+            event_sink=lambda phase, actor, status, message, metadata=None: events.append(
+                (phase, actor, status, message)
+            ),
+        )
+
+        assert len(records) == 3
+        assert ("External council", "biobank", "running", "checking codex/claude/gemini availability") in events
+        assert any(event[1] == "codex" and event[2] == "skipped" for event in events)
+
+    def test_extract_external_planner_blocking_questions(self):
+        from biobank_agent.cli import _extract_external_planner_questions
+
+        records = [
+            {
+                "agent": "gemini",
+                "status": "success",
+                "stdout": "\n".join([
+                    "BLOCKING QUESTIONS:",
+                    "1. Should the diabetes endpoint be incident-only or ever-diagnosed?",
+                    "2. May the planner use raw UKB CSV columns if parquet coverage is incomplete?",
+                    "",
+                    "Plan:",
+                    "- continue",
+                ]),
+            },
+            {"agent": "codex", "status": "success", "stdout": "BLOCKING QUESTIONS: none\n- plan"},
+        ]
+
+        questions = _extract_external_planner_questions(records)
+
+        assert questions == [
+            {
+                "agent": "gemini",
+                "question": "Should the diabetes endpoint be incident-only or ever-diagnosed?",
+            },
+            {
+                "agent": "gemini",
+                "question": "May the planner use raw UKB CSV columns if parquet coverage is incomplete?",
+            },
+        ]
+
+    def test_external_planner_questions_are_auto_answered_from_explicit_goal(self):
+        from biobank_agent.cli import _collect_external_planner_clarifications
+
+        text, answers = _collect_external_planner_clarifications(
+            [
+                {"agent": "codex", "question": "Should HPP or CKB be included in this bank workflow?"},
+                {"agent": "gemini", "question": "May raw CSV fields be materialized if parquet is incomplete?"},
+            ],
+            "This benchmark is UKB-only and should inspect the full UKB raw CSV inventory.",
+        )
+
+        assert "UKB-only" in text
+        assert "raw CSV" in text
+        assert [item["label"] for item in answers] == ["Auto from task context", "Auto from task context"]
+
+    def test_research_setup_defaults_for_short_grand_challenge(self, mock_agent, monkeypatch):
+        from biobank_agent import cli
+
+        monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
+        monkeypatch.setattr(cli, "_quick_external_agent_status", lambda: {
+            "codex": {"available": True},
+            "claude": {"available": False},
+            "gemini": {"available": True},
+        })
+        goal = (
+            "I only have a broad research question: can UKB support a compelling study of metabolic health "
+            "trajectories, Type 2 Diabetes risk prediction, and potentially actionable cardiometabolic biomarkers?"
+        )
+
+        clarified, answers, meta = cli._collect_research_setup(mock_agent, goal)
+
+        assert "Autonomous research setup" in clarified
+        assert "Use UKB as the active execution dataset" in clarified
+        assert "Use external planning council with: codex, gemini" in clarified
+        assert "available skills, and the current UKB data inventory" in clarified
+        assert meta["external_agents"] == "codex,gemini"
+        assert [item["id"] for item in answers] == [
+            "research_setup_dataset",
+            "research_setup_external_council",
+            "research_setup_trajectory_policy",
+            "research_setup_model_policy",
+        ]
+
+    def test_research_setup_accepts_biobank_t2d_wording(self, mock_agent, monkeypatch):
+        from biobank_agent import cli
+
+        monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
+        monkeypatch.setattr(cli, "_quick_external_agent_status", lambda: {
+            "codex": {"available": True},
+            "claude": {"available": True},
+            "gemini": {"available": True},
+        })
+        goal = (
+            "Can biobank data support a compelling study of metabolic health trajectories, "
+            "T2D risk prediction, and actionable cardiometabolic biomarkers?"
+        )
+
+        clarified, answers, meta = cli._collect_research_setup(mock_agent, goal)
+
+        assert cli._is_broad_metabolic_showcase_goal(goal) is True
+        assert "Autonomous research setup" in clarified
+        assert "Use external planning council with: codex, claude, gemini" in clarified
+        assert meta["external_council_requested"] is True
+        assert len(answers) == 4
+
+    def test_research_setup_interactive_uses_three_separate_questions(self, mock_agent, monkeypatch):
+        from biobank_agent import cli
+
+        monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+        monkeypatch.setattr(cli, "_quick_external_agent_status", lambda: {
+            "codex": {"available": True},
+            "claude": {"available": True},
+            "gemini": {"available": True},
+        })
+        entered_prompts = []
+        choices = iter(["", "1,3", "3"])
+
+        def fake_input(prompt):
+            entered_prompts.append(prompt)
+            return next(choices)
+
+        monkeypatch.setattr(cli.console, "input", fake_input)
+        goal = (
+            "I only have a broad research question: can UKB support a compelling study of metabolic health "
+            "trajectories, Type 2 Diabetes risk prediction, and potentially actionable cardiometabolic biomarkers?"
+        )
+
+        clarified, answers, meta = cli._collect_research_setup(mock_agent, goal)
+
+        assert len(entered_prompts) == 3
+        assert all("Choice" in prompt for prompt in entered_prompts)
+        assert "Use external planning council with: codex, gemini" in clarified
+        assert "Prefer an interpretable model baseline" in clarified
+        assert meta["external_agents"] == "codex,gemini"
+        assert meta["model_policy"] == "interpretable"
+        assert [item["question"] for item in answers] == [
+            "Which data sources are active for this benchmark?",
+            "Should external planning agents be used?",
+            "How should incomplete trajectory support be handled?",
+            "How should model choice be handled?",
+        ]
+
+    def test_plan_short_grand_challenge_uses_research_setup_before_start(self, mock_agent, mock_planner, monkeypatch):
+        from biobank_agent import cli
+        from biobank_agent.cli import _handle_command
+        from biobank_agent.planner import LongHorizonPlan, PlanState, PlanStep
+
+        monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
+        monkeypatch.setattr(cli, "_quick_external_agent_status", lambda: {
+            "codex": {"available": True},
+            "claude": {"available": False},
+            "gemini": {"available": True},
+        })
+        mock_agent.settings.plan_external_council_enabled = False
+        mock_agent.settings.plan_research_setup_enabled = True
+        mock_planner.state = PlanState.INACTIVE
+        mock_planner.is_active = False
+        mock_planner.plan = LongHorizonPlan(
+            goal="showcase",
+            steps=[PlanStep(id="s1", skill="project_doc", description="Inspect docs")],
+        )
+        mock_planner.start.return_value = "Plan generated with 1 steps."
+        goal = (
+            "I only have a broad research question: can UKB support a compelling study of metabolic health "
+            "trajectories, Type 2 Diabetes risk prediction, and potentially actionable cardiometabolic biomarkers?"
+        )
+
+        _handle_command(f"/plan {goal}", mock_agent, mock_planner, {})
+
+        started_goal = mock_planner.start.call_args.args[0]
+        assert started_goal.startswith(goal)
+        assert "Autonomous research setup" in started_goal
+        assert "planning council" in started_goal
+        mock_planner.record_clarification_answers.assert_called()
+        assert mock_agent.settings.plan_external_council_agents == "codex,gemini"
 
     def test_unknown_command(self, mock_agent, mock_planner):
         from biobank_agent.cli import _handle_command
@@ -260,6 +744,69 @@ class TestSlashCommands:
             {"focus": "report quality"},
             ctx=mock_agent._build_ctx.return_value,
         )
+
+    def test_gemini_plan_and_check_commands(self, mock_agent, mock_planner):
+        from biobank_agent.cli import _handle_command
+
+        mock_agent.registry.execute.return_value = {
+            "agent": "gemini",
+            "task_kind": "plan",
+            "status": "success",
+            "stdout": "plan",
+        }
+        _handle_command("/gemini-plan design workflow", mock_agent, mock_planner, {})
+        mock_agent.registry.execute.assert_called_with(
+            "gemini_plan",
+            {"task": "design workflow"},
+            ctx=mock_agent._build_ctx.return_value,
+        )
+
+        mock_agent.registry.execute.return_value = {
+            "agent": "gemini",
+            "task_kind": "review",
+            "status": "success",
+            "stdout": "review",
+        }
+        _handle_command("/gemini-check report quality", mock_agent, mock_planner, {})
+        mock_agent.registry.execute.assert_called_with(
+            "gemini_check_execution",
+            {"focus": "report quality"},
+            ctx=mock_agent._build_ctx.return_value,
+        )
+
+    def test_review_repair_loop_writes_artifacts_and_reruns_safe_steps(self, tmp_path):
+        from biobank_agent.cli import _run_review_repair_loop
+
+        calls = []
+
+        def fake_execute(skill, args, report_dir, allow_retry=True):
+            calls.append((skill, args, Path(report_dir), allow_retry))
+            return {"is_error": False, "result": {"status": "ok"}}
+
+        agent = SimpleNamespace(
+            settings=SimpleNamespace(plan_review_repair_mode="auto_safe", plan_review_repair_max_loops=2),
+            state=SimpleNamespace(custom_data={}),
+            _execute_skill_and_record=fake_execute,
+        )
+        review_records = [
+            {
+                "agent": "codex",
+                "status": "success",
+                "stdout": "High severity: prevalent model is not incident risk prediction. SHAP caption is wrong.",
+            }
+        ]
+
+        _run_review_repair_loop(agent, review_records, focus="E11 risk workflow", report_dir=tmp_path)
+
+        assert (tmp_path / "external_review_summary.json").exists()
+        assert (tmp_path / "review_repair_plan.md").exists()
+        assert [call[0] for call in calls] == [
+            "statistical_review",
+            "safety_check",
+            "world_model_audit",
+            "generate_report",
+        ]
+        assert agent.state.custom_data["external_review_summary"]["status"] == "needs_repair"
 
     def test_remaining_dispatch_branches(self, mock_agent, mock_planner, cli_capture_console):
         from biobank_agent.cli import _handle_command
@@ -389,15 +936,15 @@ class TestCliHelperBranches:
         assert (settings.memory_dir / "cli_history.txt").exists() is False
         assert session is not None
 
-        plan_prompt = cli._prompt_message(True)
+        plan_prompt = cli._prompt_message(True, "REVIEW")
         normal_prompt = cli._prompt_message(False)
         assert "plan" in str(plan_prompt)
         assert "biobank" in str(normal_prompt)
 
         monkeypatch.setattr(cli.console, "input", lambda prompt: "typed query")
-        assert cli._read_query(None, SimpleNamespace(is_active=False)) == "typed query"
+        assert cli._read_query(None, SimpleNamespace(is_active=False, status="INACTIVE")) == "typed query"
         fake_session = SimpleNamespace(prompt=lambda message: f"prompted:{message!s}")
-        assert cli._read_query(fake_session, SimpleNamespace(is_active=True)).startswith("prompted:")
+        assert cli._read_query(fake_session, SimpleNamespace(is_active=True, status="REVIEW")).startswith("prompted:")
 
         cli._render_startup_dashboard(
             settings,
@@ -415,7 +962,7 @@ class TestCliHelperBranches:
             model_pool=["a"],
             available_model_count=0,
         )
-        assert "Biobank Agent" in cli_capture_console.getvalue()
+        assert "BioBank Agent" in cli_capture_console.getvalue()
 
     def test_rebuild_parquet_cmd_uses_categories_and_renders_results(self, tmp_path, monkeypatch, cli_capture_console):
         from biobank_agent import cli
@@ -457,6 +1004,54 @@ class TestCliHelperBranches:
         assert "Rebuild Complete" in output
         assert "urine: skipped" in output
 
+    def test_build_ukb_full_parquet_cmd_parses_dry_run_and_fields(self, tmp_path, monkeypatch, cli_capture_console):
+        from biobank_agent import cli
+
+        settings = SimpleNamespace(
+            raw_dir=tmp_path / "raw",
+            full_ukb_feature_store=tmp_path / "full_store",
+        )
+        calls = {}
+
+        def fake_build_full_ukb_feature_store(**kwargs):
+            calls.update(kwargs)
+            kwargs["callback"]("main_672073", "writing chunk 1/1")
+            return {
+                "status": "READY",
+                "sources": [
+                    {"source_key": "main_672073", "status": "READY", "n_chunks": 1},
+                ],
+                "n_selected_feature_columns": 2,
+                "n_chunks": 1,
+                "manifest_path": str(tmp_path / "full_store" / "manifest.json"),
+            }
+
+        monkeypatch.setattr(cli, "get_settings", lambda: settings)
+        monkeypatch.setattr(
+            "biobank_agent.data.parquet_builder.build_full_ukb_feature_store",
+            fake_build_full_ukb_feature_store,
+        )
+        monkeypatch.setattr(
+            cli.sys,
+            "argv",
+            [
+                "biobank",
+                "build-ukb-full-parquet",
+                "--dry-run",
+                "--field-ids=6153,2443",
+                "--sources=main_672073",
+                "--chunk-cols=10",
+            ],
+        )
+
+        cli.build_ukb_full_parquet_cmd()
+
+        assert calls["dry_run"] is True
+        assert calls["field_ids"] == ["6153", "2443"]
+        assert calls["sources"] == ["main_672073"]
+        assert calls["chunk_cols"] == 10
+        assert "Full UKB Feature Store" in cli_capture_console.getvalue()
+
     def test_export_history_figures_cohorts_models_pipelines_errors_and_memory(self, tmp_path, cli_capture_console):
         from biobank_agent import cli
 
@@ -489,9 +1084,9 @@ class TestCliHelperBranches:
         from biobank_agent import cli
 
         agent = populated_cli_agent(tmp_path)
-        planner = SimpleNamespace(is_active=True, status="EXECUTION", current_plan=SimpleNamespace(name="plan.md"))
+        planner = SimpleNamespace(is_active=True, status="EXECUTING", state="EXECUTING", goal="Test goal", plan=SimpleNamespace(done_steps=2, total_steps=5), revision=1, current_plan_file=SimpleNamespace(name="plan.md"))
         cli._show_status(agent, planner, {"prompt_tokens": 1234, "completion_tokens": 5678})
-        cli._show_status(agent, SimpleNamespace(is_active=True, status="INTAKE", current_plan=None), {"prompt_tokens": 0, "completion_tokens": 0})
+        cli._show_status(agent, SimpleNamespace(is_active=True, status="REVIEW", state="REVIEW", goal="", plan=None, revision=0, current_plan_file=None), {"prompt_tokens": 0, "completion_tokens": 0})
 
         agent.state.last_orchestration = {
             "safety_status": "PARTIAL",
@@ -563,6 +1158,161 @@ class TestCliHelperBranches:
         assert "safety_status=PARTIAL" in output
         assert "Debate failed" in output
 
+    def test_evolve_writes_review_only_proposals(self, tmp_path, cli_capture_console):
+        from biobank_agent import cli
+        from biobank_agent.tool_learner import ToolLearner
+
+        agent = populated_cli_agent(tmp_path)
+        agent.tool_learner = ToolLearner()
+        for _ in range(3):
+            agent.tool_learner.record(
+                "generate_report",
+                {"format": "dual"},
+                {"error": "report prerequisites missing: no statistical_review"},
+                elapsed_s=0.1,
+            )
+
+        cli._show_evolution_status(agent, "--write-proposals")
+
+        files = list((tmp_path / "reports" / "generated_skills").glob("evolve_proposals_*.md"))
+        assert files
+        text = files[0].read_text(encoding="utf-8")
+        assert "review-only patch plans" in text
+        assert "generate_report" in text
+        assert "```diff" in text
+        assert "Evolution proposals written" in cli_capture_console.getvalue()
+
+    def test_evolve_write_history_creates_scheduled_pattern_artifacts(self, tmp_path, cli_capture_console):
+        from biobank_agent import cli
+        from biobank_agent.tool_learner import ToolLearner
+
+        agent = populated_cli_agent(tmp_path)
+        agent.tool_learner = ToolLearner()
+        for _ in range(3):
+            agent.tool_learner.record(
+                "generate_report",
+                {"format": "dual"},
+                {"error": "report prerequisites missing: no statistical_review"},
+                elapsed_s=0.1,
+            )
+
+        cli._show_evolution_status(agent, "--write-history")
+
+        output_dir = tmp_path / "reports" / "eval" / "evolution"
+        latest = json.loads((output_dir / "latest.json").read_text(encoding="utf-8"))
+        assert latest["status"] == "NEEDS_REVIEW"
+        assert latest["n_patterns"] == 1
+        assert latest["artifacts"]["history_jsonl"].endswith("evolution_pattern_history.jsonl")
+        assert (output_dir / "evolution_pattern_history.jsonl").exists()
+        assert "Evolution pattern history written" in cli_capture_console.getvalue()
+
+        cli._show_evolution_status(agent, "--scheduled-run")
+        history = (output_dir / "evolution_pattern_history.jsonl").read_text(encoding="utf-8").splitlines()
+        assert len(history) >= 2
+
+    def test_evolve_apply_low_routes_generated_proposals_through_auto_merger(
+        self, tmp_path, monkeypatch, cli_capture_console
+    ):
+        import subprocess
+
+        from biobank_agent import cli
+        from biobank_agent.tool_learner import ToolLearner
+
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+        (tmp_path / "seed.txt").write_text("seed\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=tmp_path, check=True)
+        monkeypatch.chdir(tmp_path)
+
+        agent = populated_cli_agent(tmp_path)
+        agent.tool_learner = ToolLearner()
+        for _ in range(3):
+            agent.tool_learner.record(
+                "generate_report",
+                {"format": "dual"},
+                {"error": "report prerequisites missing: no statistical_review"},
+                elapsed_s=0.1,
+            )
+
+        cli._show_evolution_status(agent, "--apply-low")
+
+        proposal = tmp_path / "reports" / "generated_skills" / "generate_report_repair_plan.md"
+        assert proposal.exists()
+        assert "Evolution proposal: generate_report" in proposal.read_text(encoding="utf-8")
+        assert "LOW proposal generate_report: merged" in cli_capture_console.getvalue()
+
+    def test_evolve_apply_medium_requires_and_uses_confirmation(
+        self, tmp_path, monkeypatch, cli_capture_console
+    ):
+        import subprocess
+
+        from biobank_agent import cli
+
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+        (tmp_path / "seed.txt").write_text("seed\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=tmp_path, check=True)
+        monkeypatch.chdir(tmp_path)
+
+        medium_diff = (
+            "diff --git a/reports/generated_skills/medium_repair_plan.md "
+            "b/reports/generated_skills/medium_repair_plan.md\n"
+            "new file mode 100644\n"
+            "index 0000000..1111111\n"
+            "--- /dev/null\n"
+            "+++ b/reports/generated_skills/medium_repair_plan.md\n"
+            "@@ -0,0 +1,3 @@\n"
+            "+# Medium proposal\n"
+            "+if x > 0:\n"
+            "+    fix = True\n"
+        )
+        proposal = {
+            "skill": "generate_report",
+            "failure_count": 3,
+            "error_signature": "branch failure",
+            "suggested_action": "adjust branch after confirmation",
+            "risk": "medium",
+            "risk_reason": "touches control flow",
+            "target_path": "reports/generated_skills/medium_repair_plan.md",
+            "candidate_patch": medium_diff,
+        }
+
+        class Learner:
+            def mine_failure_patterns(self, min_count=3):
+                return []
+
+            def auto_propose_skill_improvement(self, min_count=3):
+                return [proposal]
+
+        agent = populated_cli_agent(tmp_path)
+        agent.tool_learner = Learner()
+
+        cli._show_evolution_status(agent, "--apply-medium")
+        assert "MEDIUM proposals require an explicit confirmation callback" in cli_capture_console.getvalue()
+        assert "MEDIUM proposal generate_report: user_rejected" in cli_capture_console.getvalue()
+        assert not (tmp_path / "reports" / "generated_skills" / "medium_repair_plan.md").exists()
+
+        async def confirm(_assessment, _patch):
+            return True
+
+        agent.state.custom_data["evolve_confirm_fn"] = confirm
+        cli._show_evolution_status(agent, "--apply-medium")
+
+        applied = tmp_path / "reports" / "generated_skills" / "medium_repair_plan.md"
+        assert applied.exists()
+        assert "if x > 0" in applied.read_text(encoding="utf-8")
+        audit = [
+            json.loads(line)
+            for line in (tmp_path / "reports" / "generated_skills" / "evolution_decisions.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert audit[-1]["risk"] == "medium"
+        assert audit[-1]["confirmed"] is True
+        assert "MEDIUM proposal generate_report: merged" in cli_capture_console.getvalue()
+
 
 class TestSlashAutocomplete:
     """Slash command autocomplete should be discoverable and precise."""
@@ -628,13 +1378,13 @@ class TestEvalArgParsing:
             "--baseline-report=reports/eval/baseline.json",
         ])
 
-        assert parsed == (
-            "skill_schemas",
-            "mas_v2",
-            True,
-            True,
-            "reports/eval/baseline.json",
-        )
+        assert parsed.suite == "skill_schemas"
+        assert parsed.mode == "mas_v2"
+        assert parsed.enforce_gate is True
+        assert parsed.ab_compare is True
+        assert parsed.policy == "all"
+        assert parsed.baseline_report == "reports/eval/baseline.json"
+        assert parsed.review_loop is False
 
     def test_parse_eval_args_supports_space_form(self):
         from biobank_agent.cli import _parse_eval_args
@@ -644,40 +1394,175 @@ class TestEvalArgParsing:
             "skill_schemas",
             "--mode",
             "baseline",
+            "--policy",
+            "always",
             "--baseline-report",
             "reports/eval/baseline.json",
         ])
 
-        assert parsed == (
-            "skill_schemas",
-            "baseline",
-            False,
-            False,
-            "reports/eval/baseline.json",
-        )
+        assert parsed.suite == "skill_schemas"
+        assert parsed.mode == "baseline"
+        assert parsed.policy == "always"
+        assert parsed.enforce_gate is False
+        assert parsed.ab_compare is False
+        assert parsed.baseline_report == "reports/eval/baseline.json"
 
     def test_parse_eval_args_accepts_report_quality_suites(self):
         from biobank_agent.cli import _parse_eval_args
-        from biobank_agent.eval.benchmarks import AgentReportWorkflowBenchmark, ReportQualityBenchmark
+        from biobank_agent.eval.benchmarks import (
+            AgentReportWorkflowBenchmark,
+            LiveUKBReport20Benchmark,
+            Report20CaseBenchmark,
+            ReportQualityBenchmark,
+        )
 
         parsed = _parse_eval_args(["--suite", "report_quality"])
         workflow = _parse_eval_args(["--suite", "agent_report_workflow"])
+        report_20 = _parse_eval_args(["--suite", "report_20_case"])
+        live_20 = _parse_eval_args(["--suite", "live_ukb_report_20"])
 
-        assert parsed[0] == "report_quality"
-        assert workflow[0] == "agent_report_workflow"
+        assert parsed.suite == "report_quality"
+        assert workflow.suite == "agent_report_workflow"
+        assert report_20.suite == "report_20_case"
+        assert live_20.suite == "live_ukb_report_20"
         assert ReportQualityBenchmark.name == "report_quality"
         assert AgentReportWorkflowBenchmark.name == "agent_report_workflow"
+        assert Report20CaseBenchmark.name == "report_20_case"
+        assert LiveUKBReport20Benchmark.name == "live_ukb_report_20"
+
+    def test_parse_eval_args_accepts_review_loop_flags(self):
+        from biobank_agent.cli import _parse_eval_args
+
+        parsed = _parse_eval_args([
+            "--suite=report_20_case",
+            "--review-loop",
+            "--reviewer",
+            "codex-gpt-5.5-xhigh",
+            "--include-claude",
+            "--review-timeout=45",
+        ])
+
+        assert parsed.suite == "report_20_case"
+        assert parsed.review_loop is True
+        assert parsed.primary_reviewer == "codex-gpt-5.5-xhigh"
+        assert parsed.include_claude is True
+        assert parsed.review_timeout_s == 45
 
     def test_parse_eval_args_ignores_unknown_flags(self):
         from biobank_agent.cli import _parse_eval_args
 
-        assert _parse_eval_args(["--unknown"]) == (
-            "research_eval_v1",
-            "baseline",
-            False,
-            False,
-            "",
-        )
+        parsed = _parse_eval_args(["--unknown", "--review-timeout", "not-an-int"])
+        assert parsed.suite == "research_eval_v1"
+        assert parsed.mode == "baseline"
+        assert parsed.enforce_gate is False
+        assert parsed.ab_compare is False
+        assert parsed.baseline_report == ""
+        assert parsed.review_loop is False
+        assert parsed.primary_reviewer == "codex-gpt-5.5-xhigh"
+        assert parsed.review_timeout_s == 600
+
+    def test_parse_eval_args_accepts_behavioral_policy(self):
+        from biobank_agent.cli import _parse_eval_args
+
+        parsed = _parse_eval_args(["--suite=behavioral", "--policy=usually"])
+
+        assert parsed.suite == "behavioral"
+        assert parsed.policy == "usually"
+
+    def test_parse_eval_args_accepts_scheduled_evolution_history(self):
+        from biobank_agent.cli import _parse_eval_args
+
+        parsed = _parse_eval_args([
+            "--suite",
+            "scheduled",
+            "--evolution-history",
+            "reports/eval/evolution_history.jsonl",
+            "--fail-on-evolution-patterns",
+        ])
+
+        assert parsed.suite == "scheduled"
+        assert parsed.evolution_history == "reports/eval/evolution_history.jsonl"
+        assert parsed.fail_on_evolution_patterns is True
+
+    def test_parse_eval_args_accepts_live_artifact_run_dir(self):
+        from biobank_agent.cli import _parse_eval_args
+
+        parsed = _parse_eval_args([
+            "--suite=live_artifacts",
+            "--run-dir",
+            "reports/biobank_live_tests/manual/20260511_100909",
+        ])
+
+        assert parsed.suite == "live_artifacts"
+        assert parsed.run_dir == "reports/biobank_live_tests/manual/20260511_100909"
+
+    def test_parse_eval_args_accepts_v3_completion_evidence_paths(self):
+        from biobank_agent.cli import _parse_eval_args
+
+        parsed = _parse_eval_args([
+            "--suite=v3_completion",
+            "--run-dir=reports/biobank_live_tests/manual/20260511_100909",
+            "--hpp-ckb-rap-readiness",
+            "reports/bank_readiness.json",
+            "--mcp-compat-evidence",
+            "reports/mcp_compat.json",
+            "--remote-ci-evidence",
+            "reports/ci.json",
+            "--high-pr-evidence",
+            "https://example.test/pull/1",
+            "--external-evidence-dir",
+            "reports/eval/external_evidence",
+            "--collect-external",
+        ])
+
+        assert parsed.suite == "v3_completion"
+        assert parsed.run_dir.endswith("20260511_100909")
+        assert parsed.hpp_ckb_rap_readiness == "reports/bank_readiness.json"
+        assert parsed.mcp_compat_evidence == "reports/mcp_compat.json"
+        assert parsed.remote_ci_evidence == "reports/ci.json"
+        assert parsed.high_pr_evidence == "https://example.test/pull/1"
+        assert parsed.external_evidence_dir == "reports/eval/external_evidence"
+        assert parsed.collect_external is True
+
+    def test_parse_eval_args_accepts_external_evidence_options(self):
+        from biobank_agent.cli import _parse_eval_args
+
+        parsed = _parse_eval_args([
+            "--suite",
+            "external_evidence",
+            "--collect",
+            "bank-readiness",
+            "--banks=hpp,ckb,ukb_rap",
+            "--icd10-code",
+            "E11",
+            "--probe-fields",
+            "hba1c,bmi",
+            "--collect",
+            "mcp",
+            "--mcp-config",
+            "reports/mcp_servers.json",
+            "--mcp-call-args=reports/mcp_args.json",
+            "--mcp-min-servers",
+            "3",
+            "--workflow",
+            "biobank-scheduled-eval.yml",
+            "--pr-url",
+            "https://github.com/example/repo/pull/1",
+            "--branch",
+            "auto-improve/demo-00001",
+        ])
+
+        assert parsed.suite == "external_evidence"
+        assert parsed.collect == "mcp"
+        assert parsed.banks == "hpp,ckb,ukb_rap"
+        assert parsed.icd10_code == "E11"
+        assert parsed.probe_fields == "hba1c,bmi"
+        assert parsed.mcp_config == "reports/mcp_servers.json"
+        assert parsed.mcp_call_args == "reports/mcp_args.json"
+        assert parsed.mcp_min_servers == 3
+        assert parsed.workflow == "biobank-scheduled-eval.yml"
+        assert parsed.pr_url == "https://github.com/example/repo/pull/1"
+        assert parsed.branch == "auto-improve/demo-00001"
 
 
 class FakeCliBenchmark:
@@ -685,7 +1570,7 @@ class FakeCliBenchmark:
 
 
 class FakeBenchmarkResult:
-    def __init__(self, gate_passed=True, comparative=None, baseline=None):
+    def __init__(self, gate_passed=True, comparative=None, baseline=None, review_loop=None):
         self.observability = {
             "success_rate": 1.0,
             "evidence_coverage": 0.95,
@@ -697,6 +1582,7 @@ class FakeBenchmarkResult:
         }
         self.comparative = comparative or {}
         self.baseline_observability = baseline or {}
+        self.review_loop = review_loop or {}
         self.gate_passed = gate_passed
         self.gate_failures = [] if gate_passed else ["gate failed"]
         self.n_total = 1
@@ -738,6 +1624,19 @@ class FakeEvalHarness:
             gate_passed=self.gate_passed,
             comparative=comparative,
             baseline=kwargs.get("baseline_observability") or {},
+            review_loop=(
+                {
+                    "enabled": True,
+                    "status": "completed",
+                    "primary_reviewer": kwargs.get("primary_reviewer"),
+                    "include_claude": kwargs.get("include_claude"),
+                    "reviews": [
+                        {"reviewer": kwargs.get("primary_reviewer"), "status": "success"},
+                    ],
+                }
+                if kwargs.get("review_loop")
+                else {}
+            ),
         )
 
 
@@ -765,6 +1664,267 @@ def cli_eval_settings(tmp_path):
 
 
 class TestEvalCommand:
+    def test_eval_cmd_behavioral_suite_writes_history_without_agent(self, tmp_path, monkeypatch, cli_capture_console):
+        from biobank_agent import cli
+
+        monkeypatch.setattr(cli, "get_settings", lambda: cli_eval_settings(tmp_path))
+        monkeypatch.setattr(cli.sys, "argv", [
+            "biobank",
+            "eval",
+            "--suite",
+            "behavioral",
+            "--policy",
+            "always",
+        ])
+        agent_calls = []
+        monkeypatch.setattr(cli, "Agent", lambda settings: agent_calls.append(settings))
+
+        cli.eval_cmd()
+
+        assert agent_calls == []
+        latest = tmp_path / "reports" / "eval" / "behavioral" / "latest.json"
+        assert latest.exists()
+        payload = json.loads(latest.read_text(encoding="utf-8"))
+        assert payload["status"] == "PASS"
+        assert payload["policies"] == ["always"]
+        assert "Behavioral Evaluation" in cli_capture_console.getvalue()
+
+    def test_eval_cmd_behavioral_rejects_unknown_policy(self, tmp_path, monkeypatch, cli_capture_console):
+        from biobank_agent import cli
+
+        monkeypatch.setattr(cli, "get_settings", lambda: cli_eval_settings(tmp_path))
+        monkeypatch.setattr(cli.sys, "argv", [
+            "biobank",
+            "eval",
+            "--suite",
+            "behavioral",
+            "--policy",
+            "bad",
+        ])
+
+        with pytest.raises(SystemExit) as exc:
+            cli.eval_cmd()
+
+        assert exc.value.code == 2
+        assert "Unknown behavioral policy" in cli_capture_console.getvalue()
+
+    def test_eval_cmd_scheduled_suite_writes_manifest(self, tmp_path, monkeypatch, cli_capture_console):
+        from biobank_agent import cli
+
+        history = tmp_path / "failures.jsonl"
+        history.write_text(
+            "\n".join(
+                json.dumps({"skill": "generate_report", "success": False, "error": "same failure"})
+                for _ in range(3)
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cli, "get_settings", lambda: cli_eval_settings(tmp_path))
+        monkeypatch.setattr(cli.sys, "argv", [
+            "biobank",
+            "eval",
+            "--suite",
+            "scheduled",
+            "--policy",
+            "always",
+            "--evolution-history",
+            str(history),
+        ])
+
+        cli.eval_cmd()
+
+        latest = tmp_path / "reports" / "eval" / "scheduled" / "latest.json"
+        assert latest.exists()
+        payload = json.loads(latest.read_text(encoding="utf-8"))
+        assert payload["status"] == "NEEDS_REVIEW"
+        assert payload["behavioral_status"] == "PASS"
+        assert payload["evolution_status"] == "NEEDS_REVIEW"
+        assert "Scheduled Quality Gates" in cli_capture_console.getvalue()
+
+    def test_eval_cmd_live_artifacts_suite_writes_strict_audit(self, tmp_path, monkeypatch, cli_capture_console):
+        from biobank_agent import cli
+
+        run_dir = tmp_path / "live"
+        run_dir.mkdir()
+        run_dir.joinpath("LIVE_TEST_AUDIT.md").write_text("- Status: **PASS**\n", encoding="utf-8")
+        worker = run_dir / "worker-02"
+        report_dir = worker / "workspace" / "reports" / "20260511_100913"
+        plan_dir = worker / "workspace" / "plans"
+        plan_dir.mkdir(parents=True)
+        report_dir.mkdir(parents=True)
+        plan_dir.joinpath("plan.md").write_text(
+            "10.1038/s41588-024-01898-1 replicate_paper read_paper paper_replication_compare "
+            "statistical_review safety_check world_model_audit generate_report format='dual'",
+            encoding="utf-8",
+        )
+        for name in ("report.md", "report_technical.md", "report_nature.md", "_report_with_css.md", "_report_nature_with_css.md", "report.html", "report_nature.html"):
+            report_dir.joinpath(name).write_text("# Report\n", encoding="utf-8")
+        report_dir.joinpath("paper_replication_comparison.md").write_text(
+            "Acceptance verdict: PASS_WITH_LIMITATIONS\n"
+            "| Gate | Status | Observed |\n|---|---:|---|\n"
+            "| paper_access | PASS | full |\n| cohort_count | PASS | ok |\n"
+            "| model_auc | PASS | ok |\n| calibration_ece | PASS | ok |\n"
+            "| feature_importance | PASS | ok |\n| figure_artifacts | PASS | ok |\n",
+            encoding="utf-8",
+        )
+        worker.joinpath("artifact_index.json").write_text(json.dumps({"audit": {"report_dirs": [str(report_dir)]}}), encoding="utf-8")
+
+        trajectory = run_dir / "worker-06"
+        trajectory_report = trajectory / "workspace" / "reports" / "20260511_101416"
+        trajectory_plan = trajectory / "workspace" / "plans"
+        trajectory_plan.mkdir(parents=True)
+        trajectory_report.mkdir(parents=True)
+        trajectory_plan.joinpath("plan.md").write_text(
+            "HealthFormer trajectory trajectory_tokenize statistical_review safety_check world_model_audit generate_report format='dual'",
+            encoding="utf-8",
+        )
+        technical = (
+            "Trajectory layer: 3,536,009 tokens\n"
+            "| available_tokens | 3536009 |\n"
+            "| training_distribution_coverage | 0 |\n"
+            "| allowed_claim_type | association_conditioned_forecast |\n"
+            "| trajectory_time_source | synthetic_assessment_instance_dates |\n"
+            "| world_model_audit | PARTIAL |\n"
+        )
+        for name in ("report.md", "report_technical.md", "report_nature.md", "_report_with_css.md", "_report_nature_with_css.md", "report.html", "report_nature.html"):
+            trajectory_report.joinpath(name).write_text(technical if name == "report_technical.md" else "# Report\n", encoding="utf-8")
+        trajectory.joinpath("artifact_index.json").write_text(json.dumps({"audit": {"report_dirs": [str(trajectory_report)]}}), encoding="utf-8")
+
+        monkeypatch.setattr(cli, "get_settings", lambda: cli_eval_settings(tmp_path))
+        monkeypatch.setattr(cli.sys, "argv", [
+            "biobank",
+            "eval",
+            "--suite",
+            "live_artifacts",
+            "--run-dir",
+            str(run_dir),
+            "--enforce-gate",
+        ])
+
+        cli.eval_cmd()
+
+        assert list(run_dir.glob("strict_live_artifact_audit_*.json"))
+        assert "Strict Live Artifact Audit" in cli_capture_console.getvalue()
+
+    def test_eval_cmd_v3_completion_suite_reports_external_blockers(self, tmp_path, monkeypatch, cli_capture_console):
+        from biobank_agent import cli
+        from biobank_agent.eval.v3_completion import CompletionCriterion, V3CompletionAudit
+
+        monkeypatch.setattr(cli, "get_settings", lambda: cli_eval_settings(tmp_path))
+        monkeypatch.setattr(cli.sys, "argv", [
+            "biobank",
+            "eval",
+            "--suite",
+            "v3_completion",
+            "--run-dir",
+            "reports/biobank_live_tests/manual/20260511_100909",
+        ])
+
+        def fake_audit(**kwargs):
+            assert kwargs["live_run_dir"] == "reports/biobank_live_tests/manual/20260511_100909"
+            return V3CompletionAudit(
+                status="BLOCKED_EXTERNAL",
+                generated_at="2026-05-11T00:00:00",
+                objective="objective",
+                criteria=[
+                    CompletionCriterion(id="local", requirement="local", status="PASS"),
+                    CompletionCriterion(id="remote", requirement="remote", status="BLOCKED_EXTERNAL"),
+                ],
+                artifacts={"run_md": str(tmp_path / "reports" / "eval" / "v3_completion" / "audit.md")},
+            )
+
+        monkeypatch.setattr("biobank_agent.eval.v3_completion.run_v3_completion_audit", fake_audit)
+
+        cli.eval_cmd()
+
+        output = cli_capture_console.getvalue()
+        assert "v3 Completion Audit" in output
+        assert "BLOCKED_EXTERNAL" in output
+        assert "Blocked external: 1" in output
+
+    def test_eval_cmd_v3_completion_can_collect_external_before_audit(self, tmp_path, monkeypatch, cli_capture_console):
+        from biobank_agent import cli
+        from biobank_agent.eval.v3_completion import CompletionCriterion, V3CompletionAudit
+
+        monkeypatch.setattr(cli, "get_settings", lambda: cli_eval_settings(tmp_path))
+        monkeypatch.setattr(cli.sys, "argv", [
+            "biobank",
+            "eval",
+            "--suite",
+            "v3_completion",
+            "--run-dir",
+            "reports/biobank_live_tests/manual/20260511_100909",
+            "--collect-external",
+            "--banks",
+            "hpp,ckb,ukb_rap",
+            "--pr-url",
+            "https://github.com/example/repo/pull/1",
+            "--branch",
+            "auto-improve/demo-00001",
+        ])
+        calls = []
+
+        def fake_collect(**kwargs):
+            calls.append(kwargs)
+            return {"bank_data_readiness": str(tmp_path / "bank_readiness.json")}
+
+        def fake_audit(**kwargs):
+            assert kwargs["external_evidence_dir"] == str(tmp_path / "reports" / "eval" / "external_evidence")
+            return V3CompletionAudit(
+                status="BLOCKED_EXTERNAL",
+                generated_at="2026-05-11T00:00:00",
+                objective="objective",
+                criteria=[
+                    CompletionCriterion(id="local", requirement="local", status="PASS"),
+                    CompletionCriterion(id="remote", requirement="remote", status="BLOCKED_EXTERNAL"),
+                ],
+                artifacts={"run_md": str(tmp_path / "reports" / "eval" / "v3_completion" / "audit.md")},
+            )
+
+        monkeypatch.setattr("biobank_agent.eval.v3_completion.collect_external_evidence_for_completion", fake_collect)
+        monkeypatch.setattr("biobank_agent.eval.v3_completion.run_v3_completion_audit", fake_audit)
+
+        cli.eval_cmd()
+
+        assert calls
+        assert calls[0]["banks"] == "hpp,ckb,ukb_rap"
+        assert calls[0]["pr_url"] == "https://github.com/example/repo/pull/1"
+        output = cli_capture_console.getvalue()
+        assert "collected bank_data_readiness" in output
+        assert "v3 Completion Audit" in output
+
+    def test_eval_cmd_external_evidence_suite_collects_requested_artifacts(self, tmp_path, monkeypatch, cli_capture_console):
+        from biobank_agent import cli
+        from biobank_agent.eval.external_evidence import EvidenceArtifact
+
+        monkeypatch.setattr(cli, "get_settings", lambda: cli_eval_settings(tmp_path))
+        monkeypatch.setattr(cli.sys, "argv", [
+            "biobank",
+            "eval",
+            "--suite",
+            "external_evidence",
+            "--collect",
+            "high-pr",
+            "--pr-url",
+            "https://github.com/example/repo/pull/1",
+            "--branch",
+            "auto-improve/demo-00001",
+        ])
+
+        def fake_high_pr(**kwargs):
+            assert kwargs["pr_url"] == "https://github.com/example/repo/pull/1"
+            assert kwargs["branch"] == "auto-improve/demo-00001"
+            return EvidenceArtifact("high_risk_pr_evidence", "PR_OPENED", str(tmp_path / "high_pr.json"))
+
+        monkeypatch.setattr("biobank_agent.eval.external_evidence.collect_high_pr_evidence", fake_high_pr)
+
+        cli.eval_cmd()
+
+        output = cli_capture_console.getvalue()
+        assert "External Evidence" in output
+        assert "high_risk_pr_evidence" in output
+        assert "PR_OPENED" in output
+
     def test_eval_cmd_unknown_mode_and_suite(self, tmp_path, monkeypatch, cli_capture_console):
         from biobank_agent import cli
 
@@ -788,7 +1948,7 @@ class TestEvalCommand:
         import biobank_agent.eval.benchmarks as benchmarks_mod
         import biobank_agent.eval.harness as harness_mod
 
-        for name in ("AgentReportWorkflowBenchmark", "ResearchEvalV1", "ReportQualityBenchmark", "SkillSchemaBenchmark", "BiomedQABenchmark", "SkillCallBenchmark"):
+        for name in ("AgentReportWorkflowBenchmark", "LiveUKBReport20Benchmark", "ResearchEvalV1", "Report20CaseBenchmark", "ReportQualityBenchmark", "SkillSchemaBenchmark", "BiomedQABenchmark", "SkillCallBenchmark"):
             monkeypatch.setattr(benchmarks_mod, name, FakeCliBenchmark)
         harness = FakeEvalHarness()
         monkeypatch.setattr(harness_mod, "EvalHarness", lambda: harness)
@@ -851,12 +2011,49 @@ class TestEvalCommand:
             cli.eval_cmd()
         assert gate_exit.value.code == 3
 
+    def test_eval_cmd_report_20_case_review_loop_flags(self, tmp_path, monkeypatch):
+        from biobank_agent import cli
+        import biobank_agent.eval.benchmarks as benchmarks_mod
+        import biobank_agent.eval.harness as harness_mod
+
+        for name in ("AgentReportWorkflowBenchmark", "LiveUKBReport20Benchmark", "ResearchEvalV1", "Report20CaseBenchmark", "ReportQualityBenchmark", "SkillSchemaBenchmark", "BiomedQABenchmark", "SkillCallBenchmark"):
+            monkeypatch.setattr(benchmarks_mod, name, FakeCliBenchmark)
+        harness = FakeEvalHarness()
+        monkeypatch.setattr(harness_mod, "EvalHarness", lambda: harness)
+        monkeypatch.setattr(cli, "Agent", FakeCliAgent)
+        monkeypatch.setattr(cli, "get_settings", lambda: cli_eval_settings(tmp_path))
+        monkeypatch.setattr(cli.sys, "argv", [
+            "biobank",
+            "eval",
+            "--suite",
+            "report_20_case",
+            "--review-loop",
+            "--reviewer",
+            "codex-gpt-5.5-xhigh",
+            "--include-claude",
+            "--review-timeout",
+            "42",
+        ])
+
+        cli.eval_cmd()
+
+        call = harness.calls[-1]
+        assert call["benchmark"].name == "fake"
+        assert call["review_loop"] is True
+        assert call["primary_reviewer"] == "codex-gpt-5.5-xhigh"
+        assert call["include_claude"] is True
+        assert call["review_timeout_s"] == 42
+        saved = sorted((tmp_path / "reports" / "eval").glob("report_20_case_baseline_*.json"))[-1]
+        payload = json.loads(saved.read_text(encoding="utf-8"))
+        assert payload["suite"] == "report_20_case"
+        assert payload["review_loop"]["primary_reviewer"] == "codex-gpt-5.5-xhigh"
+
     def test_eval_cmd_missing_baseline_file_and_unavailable_model_list(self, tmp_path, monkeypatch):
         from biobank_agent import cli
         import biobank_agent.eval.benchmarks as benchmarks_mod
         import biobank_agent.eval.harness as harness_mod
 
-        for name in ("AgentReportWorkflowBenchmark", "ResearchEvalV1", "ReportQualityBenchmark", "SkillSchemaBenchmark", "BiomedQABenchmark", "SkillCallBenchmark"):
+        for name in ("AgentReportWorkflowBenchmark", "LiveUKBReport20Benchmark", "ResearchEvalV1", "Report20CaseBenchmark", "ReportQualityBenchmark", "SkillSchemaBenchmark", "BiomedQABenchmark", "SkillCallBenchmark"):
             monkeypatch.setattr(benchmarks_mod, name, FakeCliBenchmark)
         harness = FakeEvalHarness()
         monkeypatch.setattr(harness_mod, "EvalHarness", lambda: harness)
@@ -911,7 +2108,9 @@ class FakeMainAgent:
         self.orchestrator = SimpleNamespace(model_pool=[SimpleNamespace(model_id="model-a")])
         self.registry = MagicMock()
         self.registry.__len__.return_value = 3
+        self.registry.list_skills.return_value = [{"name": "think", "description": "Think"}]
         self.available_models = ["model-a"]
+        self.llm = MagicMock()
         self.state = SimpleNamespace(
             figures=[],
             token_usage=SimpleNamespace(prompt_tokens=11, completion_tokens=22),
@@ -922,11 +2121,16 @@ class FakeMainAgent:
 
 
 class FakeMainPlanner:
-    def __init__(self, plans_dir, *, active=False):
+    def __init__(self, plans_dir, *, active=False, **kwargs):
+        from biobank_agent.planner import PlanState
         self.plans_dir = plans_dir
         self.is_active = active
-        self.status = "EXECUTION"
-        self.current_plan = None
+        self.status = "EXECUTING" if active else "INACTIVE"
+        self.state = PlanState.EXECUTING if active else PlanState.INACTIVE
+        self.current_plan_file = None
+        self.plan = None
+        self.goal = ""
+        self.revision = 0
 
     def get_plan_content(self):
         return "Plan body"
@@ -961,7 +2165,7 @@ class TestMainCommand:
         monkeypatch.setattr(cli.sys, "argv", ["biobank", "--model=override-model"])
         monkeypatch.setattr(cli, "get_settings", lambda: settings)
         monkeypatch.setattr(cli, "Agent", fake_agent_factory)
-        monkeypatch.setattr(cli, "PlanMode", lambda plans_dir: FakeMainPlanner(plans_dir))
+        monkeypatch.setattr(cli, "PlanMode", lambda **kwargs: FakeMainPlanner(kwargs.get("plans_dir", tmp_path)))
         monkeypatch.setattr(cli, "_read_query", MagicMock(side_effect=["", "/help", "quit"]))
         monkeypatch.setenv("UKB_PARQUET_DIR", "/old")
         monkeypatch.delenv("DATA_DIR", raising=False)
@@ -1009,7 +2213,7 @@ class TestMainCommand:
         monkeypatch.setattr(cli.sys, "argv", ["biobank", "--noop"])
         monkeypatch.setattr(cli, "get_settings", lambda: settings)
         monkeypatch.setattr(cli, "Agent", fake_agent_factory)
-        monkeypatch.setattr(cli, "PlanMode", lambda plans_dir: FakeMainPlanner(plans_dir, active=True))
+        monkeypatch.setattr(cli, "PlanMode", lambda **kwargs: FakeMainPlanner(kwargs.get("plans_dir", tmp_path), active=True))
         monkeypatch.setattr(cli, "_read_query", fake_read_query)
         monkeypatch.setattr(cli.console, "status", fake_status)
 
@@ -1031,7 +2235,7 @@ class TestMainCommand:
         monkeypatch.setattr(cli.sys, "argv", ["biobank"])
         monkeypatch.setattr(cli, "get_settings", lambda: settings)
         monkeypatch.setattr(cli, "Agent", lambda settings_arg: agent)
-        monkeypatch.setattr(cli, "PlanMode", lambda plans_dir: FakeMainPlanner(plans_dir, active=False))
+        monkeypatch.setattr(cli, "PlanMode", lambda **kwargs: FakeMainPlanner(kwargs.get("plans_dir", tmp_path), active=False))
         monkeypatch.setattr(cli, "_read_query", MagicMock(side_effect=["plain question", "quit"]))
 
         cli.main()
@@ -1046,7 +2250,7 @@ class TestMainCommand:
         monkeypatch.setattr(cli.sys, "argv", ["biobank"])
         monkeypatch.setattr(cli, "get_settings", lambda: settings)
         monkeypatch.setattr(cli, "Agent", lambda settings_arg: FakeMainAgent(settings_arg))
-        monkeypatch.setattr(cli, "PlanMode", lambda plans_dir: FakeMainPlanner(plans_dir))
+        monkeypatch.setattr(cli, "PlanMode", lambda **kwargs: FakeMainPlanner(kwargs.get("plans_dir", tmp_path)))
         monkeypatch.setattr(cli, "_read_query", MagicMock(side_effect=EOFError()))
 
         cli.main()

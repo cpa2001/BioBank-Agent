@@ -7,11 +7,32 @@ Configure via ``ctx.settings.search_provider`` and ``ctx.settings.search_api_key
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from typing import Any
 
 from biobank_agent.registry import skill
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _suppress_legacy_duckduckgo_warning():
+    """Suppress the legacy package's forced rename RuntimeWarning."""
+    import warnings
+
+    original_warn = warnings.warn
+
+    def filtered_warn(message, *args, **kwargs):
+        text = str(message)
+        if "duckduckgo_search" in text and "ddgs" in text:
+            return None
+        return original_warn(message, *args, **kwargs)
+
+    warnings.warn = filtered_warn
+    try:
+        yield
+    finally:
+        warnings.warn = original_warn
 
 
 # ---------------------------------------------------------------------------
@@ -29,13 +50,13 @@ def _search_duckduckgo(query: str, max_results: int) -> list[dict]:
     try:
         from ddgs import DDGS
     except ImportError:
-        with warnings.catch_warnings():
+        with warnings.catch_warnings(), _suppress_legacy_duckduckgo_warning():
             warnings.simplefilter("ignore", RuntimeWarning)
             from duckduckgo_search import DDGS
 
     results: list[dict] = []
     try:
-        with warnings.catch_warnings():
+        with warnings.catch_warnings(), _suppress_legacy_duckduckgo_warning():
             warnings.simplefilter("ignore", RuntimeWarning)
             ddgs = DDGS()
             raw = ddgs.text(query, max_results=max_results)

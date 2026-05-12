@@ -159,6 +159,35 @@ def test_search_literature_filters_ukb_noise_and_preserves_doi(monkeypatch):
     assert deep_mod._curated_sources_for_topic("UK Biobank demographics", 3) == []
 
 
+def test_search_literature_expands_sparse_ukb_search(monkeypatch):
+    calls = []
+
+    def fake_web_search(query, max_results=10, ctx=None):
+        calls.append(query)
+        return {"results": []}
+
+    monkeypatch.setattr("biobank_agent.skills.web_search.web_search", fake_web_search)
+    monkeypatch.setattr(
+        deep_mod,
+        "_search_europe_pmc",
+        lambda topic, max_results: [
+            {"title": f"PMC {i}", "url": f"https://europepmc.org/{i}", "snippet": "UK Biobank biomarker cohort"}
+            for i in range(6)
+        ],
+    )
+    ctx = SimpleNamespace(settings=SimpleNamespace(biobank_name="UK Biobank"))
+
+    results = deep_mod._search_literature(
+        "UK Biobank longitudinal biomarker trajectories HealthFormer disease progression forecast",
+        10,
+        ctx,
+    )
+
+    assert len(calls) >= 5
+    assert any("PubMed" in q for q in calls)
+    assert any(r["title"].startswith("PMC") for r in results)
+
+
 def test_search_literature_breaks_after_fallback_and_skips_empty_keys(monkeypatch):
     calls = []
 
@@ -278,6 +307,9 @@ def test_compile_brief_and_deep_research_save_paths(tmp_path, monkeypatch):
 
     assert result["topic"] == "diabetes/biomarkers?"
     assert result["n_sources"] == 1
+    assert result["status"] == "PARTIAL"
+    assert result["min_expected_sources"] == 3
+    assert result["search_attempts"]
     assert result["sources"][0]["doi"] == "10.1038/example"
     assert result["n_biobank_fields"] == 1
     assert result["brief_path"] is not None

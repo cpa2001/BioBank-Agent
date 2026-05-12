@@ -33,6 +33,8 @@ from .guardrails import DelegationGuardrails
 from .retrieval import AgenticRAG
 from .tool_learner import ToolLearner
 from .interfaces.multimodal import SimpleMultimodalGrounder
+from .core.safety.nli_causal_check import maybe_inject_disclaimer
+from .core.compaction import structured_extract
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,73 @@ build predictive models, and generate publication-quality reports.
 ## Current session state
 {session_state}
 """
+
+
+_UNSAFE_EXECUTIVE_PATTERNS = (
+    r"/Users/",
+    r"\btraceback\b",
+    r"\bstdout\b|\bstderr\b|\breturncode\b",
+    r"\bTODO\b|\bFIXME\b",
+    r"```",
+    r"\bpytest\b|\bbenchmark\b",
+    r"\bcodex\b|\bclaude\b",
+    r"\breview(ed|er| loop)?\b",
+    r"\bapi[_ -]?key\b|\bauth\b|\blogin\b",
+    r"\bpath:\b|\breport path\b",
+    r"\banalysis completed\b",
+)
+_UNQUALIFIED_CAUSAL_PATTERN = re.compile(
+    r"\b(causes?|causal effect|prevents?|treats?|cures?|reduces risk|protects against|therapy recommendation)\b",
+    re.IGNORECASE,
+)
+_CAUSAL_QUALIFIER_PATTERN = re.compile(
+    r"\b(associat(?:ed|ion)|hypothes(?:is|ize)|observational|not causal|cannot infer|does not establish|requires validation|may)\b",
+    re.IGNORECASE,
+)
+
+
+def _safe_executive_finding(line: str) -> bool:
+    """Return whether a final-answer line is safe for report lead placement."""
+    if len(line) < 20:
+        return False
+    if line.endswith(":") and len(line) < 80:
+        return False
+    for pattern in _UNSAFE_EXECUTIVE_PATTERNS:
+        if re.search(pattern, line, re.IGNORECASE):
+            return False
+    if _UNQUALIFIED_CAUSAL_PATTERN.search(line) and not _CAUSAL_QUALIFIER_PATTERN.search(line):
+        return False
+    return True
+
+
+def _sanitize_executive_findings(text: str, *, max_items: int = 8) -> list[str]:
+    """Extract concise, human-facing findings from a final answer."""
+    findings: list[str] = []
+    seen: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        line = re.sub(r"^#{1,6}\s*", "", line)
+        line = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", line)
+        line = " ".join(line.strip(" -\t").split())
+        if not _safe_executive_finding(line):
+            continue
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        findings.append(line[:450].rstrip())
+        if len(findings) >= max_items:
+            break
+    return findings
+
+
+def _safe_final_text(text: str) -> str:
+    try:
+        return maybe_inject_disclaimer(text or "")
+    except Exception:
+        return text or ""
 
 
 class Agent:
@@ -291,6 +360,19 @@ class Agent:
         if mem_summary:
             content += f"\n\n## Long-term Memory\n{mem_summary}"
 
+        tool_learning = self.tool_learner.summary() if hasattr(self, "tool_learner") else ""
+        if tool_learning:
+            content += f"\n\n## Tool Learning\n{tool_learning}"
+
+        content += (
+            "\n\n## Self-Improvement Policy\n"
+            "When an approved plan cannot be completed with current tools, first repair arguments "
+            "or add missing prerequisite analysis steps. If a genuinely missing low-risk analysis "
+            "capability blocks the goal, use `create_skill` to generate a review artifact under "
+            "reports/generated_skills/. Do not activate generated skills unless an explicit user "
+            "approval flow enables it. Do not modify repository source code automatically."
+        )
+
         # Inject domain knowledge (prose, frozen snapshot)
         domain_text = self.memory.domain.summary(max_chars=2000)
         if domain_text:
@@ -308,7 +390,40 @@ class Agent:
 
         The agent will call tools in a loop until the LLM produces a
         text-only response (no more tool calls).
+
+        When ``settings.async_runtime_enabled`` is set, the call is
+        delegated to ``biobank_agent.core.runtime.AsyncAgent`` so the
+        new streaming event pipeline drives the same legacy skill
+        execution path with non-blocking LLM streaming, smart
+        compaction, automatic ReproducibilityHarness checkpoints, and
+        StudySpec gate emissions. The synchronous facade is preserved
+        for CLI / eval / benchmark / test callers.
         """
+        if getattr(self.settings, "async_runtime_enabled", False):
+            import asyncio as _asyncio
+
+            from .core.runtime import AsyncAgent as _AsyncAgent
+
+            safe, reason = _AsyncAgent.is_safe_for_async(self)
+            if not safe:
+                logger.warning(
+                    "async_runtime_enabled but unsafe to use; falling back "
+                    "to synchronous loop. Reason: %s",
+                    reason,
+                )
+            else:
+                runtime = _AsyncAgent(self)
+                try:
+                    return _asyncio.run(runtime.run_to_text(user_query))
+                except RuntimeError as e:
+                    # Already-running loop (e.g. inside Jupyter or another
+                    # asyncio context). Fall back to the legacy sync loop.
+                    logger.warning(
+                        "async_runtime_enabled but no asyncio.run available "
+                        "(%s); falling back to legacy synchronous loop.",
+                        e,
+                    )
+
         self.messages.append({"role": "user", "content": user_query})
         self._active_query_id = f"q_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{abs(hash(user_query)) % 1000000}"
         try:
@@ -402,15 +517,17 @@ class Agent:
 
             # If no tool calls → final answer
             if not response.has_tool_calls:
-                self.messages.append({"role": "assistant", "content": response.text})
+                safe_text = _safe_final_text(response.text)
+                self.messages.append({"role": "assistant", "content": safe_text})
                 try:
                     # Normal routing/wrapping always yields an orchestration result here.
                     if orchestration_result:  # pragma: no branch
                         self._record_orchestration_graph(orchestration_result)
                 except Exception:
                     pass
+                self._record_executive_findings(user_query, safe_text, orchestration_result)
                 self._post_run(user_query)
-                return response.text
+                return safe_text
 
             # Process tool calls
             # First, add the assistant message with tool_calls
@@ -429,178 +546,254 @@ class Agent:
             # Execute each tool call
             for tc in response.tool_calls:
                 logger.info("Tool call: %s(%s)", tc.name, tc.args)
-                t0 = time.time()
-                figs_before = len(self.state.figures)
-                ctx = self._build_ctx(_report_dir)
-                try:
-                    result = self.registry.execute(tc.name, tc.args, ctx=ctx)
-                    result_str = json.dumps(result, default=str, ensure_ascii=False)
-                except Exception as e:
-                    logger.error("Tool %s failed: %s", tc.name, e)
-
-                    # Track error in long-term memory
-                    try:
-                        self.memory.record_error(
-                            error_type=type(e).__name__,
-                            error_message=str(e),
-                            skill_name=tc.name,
-                            context={"args": {k: str(v)[:100] for k, v in tc.args.items()}},
-                        )
-                    except Exception:
-                        pass  # Don't let error tracking break the agent
-
-                    # Get suggestions from error history
-                    suggestions = self.memory.get_error_suggestions(type(e).__name__, tc.name)
-                    error_info = {"error": str(e)}
-                    if suggestions:
-                        error_info["known_fixes"] = suggestions[:3]
-
-                    # Auto-retry with Reflexion (structured) or simple heuristic
-                    retried = False
-                    try:
-                        if self.reflexion and self.reflexion.should_retry(e, tc.name):
-                            # Structured reflexion: LLM analyzes root cause
-                            logger.info("Reflexion: analyzing failure of %s...", tc.name)
-                            reflection = self.reflexion.reflect(
-                                skill_name=tc.name,
-                                args=tc.args,
-                                error=e,
-                                context=self.state.context_summary()[:500],
-                            )
-                            if reflection.retry_recommended and reflection.corrections:
-                                retry_args = {**tc.args, **reflection.corrected_args}
-                                logger.info(
-                                    "Reflexion: retrying %s with corrections: %s (confidence=%.2f)",
-                                    tc.name, reflection.corrected_args, reflection.confidence,
-                                )
-                                result = self.registry.execute(tc.name, retry_args, ctx=ctx)
-                                if isinstance(result, dict):
-                                    result["_reflexion"] = {
-                                        "root_cause": reflection.root_cause,
-                                        "corrections": {c.param: c.new_value for c in reflection.corrections},
-                                        "confidence": reflection.confidence,
-                                    }
-                                result_str = json.dumps(result, default=str, ensure_ascii=False)
-                                retried = True
-                        elif not self.reflexion:
-                            # Legacy fallback: simple parameter halving
-                            from .skills.retry import should_retry_on_error
-                            if should_retry_on_error(e):
-                                logger.info("Retrying %s with halved params (no reflexion)...", tc.name)
-                                retry_args = dict(tc.args)
-                                for key in ("n_folds", "top_n"):
-                                    if key in retry_args and isinstance(retry_args[key], int):
-                                        retry_args[key] = max(2, retry_args[key] // 2)
-                                for key in ("sample_size",):
-                                    if key in retry_args and isinstance(retry_args[key], int):
-                                        retry_args[key] = retry_args[key] // 2
-                                result = self.registry.execute(tc.name, retry_args, ctx=ctx)
-                                if isinstance(result, dict):
-                                    result["_retried_with"] = {
-                                        k: v for k, v in retry_args.items()
-                                        if k in ("n_folds", "top_n", "sample_size") and retry_args[k] != tc.args.get(k)
-                                    }
-                                result_str = json.dumps(result, default=str, ensure_ascii=False)
-                                retried = True
-                    except Exception as retry_err:
-                        logger.warning("Retry of %s also failed: %s", tc.name, retry_err)
-
-                    if not retried:
-                        result_str = json.dumps(error_info, default=str)
-                        result = error_info
-
-                elapsed = time.time() - t0
-
-                # Track field usage only for successful data queries
-                is_error = isinstance(result, dict) and "error" in result
-                if not is_error:
-                    for arg_val in tc.args.values():
-                        if isinstance(arg_val, str) and arg_val.replace("-", "").isdigit():
-                            self.memory.record_field_usage(arg_val)
-
-                # Tool learner: record execution stats
-                try:
-                    self.tool_learner.record(
-                        tc.name, {k: v for k, v in tc.args.items() if k != "ctx"},
-                        result if isinstance(result, dict) else {}, elapsed,
-                    )
-                except Exception:
-                    pass  # non-critical
-
-                # Verdict: verify successful results for data quality
-                if not is_error and tc.name not in ("think", "generate_report"):
-                    try:
-                        verdict = self.verdict_engine.verify_skill_result(
-                            tc.name, tc.args, result if isinstance(result, dict) else {},
-                        )
-                        if verdict.n_blockers > 0:
-                            logger.warning("Verdict FAIL for %s: %s", tc.name, verdict.summary())
-                    except Exception:
-                        pass  # non-critical
-
-                # Reproducibility: checkpoint skill execution
-                try:
-                    self.reproducibility.create_audit_log(
-                        skill_name=tc.name,
-                        inputs=tc.args,
-                        outputs=result if isinstance(result, dict) else {"raw": str(result)[:500]},
-                        duration_ms=elapsed * 1000 if isinstance(elapsed, (int, float)) else 0.0,
-                        status="success" if not is_error else "failed",
-                    )
-                except Exception:
-                    pass  # non-critical
-
-                # Record — only figures produced by THIS tool call
-                new_figs = [str(p) for p in self.state.figures[figs_before:]]
-                ts = datetime.now().isoformat()
-                clean_args = {k: v for k, v in tc.args.items() if k != "ctx"}
-                key_res = result if isinstance(result, dict) else {"result": str(result)[:200]}
-
-                self.state.add_record(AnalysisRecord(
-                    timestamp=ts,
-                    skill=tc.name,
-                    args=clean_args,
-                    key_results=key_res,
-                    figure_paths=new_figs,
-                ))
-                try:
-                    self._record_tool_graph(
-                        skill=tc.name,
-                        args=clean_args,
-                        key_results=key_res,
-                        figure_paths=new_figs,
-                        timestamp=ts,
-                    )
-                except Exception:
-                    pass
-
-                # Record provenance for reproducibility
-                if not is_error:
-                    prov = Provenance(
-                        provenance_id=Provenance.make_id(tc.name, clean_args, ts),
-                        skill=tc.name,
-                        args=clean_args,
-                        timestamp=ts,
-                        bank_id=self.settings.bank_id,
-                        result_hash=Provenance.compute_hash(key_res),
-                        parent_ids=[p.provenance_id for p in self.state.provenances[-3:]],
-                    )
-                    self.state.provenances.append(prov)
+                execution = self._execute_skill_and_record(
+                    tc.name,
+                    tc.args,
+                    _report_dir,
+                    allow_retry=True,
+                )
 
                 # Add tool result message
+                compacted_tool_result = structured_extract(
+                    execution.get("result", {}),
+                    target_tokens=2000,
+                )
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": result_str[:8000],  # Truncate large results
+                    "content": compacted_tool_result.text,
                 })
 
-                logger.info("Tool %s completed in %.1fs", tc.name, elapsed)
+                logger.info("Tool %s completed in %.1fs", tc.name, execution["elapsed_s"])
 
         logger.warning("Max tool rounds (%d) reached for query: %s",
                        self.settings.max_tool_rounds, user_query[:100])
         self.messages.append({"role": "assistant", "content": "[Max tool rounds reached]"})
         self._post_run(user_query)
         return "[Max tool rounds reached]"
+
+    def _execute_skill_and_record(
+        self,
+        skill_name: str,
+        args: dict,
+        report_dir: Path,
+        *,
+        allow_retry: bool = True,
+    ) -> dict:
+        """Execute a skill and write the same audit trail used by the agent loop."""
+        t0 = time.time()
+        figs_before = len(self.state.figures)
+        ctx = self._build_ctx(report_dir)
+        clean_args = {k: v for k, v in (args or {}).items() if k != "ctx"}
+
+        try:
+            result = self.registry.execute(skill_name, args or {}, ctx=ctx)
+            result_str = json.dumps(result, default=str, ensure_ascii=False)
+        except Exception as e:
+            logger.error("Tool %s failed: %s", skill_name, e)
+
+            try:
+                self.memory.record_error(
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    skill_name=skill_name,
+                    context={"args": {k: str(v)[:100] for k, v in clean_args.items()}},
+                )
+            except Exception:
+                pass
+
+            suggestions = self.memory.get_error_suggestions(type(e).__name__, skill_name)
+            error_info = {"error": str(e)}
+            if suggestions:
+                error_info["known_fixes"] = suggestions[:3]
+
+            retried = False
+            if allow_retry:
+                try:
+                    if self.reflexion and self.reflexion.should_retry(e, skill_name):
+                        logger.info("Reflexion: analyzing failure of %s...", skill_name)
+                        reflection = self.reflexion.reflect(
+                            skill_name=skill_name,
+                            args=args or {},
+                            error=e,
+                            context=self.state.context_summary()[:500],
+                        )
+                        if reflection.retry_recommended and reflection.corrections:
+                            retry_args = {**(args or {}), **reflection.corrected_args}
+                            logger.info(
+                                "Reflexion: retrying %s with corrections: %s (confidence=%.2f)",
+                                skill_name, reflection.corrected_args, reflection.confidence,
+                            )
+                            result = self.registry.execute(skill_name, retry_args, ctx=ctx)
+                            if isinstance(result, dict):
+                                result["_reflexion"] = {
+                                    "root_cause": reflection.root_cause,
+                                    "corrections": {c.param: c.new_value for c in reflection.corrections},
+                                    "confidence": reflection.confidence,
+                                }
+                            result_str = json.dumps(result, default=str, ensure_ascii=False)
+                            clean_args = {k: v for k, v in retry_args.items() if k != "ctx"}
+                            retried = True
+                    elif not self.reflexion:
+                        from .skills.retry import should_retry_on_error
+                        if should_retry_on_error(e):
+                            logger.info("Retrying %s with reduced params (no reflexion)...", skill_name)
+                            retry_args = dict(args or {})
+                            for key in ("n_folds", "top_n"):
+                                if key in retry_args and isinstance(retry_args[key], int):
+                                    retry_args[key] = max(2, retry_args[key] // 2)
+                            result = self.registry.execute(skill_name, retry_args, ctx=ctx)
+                            if isinstance(result, dict):
+                                result["_retried_with"] = {
+                                    k: v for k, v in retry_args.items()
+                                    if k in ("n_folds", "top_n") and retry_args[k] != (args or {}).get(k)
+                                }
+                            result_str = json.dumps(result, default=str, ensure_ascii=False)
+                            clean_args = {k: v for k, v in retry_args.items() if k != "ctx"}
+                            retried = True
+                except Exception as retry_err:
+                    logger.warning("Retry of %s also failed: %s", skill_name, retry_err)
+
+            if not retried:
+                result = error_info
+                result_str = json.dumps(error_info, default=str, ensure_ascii=False)
+
+        elapsed = time.time() - t0
+        is_error = isinstance(result, dict) and "error" in result
+
+        if not is_error:
+            for arg_val in clean_args.values():
+                if isinstance(arg_val, str) and arg_val.replace("-", "").isdigit():
+                    try:
+                        self.memory.record_field_usage(arg_val)
+                    except Exception:
+                        pass
+
+        try:
+            self.tool_learner.record(
+                skill_name,
+                clean_args,
+                result if isinstance(result, dict) else {},
+                elapsed,
+            )
+        except Exception:
+            pass
+
+        if not is_error and skill_name not in ("think", "generate_report"):
+            try:
+                verdict = self.verdict_engine.verify_skill_result(
+                    skill_name,
+                    clean_args,
+                    result if isinstance(result, dict) else {},
+                )
+                if verdict.n_blockers > 0:
+                    logger.warning("Verdict FAIL for %s: %s", skill_name, verdict.summary())
+            except Exception:
+                pass
+
+        try:
+            self.reproducibility.create_audit_log(
+                skill_name=skill_name,
+                inputs=clean_args,
+                outputs=result if isinstance(result, dict) else {"raw": str(result)[:500]},
+                duration_ms=elapsed * 1000 if isinstance(elapsed, (int, float)) else 0.0,
+                status="success" if not is_error else "failed",
+            )
+        except Exception:
+            pass
+
+        new_figs = [str(p) for p in self.state.figures[figs_before:]]
+        ts = datetime.now().isoformat()
+        key_res = result if isinstance(result, dict) else {"result": str(result)[:200]}
+        self.state.add_record(AnalysisRecord(
+            timestamp=ts,
+            skill=skill_name,
+            args=clean_args,
+            key_results=key_res,
+            figure_paths=new_figs,
+        ))
+
+        try:
+            self._record_tool_graph(
+                skill=skill_name,
+                args=clean_args,
+                key_results=key_res,
+                figure_paths=new_figs,
+                timestamp=ts,
+            )
+        except Exception:
+            pass
+
+        if not is_error:
+            prov = Provenance(
+                provenance_id=Provenance.make_id(skill_name, clean_args, ts),
+                skill=skill_name,
+                args=clean_args,
+                timestamp=ts,
+                bank_id=self.settings.bank_id,
+                result_hash=Provenance.compute_hash(key_res),
+                parent_ids=[p.provenance_id for p in self.state.provenances[-3:]],
+            )
+            self.state.provenances.append(prov)
+
+        return {
+            "result": key_res,
+            "result_str": result_str,
+            "elapsed_s": elapsed,
+            "new_figures": new_figs,
+            "is_error": is_error,
+            "args": clean_args,
+        }
+
+    def _record_executive_findings(
+        self,
+        user_query: str,
+        final_text: str,
+        orchestration_result: OrchestrationResult | None,
+    ) -> None:
+        """Persist final-answer insights so reports can surface them prominently."""
+        text = (final_text or "").strip()
+        if not text:
+            return
+
+        claims = []
+        evidence_links = []
+        safety_status = "UNKNOWN"
+        strategy = self._last_orchestration_strategy
+        if orchestration_result is not None:
+            try:
+                claims = [c.__dict__ for c in orchestration_result.claims[:8]]
+                evidence_links = [e.__dict__ for e in orchestration_result.evidence_links[:12]]
+                safety_status = orchestration_result.safety_status
+                strategy = orchestration_result.debate_trace.get("strategy", strategy)
+            except Exception:
+                pass
+
+        recent_valid_records = [
+            r for r in self.state.records[-20:]
+            if isinstance(getattr(r, "key_results", None), dict)
+            and "error" not in (getattr(r, "key_results", {}) or {})
+            and getattr(r, "skill", "") not in {"think"}
+        ]
+        if not claims and not recent_valid_records:
+            return
+
+        summary_items = _sanitize_executive_findings(text)
+        if not summary_items:
+            return
+        payload = {
+            "timestamp": datetime.now().isoformat(),
+            "query": user_query[:1000],
+            "summary": summary_items,
+            "final_text": text[:4000],
+            "claim_type": "execution_grounded" if claims or self.state.records else "hypothesis",
+            "safety_status": safety_status,
+            "strategy": strategy,
+            "claims": claims,
+            "evidence_links": evidence_links,
+            "gated": True,
+        }
+        self.state.executive_findings.append(payload)
 
     def _post_run(self, user_query: str) -> None:
         """Post-run housekeeping: index session, trigger background review."""
@@ -955,4 +1148,29 @@ class Agent:
         ctx.memory = self.memory
         # Use provided report_dir (computed once per run) — never create a new one
         ctx.report_dir = report_dir or self.settings.reports_dir
+
+        def emit_progress(phase: str = "", message: str = "", metadata: Optional[dict] = None) -> None:
+            event = {
+                "phase": str(phase or ""),
+                "message": str(message or ""),
+                "metadata": metadata or {},
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            }
+            try:
+                self.state.custom_data.setdefault("skill_progress_events", []).append(event)
+                self.state.custom_data["skill_progress_events"] = self.state.custom_data["skill_progress_events"][-200:]
+            except Exception:
+                pass
+            callback = None
+            try:
+                callback = self.state.custom_data.get("plan_progress_callback")
+            except Exception:
+                callback = None
+            if callable(callback):
+                try:
+                    callback(event)
+                except Exception:
+                    pass
+
+        ctx.emit_progress = emit_progress
         return ctx

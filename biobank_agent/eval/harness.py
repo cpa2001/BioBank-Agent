@@ -17,8 +17,16 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from statistics import quantiles
+from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
+
+from .report_review import (
+    artifact_review_gate_failures,
+    review_benchmark_artifacts,
+    reviewer_specs as build_reviewer_specs,
+)
 
 if TYPE_CHECKING:
     from ..agent import Agent
@@ -35,6 +43,7 @@ class TestCase:
     expected_contains: list[str] = field(default_factory=list)
     expected_result_keys: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -63,6 +72,7 @@ class BenchmarkResult:
     comparative: dict[str, float] = field(default_factory=dict)
     gate_passed: bool = True
     gate_failures: list[str] = field(default_factory=list)
+    review_loop: dict[str, Any] = field(default_factory=dict)
 
     @property
     def n_passed(self) -> int:
@@ -96,7 +106,18 @@ class BenchmarkResult:
             cmp_str = (
                 "\n  A/B delta: "
                 f"complex_uplift={cmp.get('complex_task_success_uplift', 0):+.1%}, "
-                f"wrong_consensus_reduction={cmp.get('wrong_consensus_reduction_ratio', 0):+.1%}"
+                f"wrong_consensus_reduction={cmp.get('wrong_consensus_reduction_ratio', 0):+.1%}\n"
+            )
+        review_str = ""
+        if self.review_loop:
+            reviews = self.review_loop.get("reviews", []) or []
+            labels = [
+                f"{r.get('reviewer', 'reviewer')}={r.get('status', 'unknown')}"
+                for r in reviews[:3]
+            ]
+            review_str = (
+                f"  Review loop: {self.review_loop.get('status', 'unknown')}"
+                f" ({', '.join(labels) if labels else 'no reviews'})\n"
             )
         gate_line = "PASS" if self.gate_passed else f"FAIL ({'; '.join(self.gate_failures[:3])})"
         return (
@@ -105,6 +126,7 @@ class BenchmarkResult:
             f"  Mean score: {self.mean_score:.3f}\n"
             f"  Observability: {obs_str}\n"
             f"{cmp_str}"
+            f"{review_str}"
             f"  Reliability gate: {gate_line}\n"
             f"  Time: {self.total_elapsed_s:.1f}s"
         )
@@ -144,6 +166,10 @@ class EvalHarness:
         mode: str = "baseline",
         enforce_gate: bool = False,
         baseline_observability: Optional[dict[str, float]] = None,
+        review_loop: bool = False,
+        primary_reviewer: str = "codex-gpt-5.5-xhigh",
+        include_claude: bool = False,
+        review_timeout_s: int = 600,
     ) -> BenchmarkResult:
         """Execute all test cases in a benchmark."""
         t0 = time.time()
@@ -173,9 +199,234 @@ class EvalHarness:
             out.observability,
             baseline_observability=out.baseline_observability,
         )
+        if review_loop:
+            out.review_loop = self._run_review_loop(
+                result=out,
+                benchmark=benchmark,
+                agent=agent,
+                primary_reviewer=primary_reviewer,
+                include_claude=include_claude,
+                review_timeout_s=review_timeout_s,
+            )
+            review_failures = self._review_gate_failures(out.review_loop)
+            if review_failures:
+                out.gate_passed = False
+                out.gate_failures.extend(review_failures)
         if enforce_gate and not out.gate_passed:
             logger.warning("Reliability gate failed: %s", "; ".join(out.gate_failures))
         return out
+
+    def _run_review_loop(
+        self,
+        result: BenchmarkResult,
+        benchmark: Benchmark,
+        agent: Agent,
+        primary_reviewer: str = "codex-gpt-5.5-xhigh",
+        include_claude: bool = False,
+        review_timeout_s: int = 600,
+    ) -> dict[str, Any]:
+        """Run optional external review diagnostics for a benchmark result."""
+        reviewers = self._reviewer_specs(primary_reviewer, include_claude)
+        artifact_review = review_benchmark_artifacts(
+            result,
+            benchmark,
+            primary_reviewer=primary_reviewer,
+            include_claude=include_claude,
+        )
+        review_context = self._review_context(result, benchmark, artifact_review=artifact_review)
+        registry = getattr(agent, "registry", None)
+        execute = getattr(registry, "execute", None)
+        if not callable(execute):
+            return {
+                "enabled": True,
+                "status": "skipped",
+                "primary_reviewer": reviewers[0]["reviewer"],
+                "include_claude": include_claude,
+                "reviewer_specs": reviewers,
+                "artifact_review": artifact_review,
+                "artifact_checklist": artifact_review.get("artifact_checklist", {}),
+                "role_verdicts": artifact_review.get("role_verdicts", []),
+                "old_report_overwrite_ready": artifact_review.get("old_report_overwrite_ready", False),
+                "reviews": [
+                    {
+                        **spec,
+                        "status": "skipped",
+                        "verdict": "MISSING",
+                        "error": "agent registry unavailable",
+                    }
+                    for spec in reviewers
+                ],
+            }
+
+        ctx = self._review_ctx(agent)
+        reviews = []
+        for spec in reviewers:
+            args = {
+                "focus": (
+                    f"{result.benchmark_name} evaluation review. "
+                    f"Primary reviewer concept: {reviewers[0]['reviewer']}. "
+                    "Assess failures, report quality, statistical caveats, and whether this eval should ship."
+                ),
+                "context": review_context,
+                "timeout_s": int(review_timeout_s),
+            }
+            try:
+                payload = execute(spec["skill"], args, ctx=ctx)
+                reviews.append(self._normalize_review_payload(spec, payload))
+            except Exception as e:
+                reviews.append({
+                    **spec,
+                    "status": "error",
+                    "verdict": "ERROR",
+                    "error": f"{type(e).__name__}: {str(e)[:300]}",
+                })
+
+        statuses = {str(r.get("status", "")).lower() for r in reviews}
+        verdicts = {str(r.get("verdict", "")).upper() for r in reviews}
+        if artifact_review.get("status") == "blocked":
+            status = "blocked"
+        elif "BLOCK" in verdicts:
+            status = "blocked"
+        elif "error" in statuses:
+            status = "error"
+        elif statuses and statuses <= {"success"}:
+            status = "completed"
+        elif statuses and statuses <= {"skipped"}:
+            status = "skipped"
+        elif "success" in statuses:
+            status = "partial"
+        else:
+            status = "unknown"
+
+        return {
+            "enabled": True,
+            "status": status,
+            "primary_reviewer": reviewers[0]["reviewer"],
+            "include_claude": include_claude,
+            "reviewer_specs": reviewers,
+            "artifact_review": artifact_review,
+            "artifact_checklist": artifact_review.get("artifact_checklist", {}),
+            "role_verdicts": artifact_review.get("role_verdicts", []),
+            "old_report_overwrite_ready": artifact_review.get("old_report_overwrite_ready", False),
+            "reviews": reviews,
+        }
+
+    @staticmethod
+    def _reviewer_specs(primary_reviewer: str, include_claude: bool) -> list[dict[str, Any]]:
+        return build_reviewer_specs(primary_reviewer, include_claude)
+
+    @staticmethod
+    def _review_context(
+        result: BenchmarkResult,
+        benchmark: Benchmark,
+        artifact_review: Optional[dict[str, Any]] = None,
+    ) -> str:
+        failures = []
+        for case_result in result.failures()[:10]:
+            failures.append({
+                "case_id": case_result.case_id,
+                "score": case_result.score,
+                "errors": case_result.errors[:6],
+                "metadata": case_result.metadata,
+            })
+        payload = {
+            "suite": result.benchmark_name,
+            "mode": result.mode,
+            "benchmark_case_count": len(getattr(benchmark, "cases", []) or []),
+            "n_total": result.n_total,
+            "n_passed": result.n_passed,
+            "mean_score": result.mean_score,
+            "observability": result.observability,
+            "gate_passed": result.gate_passed,
+            "gate_failures": result.gate_failures,
+            "artifact_review": artifact_review or {},
+            "failures": failures,
+        }
+        return json.dumps(payload, indent=2, ensure_ascii=False, default=str)[:12000]
+
+    @staticmethod
+    def _review_ctx(agent: Agent):
+        settings = getattr(agent, "settings", None)
+        report_root = getattr(settings, "reports_dir", Path("./reports"))
+        report_dir = Path(report_root) / "eval" / "review_loop"
+        try:
+            report_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        build_ctx = getattr(agent, "_build_ctx", None)
+        if callable(build_ctx):
+            try:
+                return build_ctx(report_dir)
+            except Exception:
+                pass
+        return SimpleNamespace(
+            settings=settings,
+            state=getattr(agent, "state", None),
+            memory=getattr(agent, "memory", None),
+            report_dir=report_dir,
+        )
+
+    @staticmethod
+    def _normalize_review_payload(spec: dict[str, Any], payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            stdout = str(payload)[:8000]
+            return {
+                **spec,
+                "status": "success",
+                "stdout": stdout,
+                "verdict": EvalHarness._review_verdict(stdout),
+            }
+        status = str(payload.get("status") or "success").lower()
+        stdout = str(payload.get("stdout") or "")[:8000]
+        stderr = str(payload.get("stderr") or "")[:4000]
+        error = str(payload.get("error") or "")[:1000]
+        return {
+            **spec,
+            "status": status,
+            "stdout": stdout,
+            "stderr": stderr,
+            "error": error,
+            "verdict": EvalHarness._review_verdict("\n".join([stdout, stderr, error])),
+            "command_display": str(payload.get("command_display") or ""),
+        }
+
+    @staticmethod
+    def _review_verdict(text: str) -> str:
+        """Parse ALLOW/BLOCK review output without treating free text as approval."""
+        for raw in str(text or "").splitlines()[:80]:
+            line = raw.strip()
+            if not line:
+                continue
+            upper = line.upper()
+            if upper.startswith("BLOCK:") or upper == "BLOCK":
+                return "BLOCK"
+            if upper.startswith("ALLOW:") or upper == "ALLOW":
+                return "ALLOW"
+        return "UNKNOWN"
+
+    @staticmethod
+    def _review_gate_failures(review_loop: dict[str, Any]) -> list[str]:
+        """Translate review-loop diagnostics into reliability gate failures."""
+        if not review_loop:
+            return []
+        failures: list[str] = []
+        reviews = review_loop.get("reviews", []) or []
+        if not reviews:
+            return ["review loop produced no reviewer output"]
+        for review in reviews:
+            reviewer = review.get("reviewer") or review.get("skill") or "reviewer"
+            status = str(review.get("status", "")).lower()
+            verdict = str(review.get("verdict", "")).upper()
+            if verdict == "BLOCK":
+                failures.append(f"{reviewer} returned BLOCK")
+            if status in {"error", "skipped"}:
+                reason = review.get("error") or status
+                failures.append(f"{reviewer} review {status}: {reason}")
+        loop_status = str(review_loop.get("status", "")).lower()
+        if loop_status in {"blocked", "error", "skipped"} and not failures:
+            failures.append(f"review loop status={loop_status}")
+        failures.extend(artifact_review_gate_failures(review_loop.get("artifact_review", {})))
+        return failures
 
     def _run_case(self, case: TestCase, agent: Agent) -> TestResult:
         """Run a single test case."""

@@ -39,18 +39,38 @@ def calibration(model_key: str = "", n_bins: int = 10, *, ctx=None) -> dict:
     if model is None or X is None or y is None:
         return {"error": "No model/data. Run train_model first."}
 
-    # Get predictions
-    y_prob = model.predict_proba(X)[:, 1]
+    evaluation_cache = {}
+    try:
+        evaluation_cache = (ctx.state.custom_data.get("model_evaluation", {}) or {}).get(model_key, {}) or {}
+    except Exception:
+        evaluation_cache = {}
+
+    warning = ""
+    if evaluation_cache.get("y_true") is not None and evaluation_cache.get("y_prob") is not None:
+        y_eval = np.asarray(evaluation_cache["y_true"], dtype=int)
+        y_prob = np.asarray(evaluation_cache["y_prob"], dtype=float)
+        evaluation_scope = str(evaluation_cache.get("evaluation_scope") or "holdout_validation")
+    else:
+        # Fallback only for legacy models. New train_model runs store held-out
+        # predictions so calibration is not evaluated on the same rows used to
+        # fit the selected estimator.
+        y_eval = np.asarray(y, dtype=int)
+        y_prob = model.predict_proba(X)[:, 1]
+        evaluation_scope = "in_sample"
+        warning = (
+            "Calibration used the full stored feature matrix because no held-out "
+            "evaluation cache was available. Treat ECE/Brier as diagnostic only."
+        )
 
     # Calibration curve
-    prob_true, prob_pred = calibration_curve(y, y_prob, n_bins=n_bins, strategy="uniform")
+    prob_true, prob_pred = calibration_curve(y_eval, y_prob, n_bins=n_bins, strategy="uniform")
 
     # ECE and MCE
     bin_sizes = np.histogram(y_prob, bins=n_bins, range=(0, 1))[0]
     bin_weights = bin_sizes / len(y_prob)
     ece = float(np.sum(np.abs(prob_true - prob_pred) * bin_weights[:len(prob_true)]))
     mce = float(np.max(np.abs(prob_true - prob_pred)))
-    brier = float(brier_score_loss(y, y_prob))
+    brier = float(brier_score_loss(y_eval, y_prob))
 
     # Plot reliability diagram
     fig, ax = nature_figure(width="single")
@@ -75,6 +95,9 @@ def calibration(model_key: str = "", n_bins: int = 10, *, ctx=None) -> dict:
         "mce": round(mce, 4),
         "brier_score": round(brier, 4),
         "n_bins": n_bins,
+        "evaluation_scope": evaluation_scope,
+        "n_evaluation": int(len(y_eval)),
+        "warning": warning,
         "bin_data": [
             {"predicted": round(float(p), 3), "observed": round(float(t), 3)}
             for p, t in zip(prob_pred, prob_true)

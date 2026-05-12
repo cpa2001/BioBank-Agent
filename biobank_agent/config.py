@@ -36,6 +36,14 @@ class Settings(BaseSettings):
         default=Path("./UKB"),
         validation_alias=AliasChoices("raw_dir", "RAW_DIR", "UKB_RAW_DIR"),
     )
+    full_ukb_feature_store_dir: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "full_ukb_feature_store_dir",
+            "FULL_UKB_FEATURE_STORE_DIR",
+            "UKB_FULL_PARQUET_DIR",
+        ),
+    )
 
     # Backward compatibility aliases
     @property
@@ -72,6 +80,17 @@ class Settings(BaseSettings):
     catalog_categories_file: str = "category.txt"
     catalog_encoding_file: str = "esimpint.txt"
 
+    # ── Data Usage / Governance ─────────────────────────────────
+    # The local UKB parquet release used by this project is already
+    # de-identified. Agent skills should therefore use the full analytical
+    # tables by default and must not discard/round/redact useful in-memory
+    # data unless the user explicitly switches to an external disclosure mode.
+    data_deidentified: bool = True
+    data_use_full_dataset_default: bool = True
+    max_train_rows_default: int = 0  # 0 means no cap; use every eligible row.
+    default_analysis_sample_size: int = 0  # 0 means full table for descriptive skills.
+    disclosure_control_mode: str = "internal"  # internal | external | strict
+
     # ── Output ───────────────────────────────────────────────────
     reports_dir: Path = Path("./reports")
     memory_dir: Path = Path.home() / ".biobank_agent"
@@ -82,6 +101,24 @@ class Settings(BaseSettings):
 
     # ── Plan Mode ────────────────────────────────────────────────
     plans_dir: Path = Path("./plans")
+    plan_repair_budget_per_step: int = 3
+    plan_repair_budget_total: int = 8
+    plan_code_mutation_mode: str = "review_only"
+    plan_goal_acceptance_enabled: bool = True
+    plan_external_council_enabled: bool = True
+    plan_external_council_policy: str = "requested"  # requested | always | never
+    plan_external_council_timeout_s: int = 180
+    plan_external_council_agents: str = "codex,claude,gemini"
+    plan_heartbeat_interval_s: float = 1.0
+    cli_refresh_per_second: float = 10.0
+    plan_research_setup_enabled: bool = True
+    plan_clarification_enabled: bool = True
+    plan_clarification_policy: str = "critical_only"
+    plan_env_repair_policy: str = "ask"
+    plan_review_hook_mode: str = "ask"  # ask | all | both | codex | claude | gemini | never
+    plan_review_hook_agents: str = "codex,claude,gemini"
+    plan_review_repair_mode: str = "auto_safe"  # auto_safe | ask | never
+    plan_review_repair_max_loops: int = 2
 
     # ── Custom Skills ────────────────────────────────────────────
     custom_skills_dir: Path = Path("./custom_skills")
@@ -89,6 +126,33 @@ class Settings(BaseSettings):
     # ── Agent ────────────────────────────────────────────────────
     max_tool_rounds: int = 30
     context_window: int = 180_000
+
+    # ── Async runtime ────────────────────────────────────────────
+    # Routes Agent.run() and the CLI through core/runtime.AsyncAgent
+    # when the legacy path is safe to wrap. Unsafe states fall back to
+    # the synchronous loop instead of pretending streaming is active.
+    async_runtime_enabled: bool = True
+    compaction_warn_pct: float = 0.6
+    compaction_compact_pct: float = 0.75
+    compaction_force_pct: float = 0.9
+
+    # ── Local Telemetry ──────────────────────────────────────────
+    # Local-only, privacy-preserving JSONL. Records event type, skill,
+    # status and timing metadata only; never records user query text,
+    # tool args, raw outputs, or identifiers.
+    telemetry_enabled: bool = True
+    telemetry_jsonl: str = ""
+    otel_enabled: bool = False
+    otel_service_name: str = "biobank-agent"
+    otel_exporter: str = "none"  # none | console | otlp
+    otel_endpoint: str = ""      # e.g. http://localhost:4318/v1/traces
+    otel_policy: str = "local"   # local | production
+    otel_allow_local_endpoint: bool = False
+
+    # ── MCP extensions ────────────────────────────────────────
+    # Empty uses BIOBANK_MCP_CONFIG when set, then
+    # ~/.biobank_agent/mcp_servers.json.
+    mcp_config_path: str = ""
 
     # ── Multi-Model Orchestration ────────────────────────────────
     multi_model_enabled: bool = True
@@ -143,6 +207,12 @@ class Settings(BaseSettings):
     @property
     def data_dict_csv(self) -> Path:
         return self.raw_dir / "UKB" / "Data_Dictionary_Showcase.csv"
+
+    @property
+    def full_ukb_feature_store(self) -> Path:
+        if str(self.full_ukb_feature_store_dir).strip():
+            return Path(self.full_ukb_feature_store_dir).expanduser()
+        return self.raw_dir.parent / "ukb_full_parquet"
 
     def ensure_dirs(self) -> None:
         self.reports_dir.mkdir(parents=True, exist_ok=True)

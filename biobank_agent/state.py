@@ -93,9 +93,11 @@ class SessionState:
     figures: list[Path] = field(default_factory=list)
     report_sections: list[str] = field(default_factory=list)
     current_report_dir: Optional[Path] = None
+    executive_findings: list[dict[str, Any]] = field(default_factory=list)
 
     # ── Analysis History ──────────────────────────────────
     records: list[AnalysisRecord] = field(default_factory=list)
+    execution_log: list[dict[str, Any]] = field(default_factory=list)
 
     # ── Feature cache ─────────────────────────────────────
     feature_matrix: Optional[pd.DataFrame] = None
