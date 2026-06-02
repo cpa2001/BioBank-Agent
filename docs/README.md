@@ -1,61 +1,62 @@
 # Documentation
 
+This directory contains user guides, architecture notes, data references, examples, plugin documentation, and related-work mappings for Biobank Agent.
+
+## Recommended Reading Order
+
+| Step | Document | Use |
+| --- | --- | --- |
+| 1 | [../README.md](../README.md) | Product overview, command surface, configuration, and workflow map. |
+| 2 | [guides/QUICK_START.md](guides/QUICK_START.md) | Install, configure `.env`, verify API connectivity, launch the shell, and run first checks. |
+| 3 | [guides/END_TO_END_TUTORIAL.md](guides/END_TO_END_TUTORIAL.md) | Complete Agent + WGS tutorial with plan repair, research, resume, audit, replay, and self-evolution. |
+| 4 | [architecture/OVERVIEW.md](architecture/OVERVIEW.md) | System architecture, modules, runtime flow, and design principles. |
+| 5 | [architecture/SKILLS.md](architecture/SKILLS.md) | Skill registration, invocation, and extension mechanics. |
+| 6 | [data/UKB_DATA_REFERENCE.md](data/UKB_DATA_REFERENCE.md) | UK Biobank data modalities, field references, and file layout. |
+
 ## Quick Navigation
 
 | Document | Description |
-|----------|-------------|
-| [guides/QUICK_START.md](guides/QUICK_START.md) | Getting started — installation, configuration, first queries |
-| [design/REFERENCE.md](design/REFERENCE.md) | Technical reference tables — memory, config, skills, verification |
-| [architecture/OVERVIEW.md](architecture/OVERVIEW.md) | System architecture — modules, flows, design principles |
-| [architecture/V3.md](architecture/V3.md) | v3 foundation scope and verification contract |
-| [architecture/V3_REMAINING_IMPLEMENTATION.md](architecture/V3_REMAINING_IMPLEMENTATION.md) | Evidence-based remaining v3 implementation sequence |
-| [architecture/SKILLS.md](architecture/SKILLS.md) | Skills system deep-dive — registration, invocation, custom skills |
-| [guides/CUSTOM_SKILLS.md](guides/CUSTOM_SKILLS.md) | How to write your own skills |
-| [guides/PLUGIN_INTEGRATION.md](guides/PLUGIN_INTEGRATION.md) | External agent and plugin integration |
-| [guides/CLI_COMMAND_PLUGINS.md](guides/CLI_COMMAND_PLUGINS.md) | Add third-party slash commands through the v3 command registry |
-| [guides/OBSERVABILITY.md](guides/OBSERVABILITY.md) | Local telemetry and OpenTelemetry/Jaeger runbook |
-| [examples/README.md](examples/README.md) | Manual plan, SDK, MCP, and replication smoke-test examples |
-| [design/TECH_WHITEPAPER.md](design/TECH_WHITEPAPER.md) | Technical whitepaper — design philosophy and roadmap (Chinese) |
-| [data/UKB_DATA_REFERENCE.md](data/UKB_DATA_REFERENCE.md) | UK Biobank data modalities — coverage, field IDs, file layout |
-| [related_works/GENETIC_TARGET_PRIORITIZATION.md](related_works/GENETIC_TARGET_PRIORITIZATION.md) | Rare-variant burden target-prioritization workflow mapping |
-| [related_works/TARGET_ANNOTATION_ENRICHMENT.md](related_works/TARGET_ANNOTATION_ENRICHMENT.md) | Target annotation and enrichment context boundaries |
+| --- | --- |
+| [guides/QUICK_START.md](guides/QUICK_START.md) | Getting started with installation, configuration, API smoke test, and first CLI checks. |
+| [guides/END_TO_END_TUTORIAL.md](guides/END_TO_END_TUTORIAL.md) | Full Agent + WGS workflow tutorial for real interactive use. |
+| [guides/CUSTOM_SKILLS.md](guides/CUSTOM_SKILLS.md) | How to write new `@skill` tools. |
+| [guides/PLUGIN_INTEGRATION.md](guides/PLUGIN_INTEGRATION.md) | External agent and plugin integration. |
+| [guides/CLI_COMMAND_PLUGINS.md](guides/CLI_COMMAND_PLUGINS.md) | Add third-party slash commands through the v3 command registry. |
+| [guides/OBSERVABILITY.md](guides/OBSERVABILITY.md) | Local telemetry and OpenTelemetry/Jaeger runbook. |
+| [architecture/OVERVIEW.md](architecture/OVERVIEW.md) | System architecture and runtime design. |
+| [architecture/V3.md](architecture/V3.md) | v3 foundation scope and verification contract. |
+| [architecture/V3_REMAINING_IMPLEMENTATION.md](architecture/V3_REMAINING_IMPLEMENTATION.md) | Evidence-based remaining v3 implementation sequence. |
+| [architecture/SKILLS.md](architecture/SKILLS.md) | Skills system deep dive. |
+| [architecture/COMPATIBILITY.md](architecture/COMPATIBILITY.md) | Compatibility notes for the v3 runtime and CLI surface. |
+| [design/REFERENCE.md](design/REFERENCE.md) | Technical reference tables for memory, config, skills, and verification. |
+| [design/TECH_WHITEPAPER.md](design/TECH_WHITEPAPER.md) | Technical whitepaper and product rationale. |
+| [data/UKB_DATA_REFERENCE.md](data/UKB_DATA_REFERENCE.md) | UK Biobank data modalities and field layout. |
+| [examples/README.md](examples/README.md) | Manual plan, SDK, MCP, and replication smoke-test examples. |
+| [related_works/MANIFEST.md](related_works/MANIFEST.md) | Concept to paper to integration mapping. |
+| [related_works/GENETIC_TARGET_PRIORITIZATION.md](related_works/GENETIC_TARGET_PRIORITIZATION.md) | Rare-variant burden target-prioritization workflow mapping. |
+| [related_works/TARGET_ANNOTATION_ENRICHMENT.md](related_works/TARGET_ANNOTATION_ENRICHMENT.md) | Target annotation and enrichment context boundaries. |
 
 ## Directory Structure
 
-```
+```text
 docs/
-├── architecture/       System architecture and module maps
-│   ├── OVERVIEW.md     High-level architecture
-│   ├── V3.md           v3 foundation verification contract
-│   └── SKILLS.md       Skill system deep-dive
-├── design/             Design philosophy and reference
-│   ├── REFERENCE.md    Quick-reference tables
-│   └── TECH_WHITEPAPER.md  Technical whitepaper (中文)
-├── guides/             User-facing guides
-│   ├── QUICK_START.md  Getting started
-│   ├── CUSTOM_SKILLS.md  Writing custom skills
-│   ├── PLUGIN_INTEGRATION.md  External integrations
-│   ├── CLI_COMMAND_PLUGINS.md  Slash command plugin modules
-│   └── OBSERVABILITY.md  Telemetry and OpenTelemetry
-├── data/               UK Biobank data documentation
-│   └── UKB_DATA_REFERENCE.md  All modalities in one file
-├── examples/           Human, SDK, MCP, and strict live-audit runbooks
-└── related_works/      Paper traceability
-    ├── MANIFEST.md     Concept → paper → integration mapping
-    ├── GENETIC_TARGET_PRIORITIZATION.md
-    └── TARGET_ANNOTATION_ENRICHMENT.md
+|-- architecture/       System architecture, compatibility, release, and v3 notes
+|-- data/               UK Biobank and data-layout references
+|-- deep_research/      Research snapshots and long-form external research notes
+|-- design/             Technical references and whitepaper material
+|-- examples/           Manual runbooks and small integration examples
+|-- guides/             User-facing setup, tutorial, skills, plugin, and observability guides
+`-- related_works/      Paper traceability and research-to-implementation mappings
 ```
 
 ## Agent-Visible Docs
 
-The `project_doc` skill can list, search, and read curated Markdown from the
-root README, `docs/`, and repo-local plugin guides. Raw research notes and
-generated outputs are intentionally excluded from this skill and from published
-documentation.
+The `project_doc` skill can list, search, and read curated Markdown from the root README, `docs/`, and repo-local plugin guides. Generated reports, raw internal research notes, and temporary exploration outputs should not be added to the repository root.
 
 ## For New Contributors
 
-1. **Start with** [QUICK_START.md](guides/QUICK_START.md) — get the agent running
-2. **Understand architecture** via [OVERVIEW.md](architecture/OVERVIEW.md) — how it all fits together
-3. **Look up details** in [REFERENCE.md](design/REFERENCE.md) — tables for memory, config, verification
-4. **Extend with skills** using [CUSTOM_SKILLS.md](guides/CUSTOM_SKILLS.md) — the `@skill` decorator pattern
+1. Start with [QUICK_START.md](guides/QUICK_START.md).
+2. Run the [END_TO_END_TUTORIAL.md](guides/END_TO_END_TUTORIAL.md) workflow.
+3. Read [architecture/OVERVIEW.md](architecture/OVERVIEW.md) to understand the runtime.
+4. Read [CUSTOM_SKILLS.md](guides/CUSTOM_SKILLS.md) before adding skills.
+5. Keep generated reports in `reports/` and plans in `plans/`; do not place temporary summaries in the repository root.

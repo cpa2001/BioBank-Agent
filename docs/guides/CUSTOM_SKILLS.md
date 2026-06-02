@@ -270,19 +270,19 @@ ctx.state.figures.append(str(output_path))
 
 ```
 biobank_agent/
-├── config.py              # ← custom_skills_dir defined here (line 87)
-├── registry.py            # ← @skill decorator & discovery functions
-├── agent.py               # ← Calls autodiscover_skills() & discover_custom_skills()
-├── skills/                # ← Built-in skills (58 registered tools)
-│   ├── __init__.py
-│   ├── prevalence.py
-│   ├── think.py
-│   └── ...
-│
-./custom_skills/           # ← YOUR CUSTOM SKILLS GO HERE
-    ├── my_analysis.py
-    ├── special_query.py
-    └── ...
+|-- config.py              # custom_skills_dir defined here (line 87)
+|-- registry.py            # @skill decorator and discovery functions
+|-- agent.py               # calls autodiscover_skills() and discover_custom_skills()
+|-- skills/                # built-in skills (currently 105 registered tools)
+|   |-- __init__.py
+|   |-- prevalence.py
+|   |-- think.py
+|   `-- ...
+|
+./custom_skills/           # YOUR CUSTOM SKILLS GO HERE
+    |-- my_analysis.py
+    |-- special_query.py
+    `-- ...
 ```
 
 ## 9. Testing with CLI

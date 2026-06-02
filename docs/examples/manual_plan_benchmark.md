@@ -6,7 +6,7 @@ than through pytest.
 ## Start
 
 ```bash
-cd /Users/chenpengan/Projects/CUHK/UKB_agent
+cd /path/to/biobank-agent
 biobank
 ```
 
@@ -54,4 +54,3 @@ Treat these as failures:
   association-only evidence.
 - The report hides missingness, cohort definition, model choice, calibration, or
   safety/statistical review limitations.
-

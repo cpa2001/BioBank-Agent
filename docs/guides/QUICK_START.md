@@ -1,97 +1,205 @@
 # Quick Start Guide
 
-## Installation
+This guide gets Biobank Agent running from a fresh checkout and verifies the basic API, tool, skill, and WGS readiness paths. For the full workflow tutorial, continue with [END_TO_END_TUTORIAL.md](END_TO_END_TUTORIAL.md).
+
+## 1. Create the Environment
+
+From the repository root:
 
 ```bash
-# Clone and install
-git clone <repo-url>
-cd UKB_agent
-pip install -e ".[dev]"
+conda create -n biobank-agent python=3.11 -y
+conda activate biobank-agent
+pip install -e ".[all,dev]"
+```
 
-# Copy environment template
+If you do not use conda, use any Python 3.10+ environment and run the same editable install command.
+
+## 2. Configure `.env`
+
+```bash
 cp .env.example .env
-# Edit .env: set LLM_API_KEY, DATA_DIR, RAW_DIR
 ```
 
-## Configuration
+Edit `.env`:
 
-Required environment variables in `.env`:
 ```ini
-LLM_API_KEY=<your-api-key>          # OpenRouter or OpenAI-compatible key
 LLM_BASE_URL=https://openrouter.ai/api/v1
-DATA_DIR=/path/to/processed/data    # Parquet files
-RAW_DIR=/path/to/raw/data           # CSV fallback
+LLM_API_KEY=<your-api-key>
+LLM_MODEL=deepseek/deepseek-v4-pro
+
+DATA_DIR=./data
+RAW_DIR=./raw
+REPORTS_DIR=./reports
+PLANS_DIR=./plans
 ```
 
-## Launch
+Use the provider, endpoint, and model that match your key. Biobank Agent uses an OpenAI-compatible client, so relay endpoints must expose a compatible `/v1/chat/completions` API.
+
+## 3. Verify API Connectivity
+
+Run this before any long agent workflow:
 
 ```bash
-# Interactive CLI
+python - <<'PY'
+from biobank_agent.config import get_settings
+from biobank_agent.llm import LLMClient
+
+settings = get_settings()
+client = LLMClient(
+    base_url=settings.llm_base_url,
+    api_key=settings.llm_api_key,
+    model=settings.llm_model,
+)
+response = client.chat([{"role": "user", "content": "Reply with exactly: API_OK"}])
+print(response.text)
+print(response.usage)
+PY
+```
+
+Expected result:
+
+```text
+API_OK
+```
+
+If this fails, fix `.env` first. Most failures are caused by a wrong base URL, missing key, unavailable model id, or a relay endpoint that is not OpenAI-compatible.
+
+## 4. Launch the Agent
+
+```bash
 biobank
-
-# Or via module
-python -m biobank_agent.cli
 ```
 
-## Example Queries
+The startup banner should show the version, workspace, session id, permission mode, provider roles, tool summary, WGS readiness summary, MCP tool count, and command palette.
 
-```
-biobank> What is the prevalence of Type 2 Diabetes (E11)?
-biobank> Discover metabolomics biomarkers for hypertension
-biobank> Train an XGBoost model to predict myocardial infarction (I21)
-biobank> Show Kaplan-Meier survival curves for I21 by sex
-biobank> /plan Comprehensive cardiovascular risk factor analysis
+Inside the shell, run:
+
+```text
+biobank > /doctor
+biobank > /tools
+biobank > /skills
 ```
 
-## CLI Commands
+Interpretation:
+
+- `/doctor` checks provider config, data directories, report/memory paths, permission mode, tool readiness, and WGS dependency status.
+- `/tools` shows runtime tools by category and health.
+- `/skills` lists registered analysis skills. The current checkout discovers 105 skills.
+
+## 5. Run a First Natural-Language Turn
+
+```text
+biobank > What data and WGS inputs are currently available in this workspace?
+```
+
+For simple questions, ordinary text is enough. For multi-step workflows, use `/plan`.
+
+## 6. Run a First Plan
+
+```text
+biobank > /plan Compare vitiligo cases and controls using the available WGS VCF files, then write a concise QC and association report.
+biobank > /plan-approve
+```
+
+If the plan pauses or fails, do not exit the shell. Diagnose and repair in place:
+
+```text
+biobank > what is the problem?
+biobank > /plan-diagnose
+biobank > /plan-use vcf_dir=data/vc_wgs_vcf
+biobank > /plan-use workflow_mode=exploratory
+biobank > /plan-retry
+```
+
+The natural-language `continue` command also retries the current failed or paused plan step when the shell can infer the active repair path:
+
+```text
+biobank > continue
+```
+
+## 7. Resume, Audit, and Replay
+
+Runtime sessions are persisted under `MEMORY_DIR`.
+
+```text
+biobank > /resume --last
+biobank > /audit
+biobank > /replay
+```
+
+Use `/audit` after any meaningful run to inspect the recorded trajectory, tools, plan steps, generated artifacts, and supported claims.
+
+## 8. Useful Commands
 
 | Command | Purpose |
-|---------|---------|
-| `/help` | Show all commands |
-| `/skills` | List registered skills (58) |
-| `/plan <goal>` | Enter plan mode (DAG decomposition) |
-| `/show_plan` | Display current plan |
-| `/execute_plan` | Execute planned steps |
-| `/evidence <id>` | Show evidence for a claim |
-| `/memory` | Inspect memory tiers |
-| `/models` | Available models |
-| `/cost` | Token usage summary |
+| --- | --- |
+| `/help` | Show registered slash commands. |
+| `/status` | Show session, platform, memory, and token state. |
+| `/doctor` | Run read-only readiness diagnostics. |
+| `/tools` | Show available runtime tools by category and health. |
+| `/skills` | List registered analysis skills. |
+| `/plan <task>` | Draft a structured plan. |
+| `/plan-approve` | Execute the active plan. |
+| `/plan-edit <feedback>` | Modify the active plan. |
+| `/plan-diagnose` | Explain why the plan is blocked or failed. |
+| `/plan-use key=value` | Add repair context such as `vcf_dir=data/vc_wgs_vcf`. |
+| `/plan-retry [step_id]` | Retry a failed or named step. |
+| `/research <question>` | Run a cited multi-source research brief. |
+| `/resume [session-id|--last]` | Resume saved sessions. |
+| `/audit [session-id]` | Audit runtime evidence and artifacts. |
+| `/replay [session-id|trajectory.jsonl]` | Replay a trajectory without executing tools. |
+| `/learn [--write]` | Mine the current trajectory for review-only improvement proposals. |
+| `/evolve [--write|--apply]` | Review controlled self-evolution proposals. |
 
-## Testing
+## 9. Troubleshooting
+
+**API call fails**
+
+- Recheck `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
+- Run the API smoke test again before using `/plan`.
+
+**No data found**
+
+- Run `/doctor`.
+- Check `DATA_DIR` and `RAW_DIR`.
+- For local WGS tests, check whether `data/vc_wgs_vcf` contains `.vcf.gz` files and `.tbi` indexes.
+
+**WGS standard dependencies missing**
+
+- Install `bcftools`, `tabix`, and `plink2` when you need a standard GWAS-style workflow.
+- Use `/plan-use workflow_mode=exploratory` when exploratory Python-backed VCF analysis is acceptable.
+
+**Plan failed without clear progress**
+
+- Ask `what is the problem?`.
+- Run `/plan-diagnose`.
+- Use `/plan-edit`, `/plan-use`, or `/plan-retry`.
+- Run `/audit` if you need the recorded execution evidence.
+
+**Import errors**
+
+- Reinstall in the active environment:
 
 ```bash
-# Full test suite
-pytest tests/ -v
-
-# Quick smoke test
-pytest tests/ -q --tb=short
-
-# With coverage
-pytest tests/ --cov=biobank_agent
+pip install -e ".[all,dev]"
 ```
 
-## Key Features
+## 10. Test the Checkout
 
-- **58 registered skills** — prevalence, GWAS proxy, genetic target hypotheses, target annotation, target enrichment, survival, predictive modeling, deep research, project docs, and external review
-- **8-tier memory** — cross-session learning, error catalog, episodic recall
-- **Multi-model orchestration** — single/ensemble/debate/supervisor strategies
-- **Schema-gated execution** — natural language → typed StudySpec before running
-- **Evidence lattice** — claim-level provenance with confidence tracking
-- **Verification pipeline** — formal (Z3), numeric bounds, URL/DOI, NLI entailment
+Focused runtime and WGS checks:
 
-## Architecture
-
-```
-User Query → StudySpec Compilation → Agent.run() (ReAct loop)
-    → LLM decides tool calls → SkillRegistry executes
-    → Reflexion on errors → Verdict (PASS/FAIL/PARTIAL)
-    → Progressive Disclosure → Response
+```bash
+python -m pytest tests/test_cli_v3_modules.py tests/test_interactive_cli_runtime.py tests/wgs/test_vcf_manifest.py -q
 ```
 
-For full architecture details, see [architecture/OVERVIEW.md](../architecture/OVERVIEW.md).
+Broader workflow checks:
 
-## Troubleshooting
+```bash
+python -m pytest tests/test_research_mode.py tests/test_self_evolve.py tests/test_runtime_audit_harness.py tests/wgs -q
+```
 
-**Model unavailable**: Check API key and base URL in `.env`  
-**No data found**: Verify `DATA_DIR` points to Parquet files  
-**Import errors**: Run `pip install -e ".[all]"` for optional dependencies
+Full test suite:
+
+```bash
+python -m pytest tests/ -q
+```

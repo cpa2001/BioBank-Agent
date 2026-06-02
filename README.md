@@ -2,276 +2,260 @@
 
 # Biobank Agent
 
-**Autonomous scientific discovery agent for population-scale biobank research**
+**Local-first autonomous research agent for biobank, genomics, and biomedical discovery workflows**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1148%20passed-brightgreen.svg)](#testing)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-*Natural language interface to large-scale biobank cohorts — from hypothesis to publication-quality report.*
+Natural-language planning, data-aware tool use, WGS analysis, cited research, runtime audit, replay, and review-gated self-evolution in one CLI.
 
 </div>
 
 ---
 
-## Overview
+## What It Does
 
-Biobank Agent is an LLM-powered scientific discovery system designed for population-scale biobank data analysis. It combines a **ReAct agent loop** with **58 registered analysis, documentation, and review skills** to enable end-to-end research workflows: cohort construction, biomarker discovery, therapeutic target prioritization, target annotation, predictive modelling, survival analysis, literature review, cross-agent review, and publication-quality reporting.
+Biobank Agent is an LLM-powered scientific workflow agent for population-scale biobank research. It runs from a local interactive shell, discovers registered analysis skills, drafts and repairs multi-step plans, executes local tools under permission controls, records session trajectories, and produces auditable reports.
 
-**Key capabilities:**
-- **Hypothesis-driven discovery** — automated pipelines from cohort building through feature importance to PheWAS
-- **Genetic target hypotheses** — genetics-first rare-variant burden ranking from GeneBass-like summary statistics, with therapeutic direction, pathway convergence, and validation caveats
-- **Target annotation and enrichment** — biobank target lists can be interpreted with Open Targets, UniProt, GTEx, ClinicalTrials.gov, optional CELLxGENE snapshots, and local GMT enrichment without changing the genetic ranking
-- **Predictive modelling** — automatic model selection across XGBoost/LightGBM/CatBoost with stratified CV, calibration, and SHAP explanations
-- **Literature integration** — search papers, read PDFs, cross-reference findings with biobank data
-- **Publication-quality output** — Nature/ICML-style SVG+PDF figures, dual-format reports (technical & IMRaD), executive findings, and reproducible appendices
-- **Self-evolution** — learns from errors, records analysis pipelines, generates new skills at runtime
-- **Plan mode** — structured multi-step planning with checkpoints, resume support, execution logs, and report-visible provenance
-- **Native multi-agent routing** — auto-detects complex tasks and coordinates multiple frontier models
-- **Project documentation access** — a read-only `project_doc` skill exposes README, data reference, architecture, guide, and plugin Markdown to the agent
-- **Codex-first external review** — optional `@skill` tools call local Codex and Claude Code CLIs; Codex/GPT-5.5 xhigh is the default review gate, with Claude as an optional secondary reviewer
+The current repository is a v3 runtime-oriented build with:
 
-Currently validated on **UK Biobank** (502K participants, 4,971 phenotype fields, 6.9M diagnosis records). Architecture supports extension to FinnGen, China Kadoorie Biobank, and other population cohorts.
+- **105 registered skills** discovered from `biobank_agent.skills`, including cohort analysis, modelling, WGS/VCF workflows, literature research, report writing, external review, and self-evolution support.
+- **71 slash commands** in the v3 command registry, including `/plan`, `/plan-diagnose`, `/plan-retry`, `/plan-use`, `/research`, `/doctor`, `/tools`, `/resume`, `/audit`, `/harness`, `/replay`, `/learn`, and `/evolve`.
+- **Runtime-backed sessions** with event logs, action graph references, plan state, trajectory replay, audit reports, and resume support.
+- **VirtualCell/WGS support** for local VCF discovery, WGS dependency checks, exploratory VCF QC, PCA, kinship, association, burden testing, annotation, pathway enrichment, and WGS report polishing.
+- **OpenAI-compatible providers** configured through `.env`, with multi-model planning and review routes controlled by settings.
+
+The project is local-first: data paths, reports, memory, sessions, tool calls, and audit artifacts remain on the workstation unless a configured skill or provider explicitly uses a network service.
 
 ## Quick Start
 
 ```bash
-# Install
 git clone https://github.com/cpa2001/BioBank-Agent.git
 cd BioBank-Agent
-pip install -e ".[all]"
 
-# Configure
+# Optional but recommended
+conda create -n biobank-agent python=3.11 -y
+conda activate biobank-agent
+
+pip install -e ".[all,dev]"
 cp .env.example .env
-# Edit .env: set LLM_API_KEY and DATA_DIR
+```
 
-# Run
+Edit `.env`:
+
+```ini
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_API_KEY=<your-api-key>
+LLM_MODEL=deepseek/deepseek-v4-pro
+
+DATA_DIR=./data
+RAW_DIR=./raw
+REPORTS_DIR=./reports
+PLANS_DIR=./plans
+```
+
+Start the interactive shell:
+
+```bash
 biobank
 ```
 
-## Usage Examples
-
-```
-biobank> What are the top 20 most common diseases?
-biobank> Discover disease-specific biomarkers for Type 2 Diabetes
-biobank> Train an XGBoost model to predict E11 and show feature importance
-biobank> Show Kaplan-Meier survival curves for acute MI (I21)
-biobank> Search for recent CKD biomarker studies and summarize findings
-biobank> Rank therapeutic target hypotheses for BMI from GeneBass burden statistics
-biobank> Annotate LDL target genes with Open Targets, UniProt, GTEx and clinical trial context
-biobank> Run local GMT enrichment for the top LDL target genes
-biobank> Read this paper and compare with our cohort data
-biobank> /plan Comprehensive cardiovascular risk analysis
-biobank> Generate a Nature-quality report for all analyses
-```
-
-## Reports and Evaluation
-
-Reports are generated in two public-facing styles:
-
-- `format="technical"` / `format="report"`: executive findings first, methods and diagnostics in appendices, with guardrail issues and execution logs separated from biological interpretation.
-- `format="nature"` / `format="paper"`: IMRaD structure with abstract, methods, results, discussion, references, data availability, and non-causal interpretation caveats.
-
-The report generator filters raw logs, reviewer chatter, local paths, unresolved placeholders, and unsupported causal claims from the lead findings. Detailed execution records remain available in the appendix for audit and replay.
-
-Evaluation suites distinguish offline report quality from live UKB execution:
-
-- `report_20_case`: 20 deterministic UKB-oriented synthetic aggregate report cases for fast report regression testing.
-- `live_ukb_report_20`: 20 live UK Biobank workflow probes that fail closed unless a real UKB data manager and field catalog are configured.
-- `agent_report_workflow`: staged agent workflow checks for literature grounding, cohort/model execution, guardrails, and final report generation.
-
-Codex is the default external review gate:
-
-```bash
-biobank eval --suite report_20_case --review-loop --reviewer codex-gpt-5.5-xhigh
-biobank eval --suite report_20_case --review-loop --reviewer codex-gpt-5.5-xhigh --include-claude
-biobank eval --suite live_ukb_report_20 --review-loop
-```
-
-## Architecture
-
-```
-biobank_agent/
-├── agent.py                 # ReAct loop with native tool_use
-├── planner.py               # Plan mode (INTAKE → ALIGNMENT → EXECUTION → DONE)
-├── llm.py                   # OpenAI-compatible client with retry + backoff
-├── registry.py              # @skill decorator, auto-discovery, hot-reload
-├── config.py                # Pydantic settings
-├── state.py                 # Session state + token tracking
-├── memory.py                # 8-tier persistent memory
-│
-├── study_spec.py            # Schema-gated execution (query → typed StudySpec)
-├── verdict.py               # Verification engine (PASS/FAIL/PARTIAL)
-├── verifier_mesh.py         # URL/DOI, numeric bounds, NLI entailment
-├── verification.py          # Z3 SMT formal constraint checking
-├── evidence.py              # Claim-evidence lattice with confidence
-├── constants.py             # UKB domain constants (single source of truth)
-│
-├── data/                    # Data access layer (DuckDB + Parquet)
-│   ├── loader.py            # Unified query layer (parquet + CSV fallback)
-│   ├── catalog.py           # Field catalogue (11,821 fields, 410 categories)
-│   ├── cohort.py            # Case/control cohort builder
-│   ├── features.py          # Biomarker group definitions
-│   └── parquet_builder.py   # Batch CSV → Parquet rebuild
-│
-├── skills/                  # 58 registered skills (auto-discovered)
-│   ├── Analysis (17)        # prevalence, cohort, biomarker_dist, correlation,
-│   │                        # train_model, evaluate_model, feature_importance,
-│   │                        # calibration, survival, phewas, comorbidity, ...
-│   ├── Discovery (7)        # predict, discover, gwas_proxy,
-│   │                        # genetic_target_hypothesis, target_annotation_context,
-│   │                        # target_enrichment, smart_plot
-│   ├── Research (7)         # web_search, web_fetch, read_pdf, fetch_paper,
-│   │                        # read_paper, deep_research, nature_writer
-│   ├── Ideation (2)         # brainstorm, critical_thinking
-│   └── Self-Evolution (9)   # create_skill, record_macro, replay_pipeline,
-│                            # track_error, suggest_error_fix, ...
-│
-└── utils/                   # Shared utilities
-    ├── plotting.py          # Nature/ICML-style SVG+PDF (300 DPI, Okabe-Ito)
-    ├── report_templates.py  # Section templates, CSS, LaTeX preamble
-    ├── stats.py             # Mann-Whitney, chi², FDR, log-rank
-    └── icd10.py             # ICD-10 code → name lookup
-```
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show all commands |
-| `/skills` | List available analysis skills |
-| `/plan <task>` | Enter structured plan mode |
-| `/compact` | Compress conversation history |
-| `/clear` | Reset session state |
-| `/cost` | Token usage and estimated cost |
-| `/model <name>` | Switch LLM model |
-| `/models-available` | Fetch relay-supported model IDs |
-| `/figures` | List generated figures |
-| `/cohorts` | Active cohorts summary |
-| `/models` | Trained models with AUC |
-| `/export <fmt>` | Export session (JSON/Markdown) |
-| `/history` | Analysis history |
-| `/record <name>` | Save session as pipeline |
-| `/pipelines` | List saved pipelines |
-| `/errors` | Error catalog |
-| `/memory` | Long-term memory summary |
-| `/status` | Full session status |
-| `/external-agents` | Check local Codex/Claude Code availability |
-| `/codex-plan <task>` | Ask Codex for a read-only plan |
-| `/codex-check [focus]` | Ask Codex to review execution/code |
-| `/claude-plan <task>` | Ask Claude Code for a read-only plan |
-| `/claude-check [focus]` | Ask Claude Code to review execution/code |
-| `/mcp-list` | List configured MCP servers and loaded remote tools |
-| `/mcp-start` | Start configured MCP servers and register remote tools |
-| `/mcp-health [--repair]` | Probe MCP servers and optionally reconnect unhealthy ones |
-| `/mcp-call <tool> [json]` | Call a loaded MCP tool directly for audit/debugging |
-| `/mcp-stop` | Stop MCP clients and unregister remote tools |
-
-## Local Agent Plugins
-
-Biobank Agent includes repo-local plugin bundles:
-
-- Codex: `plugins/biobank-agent` with marketplace metadata in `.agents/plugins/marketplace.json`
-- Claude Code: `plugins/biobank-agent-claude` with marketplace metadata in `.claude-plugin/marketplace.json`
-
-Inside Biobank Agent, the corresponding skills are `external_agent_status`, `codex_plan`, `codex_check_execution`, `claude_plan`, and `claude_check_execution`. Codex review is the default for eval review loops; Claude Code is available as an explicit opt-in second opinion. These skills default to read-only planning/review modes and are covered by mocked tests, so the suite does not spend real model quota.
-
-Before using Claude Code from inside Biobank Agent, authenticate Claude Code on
-the workstation:
-
-```bash
-claude auth status
-claude auth login
-```
-
-After login, verify the bridge from the Biobank Agent shell:
+Run the first checks:
 
 ```text
-/external-agents
-/codex-plan Draft a guarded report workflow
-/codex-check Check report guardrails
-/claude-plan Draft a guarded report workflow
-/claude-check Check report guardrails
+biobank > /doctor
+biobank > /tools
+biobank > /skills
 ```
 
-`external_agent_status` reports Claude as unavailable when `claude auth status`
-returns `loggedIn=false`, even if the `claude` binary is installed.
+For a complete runnable setup path, use [docs/guides/QUICK_START.md](docs/guides/QUICK_START.md). For the full Agent + WGS workflow, use [docs/guides/END_TO_END_TUTORIAL.md](docs/guides/END_TO_END_TUTORIAL.md).
+
+## API Connectivity Smoke Test
+
+After editing `.env`, verify provider connectivity before running a long plan:
+
+```bash
+python - <<'PY'
+from biobank_agent.config import get_settings
+from biobank_agent.llm import LLMClient
+
+settings = get_settings()
+client = LLMClient(
+    base_url=settings.llm_base_url,
+    api_key=settings.llm_api_key,
+    model=settings.llm_model,
+)
+response = client.chat([{"role": "user", "content": "Reply with exactly: API_OK"}])
+print(response.text)
+print(response.usage)
+PY
+```
+
+Expected result: the text contains `API_OK`. If the call fails, fix `LLM_BASE_URL`, `LLM_API_KEY`, or `LLM_MODEL` before testing agent workflows.
+
+## Core Workflows
+
+### Interactive Planning
+
+Use `/plan` for multi-step workflows that need visible structure, approvals, repair, and provenance.
+
+```text
+biobank > /plan Compare vitiligo cases and controls using the available WGS VCF files, then write an auditable report.
+biobank > /plan-approve
+```
+
+If execution is blocked or a step fails, stay in the same shell:
+
+```text
+biobank > what is the problem?
+biobank > /plan-diagnose
+biobank > /plan-use vcf_dir=data/vc_wgs_vcf
+biobank > /plan-use workflow_mode=exploratory
+biobank > continue
+```
+
+Useful plan commands:
+
+| Command | Use |
+| --- | --- |
+| `/plan <task>` | Draft a structured plan from a natural-language objective. |
+| `/plan-approve` | Approve and execute the active draft. |
+| `/plan-edit <feedback>` | Modify the draft or active plan with natural-language feedback. |
+| `/plan-diagnose` | Explain why the current plan is blocked or failed. |
+| `/plan-use key=value` | Add repair context such as `vcf_dir=data/vc_wgs_vcf`. |
+| `/plan-retry [step_id]` | Retry a failed or named plan step. |
+| `/plan-resume` | Resume a paused or repaired plan. |
+| `/plan-skip <step_id>` | Explicitly skip an optional diagnostic step. |
+
+### WGS and VirtualCell
+
+The repository can discover local VCFs under `data/vc_wgs_vcf`. The WGS skills include:
+
+- `wgs_environment_check`
+- `vcf_sample_list`
+- `vcf_cohort_stats`
+- `vcf_qc`
+- `vcf_pca`
+- `vcf_kinship`
+- `vcf_association`
+- `vcf_burden_test`
+- `vcf_annotation`
+- `pathway_enrichment`
+- `virtualcell_data_inventory`
+- `virtualcell_multimodal_link`
+
+External genomics tools such as `bcftools`, `tabix`, and `plink2` are useful for standard workflows. The agent can still run exploratory Python-backed VCF analysis when those tools are missing, provided the VCF files and indexes are available.
+
+### Research Mode
+
+Use `/research` for a cited multi-source biomedical brief:
+
+```text
+biobank > /research What is the current evidence linking TYR, HLA, and immune regulation to vitiligo?
+```
+
+The research path uses configured web/literature skills and local report directories. It is best for background synthesis, target context, and study-design support, not for making causal claims from local data alone.
+
+### Resume, Audit, Replay, and Evolution
+
+Runtime sessions are persisted under the configured memory directory. Use:
+
+| Command | Use |
+| --- | --- |
+| `/resume` or `/resume --last` | Resume or inspect saved sessions. |
+| `/audit [session-id]` | Produce a read-only audit of events, tools, plans, and evidence. |
+| `/replay [session-id|trajectory.jsonl]` | Replay a trajectory without model/tool execution. |
+| `/harness <task.json>` | Run a versioned runtime harness task. |
+| `/learn [--write]` | Mine the active trajectory for review-only improvement proposals. |
+| `/evolve [--write|--apply]` | Review controlled self-evolution proposals. Persistent apply is approval-gated. |
+
+Self-evolution is intentionally conservative: proposals are review-oriented by default, and persistent code mutation should be treated as a gated engineering workflow with tests and audit artifacts.
 
 ## Configuration
 
+Configuration is loaded from `.env` through `biobank_agent.config.Settings`.
+
+| Setting | Purpose |
+| --- | --- |
+| `LLM_BASE_URL` | OpenAI-compatible provider endpoint. |
+| `LLM_API_KEY` | Provider API key. Keep this out of logs and commits. |
+| `LLM_MODEL` | Primary model for normal turns. |
+| `DATA_DIR` | Processed biobank or VirtualCell-style data directory. |
+| `RAW_DIR` | Optional raw data fallback directory. |
+| `REPORTS_DIR` | Generated reports and analysis artifacts. |
+| `PLANS_DIR` | Saved plan checkpoints. |
+| `MEMORY_DIR` | Runtime sessions, memory, trajectories, and action graph state. |
+| `MULTI_MODEL_ENABLED` | Enable multi-model routing when configured. |
+| `MCP_CONFIG_PATH` | Optional MCP server configuration path. |
+
+See [.env.example](.env.example) for the current template.
+
+## Outputs and Provenance
+
+Biobank Agent separates human-facing results from audit records:
+
+- `reports/` contains generated analysis outputs, figures, reports, audit files, and research briefs.
+- `plans/` contains plan checkpoints and saved plan artifacts.
+- `MEMORY_DIR` contains runtime sessions, trajectories, action graph state, and long-term memory.
+- `/audit` and `/replay` provide reproducibility checks after a run.
+
+Generated reports should state method assumptions, data limitations, statistical caveats, and whether a workflow is exploratory or standard.
+
+## Documentation
+
+Recommended reading order:
+
+1. [Quick Start](docs/guides/QUICK_START.md) - install, configure, launch, and run first checks.
+2. [End-to-End Tutorial](docs/guides/END_TO_END_TUTORIAL.md) - full Agent + WGS path with repair, research, resume, audit, replay, and evolution.
+3. [Documentation Index](docs/README.md) - all guides, architecture docs, examples, data references, and related works.
+4. [Architecture Overview](docs/architecture/OVERVIEW.md) - system modules and runtime design.
+5. [Custom Skills](docs/guides/CUSTOM_SKILLS.md) - write new `@skill` tools.
+6. [Plugin Integration](docs/guides/PLUGIN_INTEGRATION.md) - external agent and plugin integration.
+
+## Development and Tests
+
+Install development dependencies:
+
 ```bash
-# .env
-LLM_BASE_URL=https://api.openai.com       # or any OpenAI-compatible endpoint
-LLM_API_KEY=your-key
-LLM_MODEL=gpt-4o                           # or claude-sonnet-4-6, etc.
-
-DATA_DIR=./data                             # Parquet files
-RAW_DIR=./raw                               # Raw CSV fallback (optional)
-
-# Optional
-SEARCH_PROVIDER=duckduckgo                  # or brave, serper
-SEARCH_API_KEY=                             # required for brave/serper
-MULTI_MODEL_ENABLED=true                    # auto route hard tasks to multi-agent
-AUTO_DISCOVER_MODELS=true                   # query /v1/models from relay
-PREFERRED_MULTI_MODELS=gpt-5.4,gemini-3.1-pro-preview
+pip install -e ".[all,dev]"
 ```
 
-## Memory System
-
-| Tier | Scope | Persistence |
-|------|-------|-------------|
-| Short-term | Current conversation | In-memory |
-| Mid-term | Analysis records with exact metrics | Session state |
-| Long-term | Model configs, pipelines, field usage | `memory.json` |
-| Error catalog | Error patterns + suggested fixes | `memory.json` |
-| Domain | Accumulated biomedical findings | `domain.md` |
-| User preferences | Researcher settings | `user.md` |
-| Episodic | Cross-session BM25-ranked recall | `sessions.db` |
-| Action graph | Claim ↔ Evidence knowledge graph | `action_graph.db` |
-
-## Verification Pipeline
-
-All skill outputs pass through a multi-layer verification stack:
-
-| Layer | Engine | Purpose |
-|-------|--------|---------|
-| Formal | Z3 SMT solver | Constraint satisfaction (optional) |
-| Numeric | `NumericRangeChecker` | UKB bounds (502,411 max, age 37–73) |
-| URL/DOI | `URLDOIResolver` | Reference accessibility check |
-| Entailment | LLM NLI | Claim ↔ evidence consistency |
-| Verdict | `VerdictEngine` | Final PASS / FAIL / PARTIAL |
-
-## Testing
+Run focused checks:
 
 ```bash
-pytest tests/ -v                          # All tests
-pytest tests/ -v -m "not integration"     # Skip API-dependent tests
-biobank eval --suite skill_schemas --mode baseline
-biobank eval --suite report_quality --mode baseline
-biobank eval --suite report_20_case --mode baseline
-biobank eval --suite live_ukb_report_20 --mode baseline
-biobank eval --suite agent_report_workflow --mode baseline
+python -m pytest tests/test_cli_v3_modules.py tests/test_interactive_cli_runtime.py tests/wgs/test_vcf_manifest.py -q
 ```
 
-Current local regression status: `1148 passed, 11 skipped`.
+Run broader workflow checks:
 
-## Platform Support
+```bash
+python -m pytest tests/test_research_mode.py tests/test_self_evolve.py tests/test_runtime_audit_harness.py tests/wgs -q
+```
 
-| Platform | Status |
-|----------|--------|
-| macOS ARM (Apple Silicon) | Full support, CPU |
-| Linux x86 + NVIDIA GPU | Full support, CUDA optional |
+Run the full suite when preparing a release:
 
-GPU-dependent features (SHAP deep explainer, UMAP with RAPIDS) auto-fallback to CPU.
+```bash
+python -m pytest tests/ -q
+```
+
+Before committing, keep the repository root clean:
+
+```bash
+ls *.md *.txt 2>/dev/null | grep -v -E '^(README|CHANGELOG|AGENTS|CLAUDE)\.md$'
+```
+
+The command should print nothing.
+
+## Safety and Data Governance
+
+Biobank Agent is a research assistant, not a clinical decision system. Treat outputs as scientific workflow artifacts that require review. For real biobank data, follow the governing data access agreement, local privacy policy, disclosure-control rules, and publication review process. Keep secrets in `.env`, avoid committing generated reports that contain sensitive information, and use `/doctor`, `/audit`, and `/replay` to verify readiness and provenance.
 
 ## Citation
-
-If you use Biobank Agent in your research, please cite:
 
 ```bibtex
 @software{biobank_agent,
   title   = {Biobank Agent: Autonomous Scientific Discovery for Population-Scale Biobank Research},
-  author  = {Chen, Pengan},
+  author  = {AIH Group, CUHK},
   year    = {2026},
   url     = {https://github.com/cpa2001/BioBank-Agent}
 }
@@ -280,10 +264,3 @@ If you use Biobank Agent in your research, please cite:
 ## License
 
 [MIT](LICENSE)
-
-## Author
-
-AIH Group, Department of Computer Science and Engineering (CSE), The Chinese University of Hong Kong (CUHK)
-Shanghai Academy of AI for Science (SAIS)
-
-**CHEN Pengan** · chenpengan@link.cuhk.edu.hk

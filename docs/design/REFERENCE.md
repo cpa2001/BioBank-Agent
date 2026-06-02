@@ -109,7 +109,10 @@ DEBATE_ROUNDS=2
 
 ---
 
-## 8. Skills Inventory (58 registered)
+## 8. Selected Skills Inventory
+
+The current registry discovers 105 skills. This section lists representative
+skills by workflow area rather than the full registry.
 
 ### Cohort, Data, and Descriptive Analysis
 field_search, prevalence, cohort_summary, cohort_card, phenotype_harmonize,

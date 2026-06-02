@@ -56,16 +56,17 @@ def autodiscover_skills(package_path: str = "biobank_agent.skills") -> None:
             logger.warning("Failed to load skill %s: %s", full_name, e)
 ```
 
-**How it works:**
-1. Uses `pkgutil.iter_modules()` to discover all `.py` modules in `biobank_agent/skills/`
+**How it works in the current v3 checkout:**
+1. Scans `.py` modules in `biobank_agent/skills/`
 2. Skips modules starting with `_` (private modules)
-3. Dynamically imports each module with `importlib.import_module()`
-4. As each module is imported, the `@skill` decorators automatically register skills in the global registry
-5. **58 skills** are currently available in the project
+3. Registers built-in skill schemas lazily from literal `@skill(...)` decorators when possible
+4. Falls back to eager import for ad-hoc or non-literal skill modules
+5. Loads the callable implementation on first execution
+6. **105 skills** are currently discoverable from the built-in skill registry
 
-**Current Skills:** 58 total, including data analysis, modelling, genetic target
-interpretation, literature, reporting, guardrail, memory, project documentation,
-and external review tools.
+**Current Skills:** 105 total, including data analysis, modelling, WGS/VCF,
+genetic target interpretation, literature, reporting, guardrail, memory,
+project documentation, external review, and self-evolution tools.
 
 ---
 
