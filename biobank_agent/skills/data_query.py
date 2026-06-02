@@ -141,6 +141,32 @@ def field_search(query: str = "", limit: int = 20, *, ctx=None) -> dict:
         }
     catalog = ctx.catalog
 
+    fields = getattr(catalog, "fields", None)
+    if fields is not None and not fields:
+        dm = getattr(ctx, "dm", None)
+        columns: list[str] = []
+        if dm and hasattr(dm, "list_parquet_columns"):
+            try:
+                columns = dm.list_parquet_columns()
+            except Exception:
+                pass
+        matched = [c for c in columns if query.lower() in c.lower()] if query and columns else columns
+        return {
+            "query": query,
+            "results": [
+                {"field_id": c, "title": c, "category": "biomarker_view", "data_source": "parquet"}
+                for c in matched
+            ],
+            "total": len(matched),
+            "status": "NO_CATALOG",
+            "requires_repair": False,
+            "available_columns": columns,
+            "message": (
+                "No field catalogue available for this biobank. "
+                "Showing columns from the biomarkers view."
+            ),
+        }
+
     # Check if query is a field ID
     if query.isdigit():
         info = catalog.field_info(query)

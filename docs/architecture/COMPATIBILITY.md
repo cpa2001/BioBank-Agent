@@ -78,9 +78,12 @@ functionality intact, but a regression is not a release blocker.
 ## CLI surface
 
 - Entry point: `biobank` (defined in `pyproject.toml [project.scripts]`).
-- Default mode: Rich CLI streaming with `prompt_toolkit` REPL.
-- `biobank --tui` activates the Textual UI if `textual>=0.80` is installed;
-  otherwise the CLI mode is used and a one-line note is printed.
-- Slash command surface ships with 28 built-in commands under
+- Default mode: `biobank` opens the interactive shell first; the shell uses
+  `prompt_toolkit` when available and falls back to standard console input in
+  lightweight environments.
+- The single interactive `biobank` REPL is the only interaction mode. The former
+  `--tui` (Textual) and `--legacy-repl` modes were removed during consolidation;
+  `biobank [<task>]` always launches the REPL (seeding `<task>` as the first turn).
+- Slash command surface ships with 71 built-in commands under
   `biobank_agent/cli/commands/`. Third-party command modules can be loaded
   through `BIOBANK_CLI_COMMAND_MODULES` (see `docs/guides/CLI_COMMAND_PLUGINS.md`).

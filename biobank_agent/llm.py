@@ -35,6 +35,26 @@ _UNAVAILABLE_CHANNEL_PATTERNS = (
 )
 
 
+def _normalize_tool_call(tc: dict) -> dict:
+    """Convert an internal tool-call dict ({"id","name","args"}) into the OpenAI
+    chat wire format ({"id","type":"function","function":{"name","arguments"}}).
+    Already-wire-format calls (those carrying a "function" key) pass through."""
+    if not isinstance(tc, dict) or "function" in tc:
+        return tc
+    args = tc.get("args")
+    arguments = tc.get("arguments")
+    if not isinstance(arguments, str):
+        try:
+            arguments = json.dumps(args or {}, ensure_ascii=False)
+        except Exception:
+            arguments = "{}"
+    return {
+        "id": str(tc.get("id") or ""),
+        "type": "function",
+        "function": {"name": str(tc.get("name") or ""), "arguments": arguments},
+    }
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -117,7 +137,15 @@ class LLMClient:
         for msg in messages:
             m = dict(msg)  # shallow copy — don't mutate caller's dict
             role = m.get("role", "")
-            has_tool_calls = "tool_calls" in m
+            # Normalize assistant tool_calls to the OpenAI wire format. The runtime
+            # represents them internally as {"id","name","args"}; the chat API
+            # requires {"id","type":"function","function":{"name","arguments":<json str>}}.
+            # Without this, the relay drops the malformed tool_calls, which orphans
+            # the following role="tool" results — so the model never sees that its
+            # prior tool calls happened and repeats them (write-the-same-file loop).
+            if role == "assistant" and isinstance(m.get("tool_calls"), list):
+                m["tool_calls"] = [_normalize_tool_call(tc) for tc in m["tool_calls"]]
+            has_tool_calls = bool(m.get("tool_calls"))
 
             if "content" not in m:
                 m["content"] = null_content if has_tool_calls else ""
@@ -260,34 +288,62 @@ class LLMClient:
             max_tokens=max_tokens,
             stream=True,
         )
-
         text_parts: list[str] = []
         tool_call_deltas: dict[int, dict] = {}  # index → {id, name, args_str}
+        usage: dict = {}
 
-        stream = self._create_chat_completion_with_compat(kwargs)
-        for chunk in stream:
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if delta is None:
-                continue
+        def _process(stream):
+            """Yield text deltas from a stream, accumulating usage + tool calls
+            into the enclosing scope."""
+            nonlocal usage
+            for chunk in stream:
+                # The usage-only final chunk has empty ``choices`` but a
+                # populated ``usage`` — capture it regardless of the delta.
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage:
+                    try:
+                        usage = chunk_usage.model_dump() if hasattr(chunk_usage, "model_dump") else dict(chunk_usage)
+                    except Exception:
+                        pass
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta is None:
+                    continue
+                if delta.content:
+                    text_parts.append(delta.content)
+                    yield delta.content
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_call_deltas:
+                            tool_call_deltas[idx] = {"id": "", "name": "", "args": ""}
+                        if tc_delta.id:
+                            tool_call_deltas[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_call_deltas[idx]["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_call_deltas[idx]["args"] += tc_delta.function.arguments
 
-            # Text content
-            if delta.content:
-                text_parts.append(delta.content)
-                yield delta.content
-
-            # Tool call deltas
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tool_call_deltas:
-                        tool_call_deltas[idx] = {"id": "", "name": "", "args": ""}
-                    if tc_delta.id:
-                        tool_call_deltas[idx]["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            tool_call_deltas[idx]["name"] = tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            tool_call_deltas[idx]["args"] += tc_delta.function.arguments
+        # Ask the API to emit a final usage chunk so streamed calls still report
+        # token counts (OpenAI-compatible `stream_options.include_usage`). Some
+        # providers reject the param — at creation OR on first iteration. Fall
+        # back to a plain stream if so, but only while no output has been
+        # emitted yet (we cannot un-yield tokens to safely restart).
+        usage_kwargs = dict(kwargs)
+        usage_kwargs["stream_options"] = {"include_usage": True}
+        try:
+            stream = self._create_chat_completion_with_compat(usage_kwargs)
+        except Exception:
+            yield from _process(self._create_chat_completion_with_compat(kwargs))
+        else:
+            try:
+                yield from _process(stream)
+            except Exception:
+                if text_parts:
+                    raise  # already streamed output; cannot safely restart
+                tool_call_deltas.clear()
+                usage = {}
+                yield from _process(self._create_chat_completion_with_compat(kwargs))
 
         # Build final response
         tool_calls = []
@@ -302,6 +358,7 @@ class LLMClient:
         return LLMResponse(
             text="".join(text_parts),
             tool_calls=tool_calls,
+            usage=usage,
         )
 
     def _build_chat_kwargs(

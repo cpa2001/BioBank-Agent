@@ -27,11 +27,32 @@ def test_cli_package_exposes_importable_command_modules():
     assert "/status" in registry
     assert registry["/status"].usage == "/status"
     for command in (
+        "/goal",
+        "/resume",
+        "/new",
+        "/fork",
+        "/diff",
+        "/permissions",
+        "/mcp",
+        "/agent",
+        "/subagents",
+        "/review",
+        "/doctor",
+        "/audit",
+        "/harness",
+        "/learn",
+        "/verify",
+        "/quit",
         "/plan",
         "/plan-approve",
         "/plan-edit",
+        "/plan-reject",
         "/plan-resume",
+        "/plan-diagnose",
+        "/plan-retry",
+        "/plan-use",
         "/plan-option",
+        "/tools",
         "/external-agents",
         "/codex-plan",
         "/codex-check",
@@ -57,11 +78,11 @@ def test_cli_package_exposes_importable_command_modules():
 
 
 def test_command_registry_discovers_split_builtin_modules():
-    from biobank_agent.cli.commands import external, mcp, memory, plan, reproducibility, session
+    from biobank_agent.cli.commands import external, mcp, memory, plan, reproducibility, research, runtime, session
     from biobank_agent.cli.commands.registry import BUILTIN_COMMAND_MODULES, iter_registered_commands
 
-    assert BUILTIN_COMMAND_MODULES == ("session", "plan", "external", "mcp", "reproducibility", "memory")
-    modules = [session, plan, external, mcp, reproducibility, memory]
+    assert BUILTIN_COMMAND_MODULES == ("session", "runtime", "plan", "research", "external", "mcp", "reproducibility", "memory")
+    modules = [session, runtime, plan, research, external, mcp, reproducibility, memory]
     expected = {command.name for module in modules for command in module.commands()}
     discovered = {command.name for command in iter_registered_commands()}
 

@@ -70,7 +70,7 @@ If this fails, fix `.env` first. Most failures are caused by a wrong base URL, m
 biobank
 ```
 
-The startup banner should show the version, workspace, session id, permission mode, provider roles, tool summary, WGS readiness summary, MCP tool count, and command palette.
+The startup banner should show the version, workspace, session id, active role, permission mode, provider roles, tool summary, WGS readiness summary, MCP tool count, and command palette.
 
 Inside the shell, run:
 
@@ -83,8 +83,7 @@ biobank > /skills
 Interpretation:
 
 - `/doctor` checks provider config, data directories, report/memory paths, permission mode, tool readiness, and WGS dependency status.
-- `/tools` shows runtime tools by category and health.
-- `/skills` lists registered analysis skills. The current checkout discovers 105 skills.
+- `/tools` and `/skills` are aliases: both print one **Available Tools** table grouped by category — currently ~116 entries (105 analysis skills plus the native runtime tools) — followed by a WGS readiness summary.
 
 ## 5. Run a First Natural-Language Turn
 
@@ -136,8 +135,7 @@ Use `/audit` after any meaningful run to inspect the recorded trajectory, tools,
 | `/help` | Show registered slash commands. |
 | `/status` | Show session, platform, memory, and token state. |
 | `/doctor` | Run read-only readiness diagnostics. |
-| `/tools` | Show available runtime tools by category and health. |
-| `/skills` | List registered analysis skills. |
+| `/tools` / `/skills` | List all registered tools by category (≈116: 105 analysis skills + native tools), with WGS readiness. Aliases — same output. |
 | `/plan <task>` | Draft a structured plan. |
 | `/plan-approve` | Execute the active plan. |
 | `/plan-edit <feedback>` | Modify the active plan. |

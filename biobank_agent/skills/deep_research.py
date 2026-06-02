@@ -8,6 +8,8 @@ a cited research brief.
 from __future__ import annotations
 
 import logging
+import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -477,6 +479,40 @@ def deep_research(topic: str, max_sources: int = 10, *, ctx=None) -> dict:
     """
     max_sources = max(1, min(max_sources, 30))  # clamp
     bank_name = ctx.settings.biobank_name if ctx and hasattr(ctx, "settings") else "Biobank"
+    cache_path: Path | None = None
+    cache_dir_raw = os.getenv("DEEP_RESEARCH_CACHE_DIR", "").strip() or os.getenv("WGS_VCF_CACHE_DIR", "").strip()
+    if cache_dir_raw:
+        import hashlib
+        cache_dir = Path(cache_dir_raw).expanduser().resolve()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        key = hashlib.sha256(repr({
+            "version": 1,
+            "topic": topic,
+            "max_sources": max_sources,
+            "bank_name": bank_name,
+        }).encode("utf-8")).hexdigest()
+        cache_path = cache_dir / f"deep_research_{key}.json"
+        if cache_path.exists():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                brief = str(cached.get("brief", ""))
+                brief_path: str | None = None
+                try:
+                    research_dir = Path(ctx.report_dir) / "research" if ctx is not None and hasattr(ctx, "report_dir") else Path("./research")
+                    research_dir.mkdir(parents=True, exist_ok=True)
+                    safe_topic = "".join(c if c.isalnum() or c in " -_" else "" for c in topic)
+                    safe_topic = safe_topic.strip().replace(" ", "_")[:60]
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    file_path = research_dir / f"research_{safe_topic}_{timestamp}.md"
+                    file_path.write_text(brief, encoding="utf-8")
+                    brief_path = str(file_path)
+                except Exception as exc:
+                    logger.warning("Could not save cached research brief: %s", exc)
+                cached["brief_path"] = brief_path
+                cached["cache_hit"] = True
+                return cached
+            except Exception as exc:
+                logger.debug("Ignoring unreadable deep research cache %s: %s", cache_path, exc)
 
     # Step 1: Search literature
     sources = _search_literature(topic, max_sources, ctx)
@@ -513,7 +549,7 @@ def deep_research(topic: str, max_sources: int = 10, *, ctx=None) -> dict:
     except Exception as exc:
         logger.warning("Could not save research brief: %s", exc)
 
-    return {
+    result = {
         "topic": topic,
         "sources": [
             {
@@ -536,3 +572,11 @@ def deep_research(topic: str, max_sources: int = 10, *, ctx=None) -> dict:
         "brief": brief,
         "brief_path": brief_path,
     }
+    if cache_path is not None:
+        tmp = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, cache_path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return result

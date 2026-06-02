@@ -12,8 +12,10 @@ from datetime import datetime
 import json
 import re
 import shutil
+import stat
 
 from biobank_agent.registry import skill
+from biobank_agent.skills.academic_report_polisher import polish_markdown_report
 from biobank_agent.utils.report_templates import (
     REPORT_HEADER,
     KEY_FINDINGS_BOX,
@@ -240,6 +242,44 @@ def _build_figure_caption(fig_path, rec, fig_n: int, ctx) -> str:
 
     elif skill_name == "comorbidity":
         caption_parts.append("Comorbidity network showing co-occurrence patterns.")
+
+    elif skill_name == "vcf_qc":
+        if "scatter" in p.name:
+            caption_parts.append("Sample QC scatter plot: call rate vs heterozygosity ratio, coloured by phenotype group. Outlier samples annotated.")
+        elif "titv" in p.name:
+            caption_parts.append("Ti/Tv ratio distribution by phenotype group. Box plots show median and IQR.")
+        else:
+            caption_parts.append("VCF quality control visualization.")
+
+    elif skill_name == "vcf_pca":
+        if "scree" in p.name:
+            caption_parts.append("PCA scree plot showing per-component (bars) and cumulative (line) variance explained.")
+        elif "pc1_pc2" in p.name:
+            caption_parts.append("PCA plot of PC1 vs PC2, coloured by phenotype group.")
+        elif "pc1_pc3" in p.name:
+            caption_parts.append("PCA plot of PC1 vs PC3, coloured by phenotype group.")
+        else:
+            caption_parts.append("Genotype PCA visualization.")
+
+    elif skill_name == "vcf_kinship":
+        caption_parts.append("Kinship heatmap from the Genomic Relationship Matrix. Off-diagonal values indicate pairwise relatedness; diagonal masked.")
+
+    elif skill_name == "vcf_association":
+        if "manhattan" in p.name:
+            caption_parts.append("Manhattan plot of case-control association. Red dashed line: Bonferroni threshold; blue dashed line: suggestive (1e-5).")
+        elif "qq" in p.name:
+            caption_parts.append("QQ plot of observed vs expected p-values with genomic inflation factor (λGC).")
+        else:
+            caption_parts.append("Association analysis visualization.")
+
+    elif skill_name == "vcf_annotation":
+        caption_parts.append("Variant counts per candidate gene, split by SNV and indel.")
+
+    elif skill_name == "vcf_burden_test":
+        caption_parts.append("Gene-level burden test lollipop plot. Dot size proportional to rare variant count; dashed line: Bonferroni threshold.")
+
+    elif skill_name == "pathway_enrichment":
+        caption_parts.append("Pathway enrichment bar chart (-log10 p-value). Coloured bars indicate FDR significance; dashed line: FDR threshold.")
 
     else:
         caption_parts.append(f"{skill_name.replace('_', ' ').title()} visualization.")
@@ -542,6 +582,209 @@ def _interpret_skill(rec) -> str:
                 )
             return f"Target enrichment for {phenotype} returned status={status} with no enriched terms."
 
+        # ---- WGS pipeline skills ----
+        elif skill_name == "vcf_qc":
+            n_analyzed = results.get("n_samples_analyzed", 0)
+            n_pass = results.get("n_samples_pass", 0)
+            n_fail = results.get("n_samples_fail", 0)
+            rgn = results.get("region", "full genome")
+            hwe_fail = results.get("hwe_fail_count")
+            text = (
+                f"VCF quality control analysed {n_analyzed} samples ({rgn}): "
+                f"{n_pass} passed, {n_fail} failed QC thresholds. "
+            )
+            stats = results.get("cohort_stats", {})
+            if stats.get("ti_tv_ratio"):
+                text += f"Cohort mean Ti/Tv ratio = {stats['ti_tv_ratio'].get('mean', 'N/A')}. "
+            if hwe_fail is not None:
+                text += f"HWE test: {hwe_fail} variant(s) failed (p < 0.001). "
+            return text
+
+        elif skill_name == "vcf_pca":
+            n_samples = results.get("n_samples", 0)
+            n_snps = results.get("n_snps_used", 0)
+            var_pct = results.get("cumulative_variance_pct", 0)
+            n_comp = results.get("n_components", 0)
+            return (
+                f"Genotype PCA on {n_samples} samples using {n_snps:,} common SNPs yielded "
+                f"{n_comp} components explaining {var_pct:.1f}% cumulative variance. "
+                "PC plots are coloured by phenotype group for visual population structure assessment."
+            )
+
+        elif skill_name == "vcf_kinship":
+            n_samples = results.get("n_samples", 0)
+            n_pairs = results.get("n_related_pairs", 0)
+            n_snps = results.get("n_snps_used", 0)
+            summary = results.get("kinship_summary", {})
+            max_k = summary.get("max_off_diagonal", 0)
+            text = (
+                f"Kinship estimation from {n_snps:,} SNPs across {n_samples} samples "
+                f"identified {n_pairs} related pair(s) above threshold. "
+                f"Maximum off-diagonal kinship coefficient = {max_k:.4f}."
+            )
+            return text
+
+        elif skill_name == "vcf_association":
+            n_cases = results.get("n_cases", 0)
+            n_ctrls = results.get("n_controls", 0)
+            n_tested = results.get("n_variants_tested", 0)
+            n_sig = results.get("n_significant_bonferroni", 0)
+            lam = results.get("lambda_gc")
+            case_g = results.get("case_group", "?")
+            ctrl_g = results.get("control_group", "?")
+            text = (
+                f"Case-control association ({case_g} vs {ctrl_g}, "
+                f"n={n_cases}+{n_ctrls}) tested {n_tested:,} variants. "
+                f"{n_sig} reached Bonferroni significance. "
+            )
+            mode = results.get("analysis_mode")
+            if mode:
+                text += f"Analysis mode: {mode}. "
+            if lam is not None:
+                text += f"Genomic inflation factor λGC = {lam:.3f}. "
+            std_note = results.get("standard_gwas_note")
+            if std_note:
+                text += std_note + " "
+            warn = results.get("lambda_gc_warning")
+            if warn:
+                text += warn + " "
+            text += results.get("power_warning", "")
+            return text
+
+        elif skill_name == "vcf_annotation":
+            n_queried = results.get("n_genes_queried", 0)
+            n_with = results.get("n_genes_with_variants", 0)
+            n_total = results.get("n_total_variants", 0)
+            mode = results.get("annotation_mode", "unknown")
+            return (
+                f"Variant annotation queried {n_queried} candidate gene(s): "
+                f"{n_with} contained variants ({n_total:,} total). "
+                f"Annotation mode: {mode}. "
+                f"{results.get('note', '')}"
+            )
+
+        elif skill_name == "vcf_burden_test":
+            n_genes = results.get("n_genes_tested", 0)
+            n_sig = results.get("n_genes_significant_burden", 0)
+            case_g = results.get("case_group", "?")
+            ctrl_g = results.get("control_group", "?")
+            maf = results.get("maf_threshold", 0.05)
+            top = results.get("top_gene", "")
+            text = (
+                f"Gene-level burden test ({case_g} vs {ctrl_g}) tested "
+                f"{n_genes} gene(s) at MAF < {maf}. "
+                f"{n_sig} gene(s) reached FDR significance. "
+            )
+            if top:
+                text += f"Top gene by p-value: {top}."
+            return text
+
+        elif skill_name == "pathway_enrichment":
+            n_input = results.get("n_input_genes", 0)
+            n_tested = results.get("n_pathways_tested", 0)
+            n_sig = results.get("n_pathways_significant", 0)
+            db = results.get("database", "built-in")
+            top_results = results.get("results", [])
+            text = (
+                f"Pathway enrichment of {n_input} gene(s) against {n_tested} "
+                f"pathways ({db}): {n_sig} pathway(s) significant at FDR < 0.05. "
+            )
+            if top_results and top_results[0].get("significant"):
+                top = top_results[0]
+                text += (
+                    f"Top pathway: {top['pathway']} "
+                    f"(fold enrichment = {top.get('fold_enrichment', 'N/A')}, "
+                    f"FDR = {top.get('p_fdr', 'N/A'):.3g})."
+                )
+            return text
+
+        elif skill_name == "jh_variant_discovery":
+            n = results.get("n_candidate_variants", 0)
+            counts = results.get("wgs_phenotype_counts", {})
+            return (
+                f"Juvenile hair-whitening variant discovery prioritized {n} WGS candidate "
+                f"variant/locus anchor(s). WGS phenotype counts were {counts}. "
+                f"Claim boundary: {results.get('claim_boundary', 'exploratory prioritization')}."
+            )
+
+        elif skill_name == "regulatory_variant_annotation":
+            n = results.get("n_regulatory_hits", 0)
+            return (
+                f"Regulatory annotation classified {n} candidate variant/locus anchor(s) "
+                f"within a {results.get('window_bp', 0):,} bp regulatory window using "
+                "built-in hg38 pigmentation and immune loci."
+            )
+
+        elif skill_name == "tf_binding_disruption":
+            n = results.get("n_tfbs_candidates", 0)
+            return (
+                f"TF binding assessment produced {n} candidate TFBS disruption rows. "
+                "Rows are motif-prior hypotheses unless a sequence-level motif database "
+                "or MCP scanner is configured."
+            )
+
+        elif skill_name == "scatac_peak_overlap":
+            n = results.get("n_candidate_variants", 0)
+            cols = results.get("peak_coordinate_columns", [])
+            status = "peak coordinate metadata detected" if cols else "exact overlap deferred"
+            return (
+                f"scATAC peak-overlap readiness checked {n} candidate variant/locus anchor(s); "
+                f"{status}."
+            )
+
+        elif skill_name == "scatac_accessibility_differential":
+            return (
+                "scATAC accessibility differential readiness compared Juvenile white hair "
+                f"({results.get('case_manifest_cells', 0):,} manifest cells) versus black hair "
+                f"({results.get('control_manifest_cells', 0):,} manifest cells). "
+                f"Status: {results.get('status', 'unknown')}."
+            )
+
+        elif skill_name == "scrna_expression_differential":
+            n = results.get("n_genes", 0)
+            return (
+                f"scRNA expression readiness was assessed for {n} variant-linked gene(s). "
+                "Quantitative differential expression is deferred until backed/chunked "
+                "matrix extraction is available for the selected genes."
+            )
+
+        elif skill_name == "atac_expression_coupling":
+            n = results.get("n_coupled_rows", 0)
+            return (
+                f"ATAC-expression coupling generated {n} variant-gene evidence row(s), "
+                "with coupling direction intentionally left unknown until quantitative "
+                "accessibility and expression contrasts are computed."
+            )
+
+        elif skill_name == "spatial_celltype_localization":
+            n = results.get("n_spatial_files_inspected", 0)
+            return (
+                f"Stereo-seq spatial localization readiness inspected {n} Juvenile-focused "
+                "spatial h5ad file(s) for coordinate and cell-type metadata."
+            )
+
+        elif skill_name == "spatial_cell_interaction":
+            n = results.get("n_samples", 0)
+            return (
+                f"Spatial cell-interaction readiness summarized {n} sample(s), checking "
+                "whether coordinate and cell-type metadata can support neighbor graph analysis."
+            )
+
+        elif skill_name == "multiomics_mechanism_prioritization":
+            n = results.get("n_prioritized_hypotheses", 0)
+            return (
+                f"Multi-omics prioritization ranked {n} variant-to-mechanism hypothesis/hypotheses "
+                f"across WGS, TF, ATAC, RNA and spatial evidence. "
+                f"Claim boundary: {results.get('claim_boundary', 'exploratory mechanism ranking')}."
+            )
+
+        elif skill_name == "workflow_gap_detector":
+            n = results.get("n_gaps", 0)
+            return (
+                f"Workflow gap detection found {n} missing capability or resource gap(s) and "
+                "recorded review-gated generated-skill proposals for harness-driven evolution."
+            )
+
     except Exception:
         pass
 
@@ -659,6 +902,55 @@ def _extract_key_findings(records) -> list[str]:
                     f"Target enrichment: {terms[0].get('term')} ranked first "
                     f"for {results.get('phenotype') or 'target set'}"
                 )
+
+        # ---- WGS pipeline skills ----
+        elif rec.skill == "vcf_qc":
+            n_pass = results.get("n_samples_pass", 0)
+            n_fail = results.get("n_samples_fail", 0)
+            if n_pass or n_fail:
+                findings.append(f"VCF QC: {n_pass} samples passed, {n_fail} failed")
+
+        elif rec.skill == "vcf_association":
+            lam = results.get("lambda_gc")
+            n_sig = results.get("n_significant_bonferroni", 0)
+            if lam is not None:
+                mode = results.get("analysis_mode", "association")
+                findings.append(f"Association ({mode}): λGC={lam:.3f}, {n_sig} Bonferroni-significant variant(s)")
+
+        elif rec.skill == "vcf_annotation":
+            mode = results.get("annotation_mode", "annotation")
+            n_total = results.get("n_total_variants", 0)
+            findings.append(f"Annotation ({mode}): {n_total:,} candidate-gene variant(s) summarized")
+
+        elif rec.skill == "vcf_burden_test":
+            n_sig = results.get("n_genes_significant_burden", 0)
+            top = results.get("top_gene", "")
+            if top:
+                findings.append(f"Burden test: top gene {top}, {n_sig} gene(s) significant")
+
+        elif rec.skill == "pathway_enrichment":
+            n_sig = results.get("n_pathways_significant", 0)
+            top_results = results.get("results", [])
+            if n_sig > 0 and top_results:
+                findings.append(f"Pathway enrichment: {n_sig} significant pathway(s), top = {top_results[0].get('pathway', '')}")
+
+        elif rec.skill == "jh_variant_discovery":
+            findings.append(f"Juvenile hair mechanism: {results.get('n_candidate_variants', 0)} candidate variant/locus anchor(s) prioritized")
+
+        elif rec.skill == "tf_binding_disruption":
+            findings.append(f"TF binding: {results.get('n_tfbs_candidates', 0)} motif-prior disruption row(s) generated")
+
+        elif rec.skill == "scatac_accessibility_differential":
+            findings.append(
+                "scATAC readiness: "
+                f"W={results.get('case_manifest_cells', 0):,} vs B={results.get('control_manifest_cells', 0):,} Juvenile manifest cells"
+            )
+
+        elif rec.skill == "multiomics_mechanism_prioritization":
+            findings.append(f"Mechanism prioritization: {results.get('n_prioritized_hypotheses', 0)} hypothesis/hypotheses ranked")
+
+        elif rec.skill == "workflow_gap_detector":
+            findings.append(f"Workflow evolution: {results.get('n_gaps', 0)} gap(s) recorded for skill/MCP improvement")
 
     return findings[:5]
 
@@ -1017,6 +1309,11 @@ def _status_value(value, default: str = "not recorded") -> str:
     return str(value)
 
 
+def _format_count(value, default: str = "not recorded") -> str:
+    """Format count-like values without assuming they are numeric."""
+    return _status_value(value, default=default)
+
+
 def _join_finding_sentences(findings: list[str], limit: int = 3) -> str:
     """Join finding bullets into a clean prose sentence without doubled periods."""
     clean = [str(item).strip().rstrip(".") for item in findings[:limit] if str(item).strip()]
@@ -1315,6 +1612,139 @@ def _report_records(ctx) -> list:
     return _dedupe_records(list(getattr(ctx.state, "records", [])))
 
 
+def _write_reproducibility_scripts(ctx, report_dir: Path) -> dict[str, str]:
+    """Write run-local scripts that document how to replay the WGS CLI workflow."""
+    report_dir.mkdir(parents=True, exist_ok=True)
+    records = _report_records(ctx) if ctx is not None else []
+    env = {}
+    settings = getattr(ctx, "settings", None)
+    for key, attr in (
+        ("BANK_ID", "bank_id"),
+        ("BIOBANK_NAME", "biobank_name"),
+        ("BIOBANK_ABBREVIATION", "biobank_abbreviation"),
+        ("DATA_DIR", "data_dir"),
+        ("RAW_DIR", "raw_dir"),
+        ("SUBJECT_ID_COL", "subject_id_col"),
+    ):
+        value = getattr(settings, attr, None) if settings is not None else None
+        if value:
+            env[key] = str(value)
+    env.setdefault("BANK_ID", "virtualcell")
+    env.setdefault("VC_WGS_VCF_DIR", "/Files/ResultData/BW_WGS_vcf")
+    env.setdefault("PLAN_EXTERNAL_COUNCIL_POLICY", "never")
+    env.setdefault("PLAN_REVIEW_HOOK_MODE", "never")
+    env.setdefault("PLAN_REVIEW_REPAIR_MODE", "never")
+    env.setdefault("AUTO_DISCOVER_MODELS", "false")
+    env.setdefault("MULTI_MODEL_ENABLED", "false")
+    env.setdefault("ASYNC_RUNTIME_ENABLED", "false")
+
+    plan_lines = []
+    for idx, rec in enumerate(records, 1):
+        skill_name = getattr(rec, "skill", "")
+        if not skill_name or skill_name == "generate_report":
+            continue
+        args = getattr(rec, "args", {}) or {}
+        plan_lines.append({
+            "step": idx,
+            "skill": skill_name,
+            "args": args,
+        })
+
+    replay_task = (
+        "### 任务背景\n"
+        "你是一名生物信息学分析专家。现有一套白癜风相关的全基因组测序（WGS）数据，"
+        "需要对 VCF 变异文件执行标准分析流程，重点比较 Juvenile_White vs Vitiligo_White。\n\n"
+        "请完整执行：VCF 合并和 QC、标准注释、PCA、亲缘关系、Juvenile_White vs "
+        "Vitiligo_White 关联分析、罕见变异 burden、功能富集、候选基因解读、相关论文调研/"
+        "论文复现可行性说明、Action Graph 记录、Markdown/HTML 报告输出。"
+    )
+
+    manifest = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "entrypoint": "python -m biobank_agent.cli",
+        "conda_env": "biobank-agent",
+        "environment": env,
+        "replay_task": replay_task,
+        "executed_steps": plan_lines,
+        "notes": [
+            "Set REPORTS_DIR, MEMORY_DIR and PLANS_DIR to writable run-local directories before replay.",
+            "The default VirtualCell fallback VCF directory is /Files/ResultData/BW_WGS_vcf.",
+            "Large full-genome runs may require widening the deterministic chr22 validation window used by CLI E2E tests.",
+        ],
+    }
+    manifest_path = report_dir / "reproducibility_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+
+    shell_path = report_dir / "run_reproduce_wgs.sh"
+    env_exports = "\n".join(f"export {key}={json.dumps(value)}" for key, value in sorted(env.items()))
+    shell_text = f"""#!/usr/bin/env bash
+set -euo pipefail
+
+# Reproduce the BioBank Agent WGS CLI workflow that generated this report.
+# Run from the repository root with the biobank-agent conda environment available.
+REPORTS_DIR="${{REPORTS_DIR:-reports/reproduce_wgs_cli}}"
+MEMORY_DIR="${{MEMORY_DIR:-reports/reproduce_wgs_cli_memory}}"
+PLANS_DIR="${{PLANS_DIR:-reports/reproduce_wgs_cli_plans}}"
+mkdir -p "$REPORTS_DIR" "$MEMORY_DIR" "$PLANS_DIR"
+export REPORTS_DIR MEMORY_DIR PLANS_DIR
+{env_exports}
+
+conda run -n biobank-agent python -m biobank_agent.cli <<'BIOBANK_AGENT_INPUT'
+/plan {replay_task}
+/plan-approve
+quit
+BIOBANK_AGENT_INPUT
+"""
+    shell_path.write_text(shell_text, encoding="utf-8")
+    shell_path.chmod(shell_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    python_path = report_dir / "run_reproduce_wgs.py"
+    python_text = f'''#!/usr/bin/env python
+"""Replay the BioBank Agent WGS CLI workflow for this report."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+REPLAY_TASK = {replay_task!r}
+ENVIRONMENT = {env!r}
+
+
+def main() -> int:
+    env = os.environ.copy()
+    env.update({{key: str(value) for key, value in ENVIRONMENT.items()}})
+    env.setdefault("REPORTS_DIR", "reports/reproduce_wgs_cli")
+    env.setdefault("MEMORY_DIR", "reports/reproduce_wgs_cli_memory")
+    env.setdefault("PLANS_DIR", "reports/reproduce_wgs_cli_plans")
+    for key in ("REPORTS_DIR", "MEMORY_DIR", "PLANS_DIR"):
+        Path(env[key]).mkdir(parents=True, exist_ok=True)
+    stdin_text = f"/plan {{REPLAY_TASK}}\\n/plan-approve\\nquit\\n"
+    return subprocess.run(
+        [sys.executable, "-m", "biobank_agent.cli"],
+        input=stdin_text,
+        text=True,
+        env=env,
+        check=False,
+    ).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+    python_path.write_text(python_text, encoding="utf-8")
+    python_path.chmod(python_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    return {
+        "manifest": str(manifest_path),
+        "shell_script": str(shell_path),
+        "python_script": str(python_path),
+    }
+
+
 @skill(
     name="generate_report",
     description="Generate a structured analysis report from all session analyses. "
@@ -1337,6 +1767,16 @@ def _report_records(ctx) -> list:
             "description": "Optional report directory to overwrite; defaults to the active session report directory",
             "default": "",
         },
+        "polish": {
+            "type": "boolean",
+            "description": "Polish final Markdown/HTML through the academic report polisher before returning artifacts",
+            "default": True,
+        },
+        "polish_mode": {
+            "type": "string",
+            "description": "Report polishing mode",
+            "default": "academic",
+        },
     },
     required=[],
 )
@@ -1344,6 +1784,8 @@ def generate_report(
     title: str = "Biobank Analysis Report",
     format: str = "report",
     output_dir: str = "",
+    polish: bool = True,
+    polish_mode: str = "academic",
     *,
     ctx=None,
 ) -> dict:
@@ -1358,6 +1800,7 @@ def generate_report(
     report_dir = Path(output_dir).expanduser() if output_dir else ctx.report_dir
     report_dir.mkdir(parents=True, exist_ok=True)
     _materialize_report_figures(ctx, report_dir)
+    reproducibility_artifacts = _write_reproducibility_scripts(ctx, report_dir)
 
     if format == "dual":
         technical_sections = _build_report_sections(title, ctx)
@@ -1372,10 +1815,24 @@ def generate_report(
         technical_path.write_text(technical_content, encoding="utf-8")
         nature_path.write_text(nature_content, encoding="utf-8")
 
+        polish_results: dict[str, dict] = {}
+        if polish:
+            polish_results["markdown"] = polish_markdown_report(md_path, mode=polish_mode, strict=False)
+            polish_results["technical_markdown"] = polish_markdown_report(technical_path, mode=polish_mode, strict=False)
+            polish_results["nature_markdown"] = polish_markdown_report(nature_path, mode=polish_mode, strict=False)
+            technical_content = md_path.read_text(encoding="utf-8")
+            nature_content = nature_path.read_text(encoding="utf-8")
+
         html_path = _write_html(technical_content, title, report_dir)
         nature_html_path = _write_html(nature_content, title, report_dir, stem="report_nature")
         css_md_path = report_dir / "_report_with_css.md"
         nature_css_md_path = report_dir / "_report_nature_with_css.md"
+        css_polish_results: dict[str, dict] = {}
+        if polish:
+            if css_md_path.exists():
+                css_polish_results["markdown_with_css"] = polish_markdown_report(css_md_path, mode=polish_mode, strict=False)
+            if nature_css_md_path.exists():
+                css_polish_results["nature_markdown_with_css"] = polish_markdown_report(nature_css_md_path, mode=polish_mode, strict=False)
 
         result = {
             "report_dir": str(report_dir),
@@ -1391,8 +1848,13 @@ def generate_report(
                 "nature_markdown_with_css": str(nature_css_md_path) if nature_css_md_path.exists() else None,
                 "nature_html": str(nature_html_path) if nature_html_path else None,
             },
+            "reproducibility_artifacts": reproducibility_artifacts,
             "n_sections": len(_analysis_records(_report_records(ctx))),
             "n_figures": len(_logical_figures(ctx)),
+            "polished": bool(polish),
+            "polish_mode": polish_mode if polish else "",
+            "polisher": polish_results,
+            "polisher_css": css_polish_results,
         }
         return _attach_report_artifact_status(
             result,
@@ -1411,10 +1873,17 @@ def generate_report(
     md_content = _render_markdown(sections)
     md_path = report_dir / "report.md"
     md_path.write_text(md_content)
+    polish_result: dict | None = None
+    if polish:
+        polish_result = polish_markdown_report(md_path, mode=polish_mode, strict=False)
+        md_content = md_path.read_text(encoding="utf-8")
 
     # Write HTML with embedded CSS
     html_path = _write_html(md_content, title, report_dir)
     css_md_path = report_dir / "_report_with_css.md"
+    css_polish_result: dict | None = None
+    if polish and css_md_path.exists():
+        css_polish_result = polish_markdown_report(css_md_path, mode=polish_mode, strict=False)
 
     result = {
         "report_dir": str(report_dir),
@@ -1422,8 +1891,13 @@ def generate_report(
         "markdown_with_css": str(css_md_path) if css_md_path.exists() else None,
         "html": str(html_path) if html_path else None,
         "format": format,
+        "reproducibility_artifacts": reproducibility_artifacts,
         "n_sections": len(_analysis_records(_report_records(ctx))),
         "n_figures": len(_logical_figures(ctx)),
+        "polished": bool(polish),
+        "polish_mode": polish_mode if polish else "",
+        "polisher": polish_result or {},
+        "polisher_css": css_polish_result or {},
     }
     return _attach_report_artifact_status(
         result,
@@ -1628,6 +2102,9 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
     has_model = bool(evidence_summary.get("model") or getattr(ctx.state, "model_metadata", {}))
     has_feature_importance = any(r.skill == "feature_importance" for r in records)
     has_trajectory = any(r.skill == "trajectory_tokenize" for r in records)
+    wgs_skills = {"vcf_qc", "vcf_pca", "vcf_kinship", "vcf_association", "vcf_annotation", "vcf_burden_test", "pathway_enrichment"}
+    has_wgs = any(r.skill in wgs_skills for r in records)
+    has_icd10 = any(r.skill in ("prevalence", "cohort_card", "phenotype_harmonize") for r in records)
     empty_trajectory = any(
         r.skill == "trajectory_tokenize"
         and str(r.key_results.get("status", "")).upper() == "PARTIAL"
@@ -1664,7 +2141,13 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
         )
         keywords = f"{bank_name}, longitudinal trajectories, feasibility, governance, epidemiology"
     else:
-        method_bits = ["Case-control cohorts were constructed from ICD-10 coded diagnoses."]
+        method_bits = []
+        if has_wgs and not has_icd10:
+            method_bits.append("WGS VCF data were processed through a quality control, population structure, and association analysis pipeline.")
+        elif has_icd10:
+            method_bits.append("Case-control cohorts were constructed from ICD-10 coded diagnoses.")
+        else:
+            method_bits.append("Biomarker and phenotype data were analysed using the configured data layer.")
         if has_trajectory:
             method_bits.append(
                 "Longitudinal fields were tokenized as a HealthFormer-style feasibility layer."
@@ -1681,10 +2164,13 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
             "disease-associated biomarkers and evaluate discrimination evidence. "
             f"**Methods:** {' '.join(method_bits)} "
             "**Results:** " + finding_sentence + ". "
-            "**Conclusions:** These findings support an internal UKB feasibility workflow; "
+            f"**Conclusions:** These findings support an internal {bank_name} feasibility workflow; "
             "prospective incident-risk or actionable-biomarker claims require date-aware cohort construction and independent validation."
         )
-        keywords = f"{bank_name}, biomarkers, machine learning, disease prediction, epidemiology"
+        if has_wgs:
+            keywords = f"{bank_name}, whole genome sequencing, association analysis, candidate genes, epidemiology"
+        else:
+            keywords = f"{bank_name}, biomarkers, machine learning, disease prediction, epidemiology"
     sections.append(PAPER_ABSTRACT.format(
         abstract=abstract,
         keywords=keywords,
@@ -1700,18 +2186,30 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
             "limits on any forecast interpretation."
         )
     else:
-        measurement_phrase = (
-            "coded diagnoses alongside repeated biomarker, "
-            "blood pressure and anthropometric measurements where available"
-            if has_trajectory else
-            "coded diagnoses alongside blood biochemistry, "
-            "haematology, and anthropometric measurements"
-        )
-        analysis_phrase = (
-            "characterise disease cohorts, assess trajectory feasibility and identify aggregate biomarker signatures"
-            if has_trajectory else
-            "characterise disease cohorts and identify aggregate biomarker signatures"
-        )
+        if has_wgs and not has_icd10:
+            measurement_phrase = (
+                "whole genome sequencing (WGS) data processed through quality control, "
+                "population structure analysis, and variant association testing"
+            )
+            analysis_phrase = (
+                "identify candidate genetic variants and pathways associated with the phenotype of interest"
+            )
+        elif has_trajectory:
+            measurement_phrase = (
+                "coded diagnoses alongside repeated biomarker, "
+                "blood pressure and anthropometric measurements where available"
+            )
+            analysis_phrase = (
+                "characterise disease cohorts, assess trajectory feasibility and identify aggregate biomarker signatures"
+            )
+        else:
+            measurement_phrase = (
+                "coded diagnoses alongside blood biochemistry, "
+                "haematology, and anthropometric measurements"
+            )
+            analysis_phrase = (
+                "characterise disease cohorts and identify aggregate biomarker signatures"
+            )
         intro = (
             f"The {bank_name} is {bank_desc}. "
             "This rich resource enables systematic "
@@ -1732,11 +2230,24 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
         )
     elif ctx.state.cohorts:
         for name, df in ctx.state.cohorts.items():
-            n_cases = int(df["label"].sum()) if "label" in df.columns else "N/A"
-            cohort_info += (
-                f"For {name}, {n_cases:,} cases were identified from coded diagnoses "
-                f"and matched with {len(df) - n_cases:,} controls. "
-            )
+            if "label" in df.columns:
+                n_cases = int(df["label"].sum())
+                n_controls = len(df) - n_cases
+                cohort_info += (
+                    f"For {name}, {_format_count(n_cases)} cases were identified from coded diagnoses "
+                    f"and matched with {_format_count(n_controls)} controls. "
+                )
+            elif "phenotype_group" in df.columns:
+                group_counts = df["phenotype_group"].value_counts(dropna=False).to_dict()
+                group_text = ", ".join(
+                    f"{k}={v}" for k, v in sorted(group_counts.items(), key=lambda item: str(item[0]))
+                )
+                cohort_info += (
+                    f"For {name}, {len(df):,} WGS samples were available across phenotype groups "
+                    f"({group_text}). "
+                )
+            else:
+                cohort_info += f"For {name}, {len(df):,} samples were available for analysis. "
 
     model_info = ""
     if evidence_summary.get("model"):
@@ -1784,35 +2295,53 @@ def _build_paper_sections(title: str, ctx) -> list[str]:
             "before any forecast interpretation. Guardrail review checked unsupported temporal, causal and privacy claims."
         )
     else:
-        measurement_sentence = (
-            "Biomarker, blood pressure and anthropometric measurements were obtained from baseline and repeated "
-            "assessment instances where available; exact elapsed time should be interpreted according to source metadata. "
-            if has_trajectory else
-            "Biomarker measurements were obtained from baseline assessment. "
-        )
-        study_population = (
-            f"This study utilised data from the {bank_name} cohort. "
-            f"{cohort_info}"
-            "Diagnoses were extracted from coded diagnosis records using "
-            f"ICD-10 coding. {measurement_sentence}"
-        )
+        if has_wgs and not has_icd10:
+            measurement_sentence = "WGS VCF data were processed per sample and merged for multi-sample analyses. "
+            study_population = (
+                f"This study utilised data from the {bank_name} cohort. "
+                f"{cohort_info}"
+                f"{measurement_sentence}"
+            )
+        else:
+            measurement_sentence = (
+                "Biomarker, blood pressure and anthropometric measurements were obtained from baseline and repeated "
+                "assessment instances where available; exact elapsed time should be interpreted according to source metadata. "
+                if has_trajectory else
+                "Biomarker measurements were obtained from baseline assessment. "
+            )
+            study_population = (
+                f"This study utilised data from the {bank_name} cohort. "
+                f"{cohort_info}"
+                "Diagnoses were extracted from coded diagnosis records using "
+                f"ICD-10 coding. {measurement_sentence}"
+            )
         trajectory_method = (
             "Trajectory tokenization was analysed as a feasibility branch and not treated as an externally validated forecast. "
             if has_trajectory else
             ""
         )
-        statistical_analysis = (
-            "Continuous variables were compared using Mann-Whitney U tests. "
-            "Categorical variables were compared using chi-squared tests. "
-            "Multiple testing correction was applied using the Benjamini-Hochberg "
-            f"procedure. {trajectory_method}{model_info}"
-            + (
-                "Model performance was assessed using area under the receiver operating "
-                "characteristic curve (AUC-ROC) with 95% confidence intervals."
-                if has_model else
-                "No predictive model was trained in this session; modelling claims are therefore not made."
+        if has_wgs and not has_icd10:
+            statistical_analysis = (
+                "Per-sample VCF quality control assessed call rate, heterozygosity ratio, Ti/Tv ratio, "
+                "mean depth and genotype quality. Hardy-Weinberg equilibrium was tested on merged pass-sample VCFs. "
+                "Population structure was assessed by genotype PCA and genomic relationship matrix-based kinship estimation. "
+                "Case-control association used Fisher's exact test per biallelic variant with Bonferroni and FDR correction. "
+                "Gene-level burden testing used collapsing Fisher's exact and Madsen-Browning weighted sum tests. "
+                "Pathway enrichment used Fisher's exact overrepresentation analysis with FDR correction."
             )
-        )
+        else:
+            statistical_analysis = (
+                "Continuous variables were compared using Mann-Whitney U tests. "
+                "Categorical variables were compared using chi-squared tests. "
+                "Multiple testing correction was applied using the Benjamini-Hochberg "
+                f"procedure. {trajectory_method}{model_info}"
+                + (
+                    "Model performance was assessed using area under the receiver operating "
+                    "characteristic curve (AUC-ROC) with 95% confidence intervals."
+                    if has_model else
+                    "No predictive model was trained in this session; modelling claims are therefore not made."
+                )
+            )
 
     sections.append(PAPER_METHODS.format(
         study_population=study_population,

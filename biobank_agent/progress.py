@@ -6,13 +6,16 @@ and final reports. Uses Rich Live for real-time terminal updates.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from threading import Event, RLock, Thread
 from typing import TYPE_CHECKING, Any
 
+from rich.cells import cell_len
 from rich.console import Console, Group
 from rich.live import Live
+from rich.markup import escape as _rich_escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -20,6 +23,8 @@ from rich.tree import Tree
 
 if TYPE_CHECKING:
     from .planner import LongHorizonPlan, PlanStep
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -79,8 +84,10 @@ DASHBOARD_STATUS_ICONS = {
     "success": "✓",
     "done": "✓",
     "failed": "✗",
+    "error": "✗",
     "warning": "!",
     "skipped": "⊘",
+    "cancelled": "⊘",
 }
 
 DASHBOARD_STATUS_STYLES = {
@@ -89,8 +96,65 @@ DASHBOARD_STATUS_STYLES = {
     "success": "green",
     "done": "green",
     "failed": "bold red",
+    "error": "bold red",
     "warning": "yellow",
     "skipped": "dim",
+    "cancelled": "dim",
+}
+
+
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# Map a provider model id (e.g. "moonshotai/kimi-k2.6") to a short, friendly
+# name shown live in the dashboard ("kimi"). Falls back to the trailing path
+# segment so unknown models still render something sensible.
+_MODEL_SHORT_KEYS = ("deepseek", "kimi", "moonshot", "glm", "qwen", "gpt", "claude", "gemini", "llama", "mistral")
+
+
+def _short_model(model: str) -> str:
+    raw = (model or "").strip()
+    if not raw:
+        return "model"
+    low = raw.lower()
+    for key in _MODEL_SHORT_KEYS:
+        if key in low:
+            return "kimi" if key == "moonshot" else key
+    return raw.split("/")[-1] or "model"
+
+
+def _elapsed_str(seconds: float) -> str:
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+def _styled(text: Any, style: str) -> str:
+    """Wrap ``text`` in a Rich style tag — but ONLY when ``style`` is non-empty.
+
+    A status that is absent from ``DASHBOARD_STATUS_STYLES`` used to default to
+    ``""``, so ``f"[{style}]{icon}[/{style}]"`` rendered ``[]<icon>[/]`` and the
+    unmatched ``[/]`` raised ``MarkupError("closing tag '[/]' has nothing to
+    close")`` — the live ``/plan`` crash. When the style is empty we instead
+    escape the text and emit no tag, so no dynamic style can ever inject an
+    unbalanced close tag. ``text`` is assumed already markup-safe (a fixed icon)
+    or is escaped here; callers pass dynamic prose through ``_rich_escape``/
+    ``_sanitize`` separately."""
+    return f"[{style}]{text}[/{style}]" if style else _rich_escape(str(text))
+
+
+# Activity verb shown per stage so an active row reads "kimi · drafting · 12s".
+_STAGE_ACTIVITY = {
+    "Clarification": "clarifying",
+    "Research setup": "scoping",
+    "Planning": "drafting",
+    "External council": "critiquing",
+    "Debate": "debating",
+    "Merge": "merging",
+    "Validation": "validating",
+    "Review": "reviewing",
 }
 
 
@@ -99,7 +163,9 @@ class PlanRunDashboard:
 
     This sits above per-step execution progress and shows what the agent is
     doing during planning, external-agent consultation, validation, repair, and
-    review-hook phases.
+    review-hook phases. When stages fan out to parallel model calls it also
+    renders one live row per model (name · activity · persona · ticking timer)
+    plus a scrolling history of completed calls with their durations.
     """
 
     PHASES = [
@@ -108,6 +174,7 @@ class PlanRunDashboard:
         "Research setup",
         "Planning",
         "External council",
+        "Debate",
         "Merge",
         "Validation",
         "Review",
@@ -122,6 +189,10 @@ class PlanRunDashboard:
         self.title = title
         self.events: list[PlanRunEvent] = []
         self._phase_status: dict[str, PlanRunEvent] = {}
+        # Per-subagent live state. ``_active`` maps a subagent label (e.g.
+        # "candidate-2") to its live row; ``_history`` keeps completed rows.
+        self._active: dict[str, dict[str, Any]] = {}
+        self._history: list[dict[str, Any]] = []
         self._live: Live | None = None
         self._start_time: float = 0.0
         self._refresh_per_second = 10.0
@@ -129,6 +200,7 @@ class PlanRunDashboard:
         self._refresh_thread: Thread | None = None
         self._refresh_lock = RLock()
         self._last_render_second = -1
+        self._last_render_ts = 0.0
 
     def start(self, refresh_per_second: float = 10.0) -> None:
         """Start live rendering."""
@@ -141,7 +213,10 @@ class PlanRunDashboard:
             self._build_panel(),
             console=self.console,
             refresh_per_second=self._refresh_per_second,
-            transient=False,
+            # transient=True so the live panel is erased on stop instead of being
+            # committed to scrollback. This prevents the dashboard from stacking
+            # above the final plan render (and above any later live region).
+            transient=True,
         )
         self._live.start()
         self._start_background_refresh()
@@ -152,6 +227,11 @@ class PlanRunDashboard:
         if self._live:
             self._live.stop()
             self._live = None
+        # Clear live rows under the lock so any orphaned worker still streaming
+        # after teardown (its HTTP read is not interruptible) finds no active row
+        # in note_partial and is dropped — atomic w.r.t. the delta path.
+        with self._refresh_lock:
+            self._active.clear()
 
     def _start_background_refresh(self) -> None:
         """Rebuild the renderable on a timer so elapsed time advances without new events."""
@@ -176,17 +256,72 @@ class PlanRunDashboard:
         """Force a live redraw if rendering is active."""
         self._refresh(force=False)
 
+    # Min interval between *background* (timer/spinner) redraws. ~8 Hz keeps the
+    # spinner (which steps at 8 fps) and the live timers smooth without rebuilding
+    # the whole panel 10x/s. Milestone redraws (force=True) bypass this floor.
+    _MIN_REDRAW_INTERVAL = 0.12
+
     def _refresh(self, *, force: bool) -> None:
-        """Redraw at most once per displayed second unless an event forces it."""
+        """Redraw the live panel. The background thread paces calls at
+        ``refresh_per_second``; this floors background rebuilds at ~8 Hz to avoid
+        CPU waste/flicker. ``record`` forces an immediate redraw on milestones.
+        Both go through the lock the mutators also hold."""
         live = self._live
         if not live:
             return
-        current_second = int(time.time() - self._start_time) if self._start_time else 0
-        if not force and current_second == self._last_render_second:
-            return
         with self._refresh_lock:
-            self._last_render_second = current_second
-            live.update(self._build_panel())
+            now = time.time()
+            if not force and (now - self._last_render_ts) < self._MIN_REDRAW_INTERVAL:
+                return
+            self._last_render_ts = now
+            # Defense in depth: a single malformed frame (e.g. a Rich MarkupError
+            # from some future dynamic string) must NEVER kill the background
+            # refresh thread or abort a milestone record(). Degrade to a skipped
+            # frame and keep going — the next event/tick repaints.
+            try:
+                live.update(self._build_panel())
+            except Exception:  # pragma: no cover - render must be crash-proof
+                logger.debug("dashboard frame render failed; skipping frame", exc_info=True)
+
+    _TERMINAL_STATUSES = {"success", "error", "done", "failed", "warning", "skipped", "cancelled"}
+
+    def _update_subagent(self, phase: str, status: str, now: float, metadata: dict[str, Any]) -> None:
+        """Track per-model live rows from events carrying a ``subagent`` label.
+        A running event opens/updates an active row (timestamped); a terminal
+        event moves it to history with its final duration. Called under the
+        refresh lock by ``record`` so the refresh thread never reads a row that
+        is being mutated."""
+        label = metadata.get("subagent")
+        if not label:
+            return
+        if status in self._TERMINAL_STATUSES:
+            row = self._active.pop(label, None)
+            start = row.get("start_ts", now) if row else now
+            elapsed = metadata.get("elapsed_s")
+            if elapsed is None:
+                elapsed = now - start
+            self._history.append({
+                "label": label,
+                "stage": phase,
+                "status": status,
+                "model": metadata.get("model") or (row or {}).get("model", ""),
+                "persona": metadata.get("persona") or (row or {}).get("persona"),
+                "elapsed_s": float(elapsed),
+            })
+            if len(self._history) > 200:  # bound memory on long runs
+                self._history = self._history[-200:]
+        else:
+            row = self._active.get(label) or {"start_ts": now, "partial": ""}
+            row["stage"] = phase
+            if metadata.get("model"):
+                row["model"] = metadata["model"]
+            if metadata.get("role"):
+                row["role"] = metadata["role"]
+            if metadata.get("persona"):
+                row["persona"] = metadata["persona"]
+            if metadata.get("activity"):
+                row["activity"] = metadata["activity"]
+            self._active[label] = row
 
     def record(
         self,
@@ -197,63 +332,189 @@ class PlanRunDashboard:
         metadata: dict[str, Any] | None = None,
     ) -> PlanRunEvent:
         """Record and render a phase-level event."""
-        if not self._start_time:
-            self._start_time = time.time()
-        event = PlanRunEvent(
-            phase=phase,
-            actor=actor,
-            status=status,
-            message=message,
-            elapsed_s=time.time() - self._start_time,
-            metadata=metadata or {},
-        )
-        self.events.append(event)
-        self._phase_status[phase] = event
+        # Mutate shared state under the same lock the background refresh thread
+        # uses to read it in _build_panel, so concurrent record()/refresh() can't
+        # iterate _phase_status / _active while they are being modified.
+        md = metadata or {}
+        with self._refresh_lock:
+            if not self._start_time:
+                self._start_time = time.time()
+            now = time.time()
+            event = PlanRunEvent(
+                phase=phase,
+                actor=actor,
+                status=status,
+                message=message,
+                elapsed_s=now - self._start_time,
+                metadata=md,
+            )
+            self.events.append(event)
+            self._phase_status[phase] = event
+            self._update_subagent(phase, status, now, md)
         self._refresh(force=True)
         return event
 
-    def _build_panel(self) -> Panel:
-        phase_table = Table(show_header=False, box=None, padding=(0, 1))
-        phase_table.add_column("Phase", ratio=1)
-        phase_table.add_column("Status", ratio=3)
+    def note_partial(self, label: str, text: str, *, tail_cells: int = 160) -> None:
+        """Append streamed text to an active model row's partial buffer (Phase C).
 
-        known_phases = list(self.PHASES)
-        for phase in self._phase_status:
-            if phase not in known_phases:
-                known_phases.append(phase)
+        Updates state ONLY (no forced redraw) so token-rate streaming cannot
+        saturate rendering; the background refresh thread picks it up. Drops the
+        delta if the row already finished. Text is sanitised before display in
+        ``_build_panel``."""
+        # This is the AUTHORITATIVE, atomic guard against late/orphaned deltas:
+        # the check-and-append happens under the same lock that ``record`` uses to
+        # pop a finished row to history (and that ``stop`` uses to clear all rows),
+        # so a delta that slipped past the council's (lock-free, best-effort)
+        # cancel checks still cannot land on a completed row or after the dashboard
+        # has stopped — closing the TOCTOU window at the consumer.
+        with self._refresh_lock:
+            row = self._active.get(label)
+            if row is None:  # completed / timed-out / dashboard stopped -> drop
+                return
+            buf = (row.get("partial", "") + (text or ""))
+            # keep only the visible tail (by display cells)
+            while buf and cell_len(buf) > tail_cells:
+                buf = buf[1:]
+            row["partial"] = buf
 
-        for phase in known_phases:
+    @staticmethod
+    def _sanitize(text: str, limit: int = 200) -> str:
+        """Strip newlines/CR/control chars and escape markup for safe single-line
+        display of model-derived text."""
+        cleaned = "".join(ch for ch in (text or "") if ch == " " or (ch.isprintable() and ch not in "\r\n"))
+        cleaned = cleaned.strip()
+        if cell_len(cleaned) > limit:
+            while cell_len(cleaned) > limit and cleaned:
+                cleaned = cleaned[1:]
+            cleaned = "…" + cleaned
+        return _rich_escape(cleaned)
+
+    def _active_renderable(self, max_rows: int = 8) -> Table | None:
+        if not self._active:
+            return None
+        now = time.time()
+        table = Table(show_header=False, box=None, padding=(0, 1))
+        table.add_column(width=2)              # spinner
+        table.add_column(min_width=8)          # model
+        table.add_column(width=14, no_wrap=True, overflow="ellipsis")  # activity · persona
+        table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")   # streamed partial
+        table.add_column(justify="right", width=7)  # timer
+        frame = _SPINNER_FRAMES[int(now * 8) % len(_SPINNER_FRAMES)]
+        # Stable order: by start time. Cap rows so a wide fan-out cannot overflow.
+        rows = sorted(self._active.items(), key=lambda kv: kv[1].get("start_ts", now))[: max(1, max_rows)]
+        for _label, row in rows:
+            model = _rich_escape(_short_model(row.get("model", "")))
+            # An explicit per-job activity verb (e.g. "revising R2") takes
+            # precedence over the stage default; it is model/round-derived, so
+            # escape it. Falls back to the stage verb ("drafting"/"debating").
+            activity = _rich_escape(str(row.get("activity") or _STAGE_ACTIVITY.get(row.get("stage", ""), "working")))
+            persona = row.get("persona")
+            label = f"[cyan]{activity}[/cyan]"
+            if persona:
+                label += f" [dim]· {_rich_escape(str(persona))}[/dim]"
+            partial = row.get("partial", "")
+            stream = f"[white]{self._sanitize(partial, 100)}[/white]" if partial else ""
+            timer = _elapsed_str(now - row.get("start_ts", now))
+            table.add_row(f"[green]{frame}[/green]", f"[bold]{model}[/bold]", label, stream, f"[dim]{timer}[/dim]")
+        return table
+
+    def _phases_renderable(self) -> Table:
+        # Compact multi-column grid of the whole pipeline so each phase name
+        # stays intact on one cell (no mid-word wrap) while keeping the panel
+        # short — 12 phases across 3 columns is 4 rows.
+        grid = Table.grid(padding=(0, 3))
+        cols = 3
+        for _ in range(cols):
+            grid.add_column()
+        cells: list[str] = []
+        for phase in self.PHASES:
             event = self._phase_status.get(phase)
-            if event:
-                icon = DASHBOARD_STATUS_ICONS.get(event.status, "•")
-                style = DASHBOARD_STATUS_STYLES.get(event.status, "")
-                actor = f"[dim]{event.actor}[/dim] " if event.actor else ""
-                message = event.message or event.status
-                status_text = (
-                    f"[{style}]{icon}[/{style}] {actor}{message}"
-                    if style
-                    else f"{icon} {actor}{message}"
-                )
-            else:
-                status_text = "[dim]⬚ pending[/dim]"
-            phase_table.add_row(f"[bold]{phase}[/bold]", status_text)
+            status = event.status if event else "pending"
+            icon = DASHBOARD_STATUS_ICONS.get(status, "⬚") if event else "⬚"
+            style = DASHBOARD_STATUS_STYLES.get(status, "dim")
+            cells.append(f"{_styled(icon, style)} {_rich_escape(str(phase))}")
+        for i in range(0, len(cells), cols):
+            chunk = cells[i:i + cols] + [""] * (cols - len(cells[i:i + cols]))
+            grid.add_row(*[Text.from_markup(c) for c in chunk])
+        return grid
 
-        recent_lines = []
-        for event in self.events[-5:]:
-            icon = DASHBOARD_STATUS_ICONS.get(event.status, "•")
-            recent_lines.append(
-                f"[dim]{int(event.elapsed_s):5d}s[/dim] {icon} [bold]{event.phase}[/bold] "
-                f"[cyan]{event.actor}[/cyan]: {event.message}"
+    def _recent_renderable(self, limit: int = 5) -> Text:
+        # Last few milestone events with their messages. Skip per-subagent
+        # "dispatch" chatter (running rows live in the Active models table);
+        # keep phase milestones and subagent completions.
+        rows = [
+            e for e in self.events
+            if not (e.metadata.get("subagent") and e.status not in self._TERMINAL_STATUSES)
+        ][-limit:]
+        if not rows:
+            return Text.from_markup("[dim]starting…[/dim]")
+        lines: list[str] = []
+        for e in rows:
+            icon = DASHBOARD_STATUS_ICONS.get(e.status, "•")
+            style = DASHBOARD_STATUS_STYLES.get(e.status, "dim")
+            msg = self._sanitize(e.message, 80)
+            lines.append(
+                f"[dim]{_elapsed_str(e.elapsed_s):>6}[/dim] {_styled(icon, style)} "
+                f"[bold]{_rich_escape(str(e.phase))}[/bold] [dim]{msg}[/dim]"
             )
-        recent = Text.from_markup("\n".join(recent_lines) if recent_lines else "[dim]waiting...[/dim]")
+        return Text.from_markup("\n".join(lines))
+
+    def _history_renderable(self, limit: int = 6) -> Text | None:
+        if not self._history:
+            return None
+        lines: list[str] = []
+        for row in self._history[-limit:]:
+            icon = DASHBOARD_STATUS_ICONS.get(row.get("status", ""), "•")
+            style = DASHBOARD_STATUS_STYLES.get(row.get("status", ""), "dim")
+            model = _rich_escape(_short_model(row.get("model", "")))
+            persona = row.get("persona")
+            tag = f" [dim]· {_rich_escape(str(persona))}[/dim]" if persona else ""
+            dur = _elapsed_str(row.get("elapsed_s", 0))
+            lines.append(
+                f"[dim]{dur:>6}[/dim] {_styled(icon, style)} [bold]{model}[/bold] "
+                f"[dim]{_rich_escape(str(row.get('label', '')))}[/dim]{tag}"
+            )
+        return Text.from_markup("\n".join(lines))
+
+    def _build_panel(self) -> Panel:
+        # Budget rows against the terminal height so a full fan-out never makes
+        # the live panel taller than the viewport (which destabilises Rich's
+        # in-place redraw). Reserve ~12 rows for borders/padding/phase-grid/
+        # section headers, then split the rest between active + recent.
+        height = getattr(self.console.size, "height", 24) or 24
+        budget = max(4, height - 12)
+        max_active = max(2, min(8, (budget + 1) // 2))
+        max_recent = max(2, min(5, budget - max_active))
+
+        sections: list[Any] = []
+        active = self._active_renderable(max_active)
+        if active is not None:
+            sections.append(Text.from_markup("[bold]Active models[/bold]"))
+            sections.append(active)
+            sections.append(Text(""))
+        sections.append(self._phases_renderable())
+        sections.append(Text(""))
+        sections.append(Text.from_markup("[bold]Recent[/bold]"))
+        sections.append(self._recent_renderable(max_recent))
 
         elapsed = time.time() - self._start_time if self._start_time else 0
+        spin = _SPINNER_FRAMES[int(time.time() * 8) % len(_SPINNER_FRAMES)]
         return Panel(
-            Group(phase_table, Text(""), recent),
-            title=f"[bold blue]{self.title}[/bold blue] [dim]{int(elapsed)}s[/dim]",
+            Group(*sections),
+            title=f"[green]{spin}[/green] [bold blue]{self.title}[/bold blue] [dim]{_elapsed_str(elapsed)}[/dim]",
             border_style="blue",
             padding=(1, 2),
         )
+
+    def render_activity_summary(self) -> Panel | None:
+        """A static panel of completed model calls, printed to scrollback after
+        the (transient) live dashboard stops so the per-model history the user
+        asked for is preserved."""
+        with self._refresh_lock:
+            history = self._history_renderable(limit=40)
+            if history is None:
+                return None
+            return Panel(history, title="[bold]Council activity[/bold]", border_style="dim", padding=(0, 2))
 
 
 def default_failure_choices() -> list[ChoiceOption]:
@@ -287,9 +548,11 @@ def _format_choices(choices: list[ChoiceOption | dict[str, Any]]) -> str:
             key = str(raw_choice.get("key", "?"))
             title = str(raw_choice.get("title", "Option"))
             detail = str(raw_choice.get("detail", ""))
-        lines.append(f"  [bold cyan]{key}[/bold cyan]: {title}")
+        # key/title/detail may be plan-derived (e.g. a step id in the title), so
+        # escape them — an unbalanced "[/]" must not raise MarkupError here.
+        lines.append(f"  [bold cyan]{_rich_escape(str(key))}[/bold cyan]: {_rich_escape(str(title))}")
         if detail:
-            lines.append(f"     [dim]{detail}[/dim]")
+            lines.append(f"     [dim]{_rich_escape(str(detail))}[/dim]")
     lines.append("  [bold cyan]Other[/bold cyan]: Type your own repair instructions")
     return "\n".join(lines)
 
@@ -323,21 +586,24 @@ class PlanProgressDisplay:
         """Display the plan in a clear tree format for user approval."""
         tree = Tree("[bold]Execution Plan[/bold]")
         for i, step in enumerate(self.plan.steps, 1):
-            deps = f" [dim](after: {', '.join(step.depends_on)})[/dim]" if step.depends_on else ""
+            # Plan fields are LLM-derived; escape every interpolated value so a
+            # stray "[" / "[/]" can never raise MarkupError mid-render.
+            deps = f" [dim](after: {_rich_escape(', '.join(step.depends_on))})[/dim]" if step.depends_on else ""
             # Show status icon for completed steps (during re-plan)
             icon = STATUS_ICONS.get(step.status, "⬚")
             style = STATUS_STYLES.get(step.status, "")
-            label = f"[{style}]{icon} {step.description}{deps}[/{style}]" if style else f"{icon} {step.description}{deps}"
-            id_tag = f" [dim]({step.id})[/dim]" if step.id else ""
+            desc = _rich_escape(str(step.description))
+            label = f"[{style}]{icon} {desc}{deps}[/{style}]" if style else f"{icon} {desc}{deps}"
+            id_tag = f" [dim]({_rich_escape(str(step.id))})[/dim]" if step.id else ""
             node = tree.add(f"[dim]{i}.[/dim]{id_tag} {label}")
-            node.add(f"[dim]Skill:[/dim] [cyan]{step.skill}[/cyan]")
+            node.add(f"[dim]Skill:[/dim] [cyan]{_rich_escape(str(step.skill))}[/cyan]")
             if step.args:
                 args_str = ", ".join(f"{k}={v!r}" for k, v in step.args.items())
                 if len(args_str) > 80:
                     args_str = args_str[:77] + "..."
-                node.add(f"[dim]Args:[/dim] {args_str}")
+                node.add(f"[dim]Args:[/dim] {_rich_escape(args_str)}")
             if step.error:
-                node.add(f"[red]Error:[/red] {step.error}")
+                node.add(f"[red]Error:[/red] {_rich_escape(str(step.error))}")
 
         subtitle_parts = [
             "[green]/plan-approve[/green] execute",
@@ -449,13 +715,13 @@ class PlanProgressDisplay:
 
         for i, step in enumerate(self.plan.steps, 1):
             status = self._step_status.get(step.id, "pending")
-            icon = STATUS_ICONS[status]
-            style = STATUS_STYLES[status]
+            icon = STATUS_ICONS.get(status, "⬚")
+            style = STATUS_STYLES.get(status, "dim")
             table.add_row(
                 str(i),
-                f"[{style}]{icon}[/{style}]",
-                f"[{style}]{step.description}[/{style}]",
-                step.skill,
+                _styled(icon, style),
+                _styled(_rich_escape(str(step.description)), style),
+                _rich_escape(str(step.skill)),
             )
 
         # Progress bar (text-based)
@@ -466,9 +732,9 @@ class PlanProgressDisplay:
         elapsed = time.time() - self._start_time if self._start_time else 0
         progress_line = f"\n{bar} {completed}/{total} steps ({int(elapsed)}s elapsed)"
         if self._current_detail:
-            progress_line += f"\n[dim italic]↳ {self._current_detail}[/dim italic]"
+            progress_line += f"\n[dim italic]↳ {_rich_escape(str(self._current_detail))}[/dim italic]"
         if self._recent_details:
-            recent = "\n".join(f"[dim]  - {item}[/dim]" for item in self._recent_details[-4:])
+            recent = "\n".join(f"[dim]  - {_rich_escape(str(item))}[/dim]" for item in self._recent_details[-4:])
             progress_line += f"\n[dim]Recent activity:[/dim]\n{recent}"
 
         return Panel(
@@ -490,8 +756,8 @@ class PlanProgressDisplay:
         choice_text = _format_choices(choices or default_failure_choices())
         self.console.print(
             Panel(
-                f"[red bold]Step failed:[/red bold] {step_description}\n\n"
-                f"[red]{error}[/red]\n\n"
+                f"[red bold]Step failed:[/red bold] {_rich_escape(str(step_description))}\n\n"
+                f"[red]{_rich_escape(str(error))}[/red]\n\n"
                 "[dim]Choose an option or type repair instructions:[/dim]\n"
                 f"{choice_text}\n\n"
                 "[dim]Commands:[/dim] [green]/plan-option A[/green], "
@@ -507,7 +773,7 @@ class PlanProgressDisplay:
 
     def show_paused(self, reason: str = "") -> None:
         """Show paused state with resume options."""
-        reason_text = f"\n[dim]Reason: {reason}[/dim]" if reason else ""
+        reason_text = f"\n[dim]Reason: {_rich_escape(str(reason))}[/dim]" if reason else ""
         completed = sum(1 for s in self._step_status.values() if s in ("done", "skipped"))
         total = len(self.plan.steps)
 

@@ -9,14 +9,14 @@ def _record(ctx: CommandContext, arg: str) -> None:
     if not arg:
         ctx.console.print("[yellow]Usage: /record <pipeline_name>[/]")
         return
-    ctx.action("record")(arg)
+    return ctx.action("record")(arg)
 
 
 def _debate(ctx: CommandContext, arg: str) -> None:
     if not arg:
         ctx.console.print("[yellow]Usage: /debate <query>[/]")
         return
-    ctx.action("debate")(arg)
+    return ctx.action("debate")(arg)
 
 
 def commands() -> list[RegisteredCommand]:

@@ -1,17 +1,17 @@
-"""Biobank Agent core framework (v3 scaffold).
+"""Biobank Agent core framework.
 
-Streaming-first, protocol-driven modules that wrap the legacy synchronous
-Agent in agent.py. Only modules with real callers in the CLI/runtime should be
-treated as production paths; empty subpackages are migration placeholders until
-their entrypoints are wired and covered by integration tests.
+Streaming-first, protocol-driven modules shared by the runtime-backed CLI,
+tool scheduler, approval layer, memory/action graph, and TUI renderers. Public
+subpackages are expected to be wired through the runtime or covered by tests
+before they are treated as release surfaces.
 
 Layers:
     runtime.py     - AsyncAgent main loop (async generator)
     events.py      - AgentEvent enum + AgentEventBus + PII scrubbing
     compaction.py  - smart context compaction (replaces [:8000])
     tools/         - ToolHandler protocol + registry + scheduler + approval
-    memory/        - migration placeholder
-    planning/      - migration placeholder
+    memory/        - action graph and memory-facing helpers
+    planning/      - planning protocol helpers
     orchestration/ - sub-agent prototype
     evolution/     - reflexion / patch_classifier / auto_merger (M4)
     safety/        - reproducibility auto-hook / data_fingerprint / disclosure

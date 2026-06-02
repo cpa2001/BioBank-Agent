@@ -20,6 +20,7 @@ _LOCAL_DATA_ENV = {
     "ukb": ("BIOBANK_UKB_DATA_DIR", "UKB_PARQUET_DIR", "DATA_DIR"),
     "hpp": ("BIOBANK_HPP_DATA_DIR", "HPP_DATA_DIR"),
     "ckb": ("BIOBANK_CKB_DATA_DIR", "CKB_DATA_DIR"),
+    "virtualcell": ("VC_WGS_VCF_DIR", "DATA_DIR"),
 }
 
 _RAP_CREDENTIAL_ENV = (
@@ -43,6 +44,7 @@ def _path_has_bank_files(bank_id: str, path: Path) -> bool:
         "ukb": ("ukb.parquet", "hesin_diag.parquet"),
         "hpp": ("hpp_biomarkers.parquet", "hpp_diagnoses.parquet"),
         "ckb": ("ckb_biomarkers.parquet", "ckb_diagnoses.parquet"),
+        "virtualcell": ("vc_samples.parquet",),
     }.get(bank_id, ())
     return bool(expected) and all((path / name).exists() for name in expected)
 

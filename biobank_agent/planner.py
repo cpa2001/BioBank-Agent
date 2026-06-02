@@ -20,6 +20,10 @@ if TYPE_CHECKING:
     from .llm import LLMClient
     from .study_spec import StudySpec
 
+from .skills.goal_intent_classifier import classify_goal_intent
+from .skills.trajectory_profile import match_trajectory_profile
+from .skills.clarification_policy import build_clarification_questions
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,6 +100,7 @@ class LongHorizonPlan:
     planning_council: list[dict] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     clarifications: list[dict] = field(default_factory=list)
+    title: str = ""
 
     @property
     def total_steps(self) -> int:
@@ -176,7 +181,10 @@ class LongHorizonPlan:
 
     def to_markdown(self) -> str:
         """Render plan as numbered markdown checklist."""
-        lines = [f"# Plan: {self.goal}\n"]
+        heading = self.title or self.goal
+        lines = [f"# Plan: {heading}\n"]
+        if self.title and self.goal and self.goal != self.title:
+            lines.extend(["## Original Goal", self.goal, ""])
         if self.assumptions:
             lines.append("## Assumptions")
             for assumption in self.assumptions:
@@ -206,6 +214,7 @@ class LongHorizonPlan:
             "planning_council": self.planning_council,
             "assumptions": self.assumptions,
             "clarifications": self.clarifications,
+            "title": self.title,
             "steps": [
                 {
                     "id": s.id,
@@ -252,6 +261,7 @@ class LongHorizonPlan:
             planning_council=list(data.get("planning_council", []) or []),
             assumptions=list(data.get("assumptions", []) or []),
             clarifications=list(data.get("clarifications", []) or []),
+            title=str(data.get("title", "") or ""),
         )
 
 
@@ -539,6 +549,156 @@ class LongHorizonPlanner:
             and any(token in lower for token in ("trajectory", "trajectories", "progression", "risk prediction", "prediction"))
         )
 
+    @staticmethod
+    def _is_wgs_vitiligo_goal(goal: str) -> bool:
+        """Detect the VirtualCell WGS vitiligo case-control task family."""
+        lower = str(goal or "").lower()
+        text = str(goal or "")
+        has_wgs_data = any(
+            token in lower
+            for token in (
+                "wgs",
+                "vcf",
+                "genotyper.vcf",
+                "wgs_sample_info",
+                "virtualcell_wgs_vcf",
+                "bw_wgs_vcf",
+                "全基因组",
+                "基因组",
+                "变异",
+            )
+        )
+        has_grouping = (
+            "juvenile_white" in lower
+            and "vitiligo_white" in lower
+        ) or (
+            "青少年白癜风" in text
+            and ("白癜风相关" in goal or "vitiligo" in lower)
+        ) or (
+            "白癜风" in text
+            and any(token in text for token in ("青少年", "年轻", "juvenile"))
+        ) or (
+            "白癜风" in text
+            and "Clarifications:" in text
+            and "Juvenile_White" in text
+            and "Vitiligo_White" in text
+        )
+        has_analysis_intent = any(
+            token in lower
+            for token in (
+                "association",
+                "case-control",
+                "case control",
+                "pca",
+                "annotation",
+                "qc",
+                "burden",
+                "enrichment",
+                "plink",
+                "snpeff",
+                "vep",
+                "关联",
+                "注释",
+                "质控",
+                "富集",
+                "群体遗传",
+            )
+        ) or any(token in text for token in ("分析", "比较", "差异", "遗传", "研究"))
+        vitiligo_context = "vitiligo" in lower or "白癜风" in text
+        return has_wgs_data and vitiligo_context and (has_grouping or has_analysis_intent)
+
+    @staticmethod
+    def _is_virtualcell_multimodal_goal(goal: str) -> bool:
+        """Detect VirtualCell/BWhair multi-omics h5ad analysis requests."""
+        lower = str(goal or "").lower()
+        text = str(goal or "")
+        data_context = any(
+            token in lower
+            for token in (
+                "virtualcell",
+                "bwhair",
+                "bw hair",
+                "h5ad",
+                "stereo",
+                "stereo-seq",
+                "scrna",
+                "scatac",
+                "single-cell",
+                "single cell",
+                "spatial",
+                "multi-omics",
+                "multiomics",
+                "multimodal",
+                "多组学",
+                "多模态",
+                "单细胞",
+                "空间",
+                "黑白发",
+                "白发",
+                "黑发",
+            )
+        )
+        modality_context = any(
+            token in lower
+            for token in (
+                "h5ad",
+                "stereo",
+                "scrna",
+                "scatac",
+                "spatial",
+                "multi-omics",
+                "multimodal",
+                "single-cell",
+                "single cell",
+            )
+        ) or any(token in text for token in ("多组学", "多模态", "单细胞", "空间", "黑白发"))
+        analysis_intent = any(
+            token in lower
+            for token in ("analy", "summary", "inventory", "link", "integrat", "compare", "workflow", "report")
+        ) or any(token in text for token in ("分析", "比较", "整合", "读取", "总结", "报告", "关联"))
+        return data_context and modality_context and analysis_intent
+
+    def _goal_intent_profile(self, goal: str, available_skills: list[str] | None = None) -> dict[str, Any]:
+        # Planner routing must not consume the decomposition LLM call. The
+        # executable plan can still invoke ``goal_intent_classifier`` as a
+        # first-class skill, and harnesses can enable LLM-backed matching there.
+        return classify_goal_intent(goal, available_skills=available_skills)
+
+    def _trajectory_profile(self, goal: str, available_skills: list[str] | None = None) -> dict[str, Any]:
+        return match_trajectory_profile(goal, available_skills=available_skills, use_llm=False)
+
+    def _is_juvenile_hair_mechanism_goal(self, goal: str, available_skills: list[str] | None = None) -> bool:
+        """Detect Juvenile hair-whitening mechanism tasks through trajectory profiles."""
+        profile = self._trajectory_profile(goal, available_skills)
+        if profile.get("trajectory_id") == "juvenile_hair_multiomics_mechanism":
+            return float(profile.get("confidence") or 0.0) >= 0.55
+        profile = self._goal_intent_profile(goal, available_skills)
+        return (
+            profile.get("task_family") == "juvenile_hair_multiomics_mechanism"
+            and float(profile.get("confidence") or 0.0) >= 0.55
+        )
+
+    @staticmethod
+    def _default_title_for_goal(goal: str) -> str:
+        """Generate a concise human-facing plan title without requiring user input."""
+        lower = str(goal or "").lower()
+        profile = match_trajectory_profile(goal)
+        if profile.get("trajectory_id") != "general" and profile.get("title"):
+            return str(profile["title"])
+        if LongHorizonPlanner._is_virtualcell_multimodal_goal(goal):
+            return "VirtualCell BWhair Multimodal Analysis"
+        if LongHorizonPlanner._is_wgs_vitiligo_goal(goal):
+            return "VirtualCell WGS Vitiligo Case-Control Analysis"
+        if LongHorizonPlanner._is_metabolic_showcase_goal(goal):
+            return "UKB Metabolic Health Trajectory Analysis"
+        if "paper" in lower or ".pdf" in lower or "论文" in str(goal or ""):
+            return "UKB Paper Replication Plan"
+        if "e11" in lower or "type 2 diabetes" in lower or "t2d" in lower:
+            return "UKB Type 2 Diabetes Analysis"
+        cleaned = " ".join(str(goal or "Biobank analysis").split())
+        cleaned = cleaned[:80].strip(" -:;")
+        return cleaned or "Biobank Analysis Plan"
+
     def decompose(
         self,
         goal: str,
@@ -669,7 +829,7 @@ Respond with ONLY the JSON array."""
                 )
                 steps = steps[:tool_budget]
 
-            plan = LongHorizonPlan(goal=goal, steps=steps)
+            plan = LongHorizonPlan(goal=goal, steps=steps, title=self._default_title_for_goal(goal))
             return self._check_temporal_safety(self._enforce_report_contract(plan, available_skills))
 
         except Exception as e:
@@ -862,6 +1022,49 @@ Respond with ONLY the JSON array."""
             "world_model_audit",
             "generate_report",
         }
+        wgs_required = {
+            "wgs_environment_check",
+            "cohort_phenotype_summary",
+            "vcf_sample_list",
+            "vcf_qc",
+            "vcf_annotation",
+            "vcf_pca",
+            "vcf_kinship",
+            "vcf_association",
+            "vcf_burden_test",
+            "pathway_enrichment",
+            "statistical_review",
+            "safety_check",
+            "world_model_audit",
+            "generate_report",
+        }
+        multimodal_required = {
+            "virtualcell_data_inventory",
+            "virtualcell_multimodal_link",
+            "h5ad_sample_summary",
+            "spatial_hair_summary",
+            "singlecell_modality_summary",
+            "statistical_review",
+            "safety_check",
+            "world_model_audit",
+            "generate_report",
+        }
+        juvenile_mechanism_required = multimodal_required | {
+            "goal_intent_classifier",
+            "jh_variant_discovery",
+            "regulatory_variant_annotation",
+            "tf_binding_disruption",
+            "scatac_peak_overlap",
+            "scatac_accessibility_differential",
+            "scrna_expression_differential",
+            "atac_expression_coupling",
+            "spatial_celltype_localization",
+            "spatial_cell_interaction",
+            "multiomics_mechanism_prioritization",
+            "workflow_gap_detector",
+            "agent_workflow_evolver",
+        }
+        intent_profile = self._goal_intent_profile(goal, list(available) if available else None)
         has_pdf = ".pdf" in lower
         paper_negated = any(
             phrase in lower
@@ -901,6 +1104,24 @@ Respond with ONLY the JSON array."""
         )
         if has_required(invalid_request_required) and invalid_or_unsafe:
             return self._invalid_request_default_plan(goal)
+        trajectory_profile = self._trajectory_profile(goal, list(available) if available else None)
+        if trajectory_profile.get("trajectory_id") == "juvenile_hair_multiomics_mechanism":
+            return self._juvenile_hair_mechanism_default_plan(goal, available_skills)
+        if (
+            intent_profile.get("task_family") == "juvenile_hair_multiomics_mechanism"
+            and float(intent_profile.get("confidence") or 0.0) >= 0.55
+        ):
+            return self._juvenile_hair_mechanism_default_plan(goal, available_skills)
+        if has_required(multimodal_required) and (
+            trajectory_profile.get("trajectory_id") == "virtualcell_multimodal"
+            or self._is_virtualcell_multimodal_goal(goal)
+        ):
+            return self._virtualcell_multimodal_default_plan(goal, available_skills)
+        if has_required(wgs_required) and (
+            trajectory_profile.get("trajectory_id") == "wgs_vitiligo_case_control"
+            or self._is_wgs_vitiligo_goal(goal)
+        ):
+            return self._wgs_vitiligo_default_plan(goal, available_skills)
         if has_required(paper_required) and (
             has_pdf or (not paper_negated and (supplied_paper or (replication_intent and paper_subject)))
         ):
@@ -1028,6 +1249,639 @@ Respond with ONLY the JSON array."""
                 plan.steps[-1].description = "Generate paired technical and Nature-style progression reports"
             return plan
         return None
+
+    def _virtualcell_multimodal_default_plan(
+        self,
+        goal: str,
+        available_skills: list[str] | None = None,
+    ) -> LongHorizonPlan:
+        """Deterministic plan for VirtualCell/BWhair WGS+h5ad workflows."""
+        available = set(available_skills or [])
+
+        def present(skill: str) -> bool:
+            return not available or skill in available
+
+        steps: list[PlanStep] = [
+            PlanStep(
+                id="s1",
+                skill="virtualcell_data_inventory",
+                args={"modalities": "all", "inspect_h5ad": True, "max_h5ad_files": 3},
+                description="Inventory WGS VCF, Stereo-seq, scRNA-seq and scATAC-seq resources and file readiness",
+            ),
+            PlanStep(
+                id="s2",
+                skill="virtualcell_multimodal_link",
+                args={"include_senile": True},
+                description="Link WGS donors to BWhair h5ad modalities using Donor as the cross-modal key",
+                depends_on=["s1"],
+            ),
+            PlanStep(
+                id="s3",
+                skill="h5ad_sample_summary",
+                args={"modality": "all", "sample_query": "", "max_files": 5, "include_obs_summary": True},
+                description="Inspect representative h5ad files in backed mode and summarize obs/var metadata",
+                depends_on=["s1"],
+            ),
+            PlanStep(
+                id="s4",
+                skill="spatial_hair_summary",
+                args={"group_by": "hair_state"},
+                description="Summarize Stereo-seq samples by black/white/gray hair state and donor coverage",
+                depends_on=["s1", "s2"],
+            ),
+            PlanStep(
+                id="s5",
+                skill="singlecell_modality_summary",
+                args={"modality": "all", "inspect_h5ad": False},
+                description="Summarize scRNA-seq and scATAC-seq h5ad modalities with manifest-first bounded metadata policy",
+                depends_on=["s1"],
+            ),
+        ]
+
+        if present("wgs_environment_check"):
+            steps.append(PlanStep(
+                id="s6",
+                skill="wgs_environment_check",
+                args={},
+                description="Check WGS toolchain and VCF readiness for cross-modal donor analyses",
+                depends_on=["s1"],
+                criticality="diagnostic",
+            ))
+        if present("cohort_phenotype_summary"):
+            steps.append(PlanStep(
+                id="s7",
+                skill="cohort_phenotype_summary",
+                args={"group_by": "phenotype_group"},
+                description="Summarize WGS donor phenotype, age and sex distributions for cross-modal interpretation",
+                depends_on=["s1"],
+                criticality="diagnostic",
+            ))
+        if present("deep_research"):
+            steps.append(PlanStep(
+                id="s8",
+                skill="deep_research",
+                args={
+                    "topic": "black white hair graying vitiligo single-cell spatial transcriptomics scATAC WGS melanocyte immune aging",
+                    "max_sources": 8,
+                },
+                description="Collect related literature for black/white hair, vitiligo, melanocyte and immune multi-omics",
+                depends_on=["s1"],
+                criticality="diagnostic",
+            ))
+
+        if present("trajectory_profile_match"):
+            for step in steps:
+                if step.id == "s1":
+                    step.depends_on = ["s0p"]
+                elif "s1" in step.depends_on and "s0p" not in step.depends_on:
+                    step.depends_on = ["s0p" if dep == "s1" else dep for dep in step.depends_on]
+            steps.insert(0, PlanStep(
+                id="s0p",
+                skill="trajectory_profile_match",
+                args={"goal": goal, "available_skills": ",".join(sorted(available)), "use_llm": False},
+                description="Match the short request to an auditable trajectory profile with skill, artifact, report and MCP contracts",
+            ))
+
+        analysis_ids = [step.id for step in steps]
+        steps.extend([
+            PlanStep(
+                id="s9",
+                skill="statistical_review",
+                args={"scope": "session"},
+                description="Review multimodal linkage, h5ad metadata limits, sample size and feasible inference boundaries",
+                depends_on=analysis_ids,
+            ),
+            PlanStep(
+                id="s10",
+                skill="safety_check",
+                args={"scope": "session", "k": 5},
+                description="Check privacy and small-cell reporting constraints for donor-linked multimodal summaries",
+                depends_on=["s9"],
+            ),
+            PlanStep(
+                id="s11",
+                skill="world_model_audit",
+                args={
+                    "task": "VirtualCell BWhair multimodal donor-linked WGS, spatial, scRNA and scATAC workflow",
+                    "simulation_type": "multimodal_association_feasibility",
+                    "input_modalities": "WGS VCF, Stereo-seq h5ad, scRNA h5ad, scATAC h5ad, phenotype manifest",
+                    "available_tokens": 28,
+                    "training_distribution_coverage": 0.2,
+                    "calibration_status": "unknown",
+                    "external_validation_status": "not_validated",
+                },
+                description="Audit claim boundaries for a small donor-linked multimodal cohort",
+                depends_on=["s10"],
+            ),
+            PlanStep(
+                id="s12",
+                skill="generate_report",
+                args={"title": "VirtualCell BWhair Multimodal Analysis", "format": "dual"},
+                description="Generate Markdown and HTML reports with inventory, linkage, h5ad summaries, literature context and reproducibility notes",
+                depends_on=["s11"],
+            ),
+        ])
+        plan = LongHorizonPlan(goal=goal, steps=steps, title=self._default_title_for_goal(goal))
+        plan.assumptions = [
+            "Donor is the primary key linking WGS to Stereo-seq, scRNA-seq and scATAC-seq data.",
+            "h5ad files are inspected in backed read-only mode first; full matrix operations must be chunked or downsampled.",
+            "WGS phenotype metadata comes from the embedded or discovered WGS manifest; h5ad-specific metadata comes from manifest columns and .obs when files are readable.",
+            "Missing h5ad files, missing anndata/scanpy, missing VCF indexes or unavailable annotation databases are recorded as degradations rather than causing the plan to crash.",
+        ]
+        return plan
+
+    def _juvenile_hair_mechanism_default_plan(
+        self,
+        goal: str,
+        available_skills: list[str] | None = None,
+    ) -> LongHorizonPlan:
+        """Deterministic workflow for Juvenile hair-whitening mechanism tasks."""
+        available = set(available_skills or [])
+
+        def present(skill: str) -> bool:
+            return not available or skill in available
+
+        steps: list[PlanStep] = [
+            *([
+                PlanStep(
+                    id="s0p",
+                    skill="trajectory_profile_match",
+                    args={"goal": goal, "available_skills": ",".join(sorted(available)), "use_llm": False},
+                    description="Match the request to a trajectory profile with skill, artifact, report and MCP contracts",
+                )
+            ] if present("trajectory_profile_match") else []),
+            PlanStep(
+                id="s0",
+                skill="goal_intent_classifier",
+                args={"goal": goal},
+                description="Classify the short natural-language request into a structured Juvenile hair-whitening mechanism workflow intent",
+                depends_on=["s0p"] if present("trajectory_profile_match") else [],
+            ),
+            PlanStep(
+                id="s1",
+                skill="virtualcell_data_inventory",
+                args={"modalities": "all", "inspect_h5ad": True, "max_h5ad_files": 4},
+                description="Inventory WGS, scATAC, scRNA and Stereo-seq data and verify readable files",
+                depends_on=["s0"],
+            ),
+            PlanStep(
+                id="s2",
+                skill="virtualcell_multimodal_link",
+                args={"include_senile": True},
+                description="Build Donor-key linkage across WGS, white/black hair h5ad samples and phenotype groups",
+                depends_on=["s1"],
+            ),
+            PlanStep(
+                id="s3",
+                skill="h5ad_sample_summary",
+                args={"modality": "all", "sample_query": "J", "max_files": 6, "include_obs_summary": True},
+                description="Inspect Juvenile donor h5ad metadata in backed mode for cell-type, peak, gene and spatial coordinate fields",
+                depends_on=["s1"],
+            ),
+            PlanStep(
+                id="s3a",
+                skill="spatial_hair_summary",
+                args={"group_by": "hair_state"},
+                description="Summarize Stereo-seq hair-state coverage across donors before spatial mechanism analysis",
+                depends_on=["s1", "s2"],
+            ),
+            PlanStep(
+                id="s3b",
+                skill="singlecell_modality_summary",
+                args={"modality": "all", "inspect_h5ad": False},
+                description="Summarize scRNA-seq and scATAC-seq h5ad files before expression/accessibility mechanism analysis using manifest-first bounded metadata policy",
+                depends_on=["s1"],
+            ),
+        ]
+
+        if present("wgs_environment_check"):
+            steps.append(PlanStep(
+                id="s4",
+                skill="wgs_environment_check",
+                args={},
+                description="Check WGS/VCF and standard annotation tool readiness",
+                depends_on=["s1"],
+                criticality="diagnostic",
+            ))
+        whole_genome_requested = any(
+            token in str(goal or "").lower()
+            for token in (
+                "whole genome",
+                "full wgs",
+                "full genome",
+                "全基因组执行",
+                "完整wgs",
+                "全量wgs",
+            )
+        )
+        if whole_genome_requested and present("vcf_annotation"):
+            steps.append(PlanStep(
+                id="s5",
+                skill="vcf_annotation",
+                args={"genes": "TYR,OCA2,SLC45A2,MC1R,HLA,NLRP1,PAX3,SOX10,MITF,TYRP1,DCT,IRF4,TNF,IFNG,CXCL10", "min_qual": 30.0, "max_variants_per_gene": 500},
+                description="Annotate candidate pigmentation and immune loci for WGS variant anchors when full WGS execution is explicitly requested",
+                depends_on=["s4"] if present("wgs_environment_check") else ["s1"],
+                criticality="diagnostic",
+            ))
+        if whole_genome_requested and present("vcf_association"):
+            steps.append(PlanStep(
+                id="s6",
+                skill="vcf_association",
+                args={"case_group": "J", "control_group": "V", "maf_min": 0.01, "chromosomes": "chr22", "max_variants": 1000},
+                description="Run a bounded exploratory Juvenile_White versus Vitiligo_White WGS association when full WGS execution is explicitly requested",
+                depends_on=["s4"] if present("wgs_environment_check") else ["s1"],
+                criticality="diagnostic",
+            ))
+
+        wgs_deps = [sid for sid in ("s5", "s6") if any(step.id == sid for step in steps)]
+        if not wgs_deps:
+            wgs_deps = ["s2"]
+        steps.extend([
+            PlanStep(
+                id="s7",
+                skill="jh_variant_discovery",
+                args={"case_group": "J", "control_groups": "V,S", "max_variants": 30},
+                description="Prioritize Juvenile hair-whitening candidate variants or curated locus anchors from WGS evidence",
+                depends_on=wgs_deps,
+            ),
+            PlanStep(
+                id="s8",
+                skill="regulatory_variant_annotation",
+                args={"window_bp": 100000},
+                description="Classify candidate variants by regulatory, nearby-gene, immune and pigmentation context",
+                depends_on=["s7"],
+            ),
+            PlanStep(
+                id="s9",
+                skill="tf_binding_disruption",
+                args={"motif_database": "auto", "top_n": 30},
+                description="Assess candidate TF binding disruption with motif database fallback tracking",
+                depends_on=["s8"],
+            ),
+            PlanStep(
+                id="s10",
+                skill="scatac_peak_overlap",
+                args={"max_files": 1},
+                description="Check candidate variants against scATAC peak metadata and exact-overlap readiness",
+                depends_on=["s7", "s3", "s3b"],
+            ),
+            PlanStep(
+                id="s11",
+                skill="scatac_accessibility_differential",
+                args={"case_hair_state": "W", "control_hair_state": "B"},
+                description="Assess Juvenile white-vs-black hair chromatin accessibility differential readiness and cell-type metadata",
+                depends_on=["s2", "s3", "s3b", "s10"],
+            ),
+            PlanStep(
+                id="s12",
+                skill="scrna_expression_differential",
+                args={"genes": ""},
+                description="Assess scRNA expression differential readiness for variant-linked genes and cell types",
+                depends_on=["s7", "s3", "s3b"],
+            ),
+            PlanStep(
+                id="s13",
+                skill="atac_expression_coupling",
+                args={"top_n": 30},
+                description="Integrate variant-linked accessibility and expression evidence into peak-gene mechanism rows",
+                depends_on=["s10", "s11", "s12"],
+            ),
+            PlanStep(
+                id="s14",
+                skill="spatial_celltype_localization",
+                args={"max_files": 4, "sample_query": "J"},
+                description="Inspect Juvenile Stereo-seq cell-type and coordinate metadata for spatial localization analysis",
+                depends_on=["s2", "s3", "s3a", "s13"],
+            ),
+            PlanStep(
+                id="s15",
+                skill="spatial_cell_interaction",
+                args={"neighborhood_radius": 50.0},
+                description="Assess readiness for spatial neighbor and cell-cell interaction shifts linked to prioritized cell states",
+                depends_on=["s14"],
+            ),
+            PlanStep(
+                id="s16",
+                skill="multiomics_mechanism_prioritization",
+                args={"top_n": 20},
+                description="Rank variant-to-TF-to-accessibility-to-expression-to-spatial mechanism hypotheses",
+                depends_on=["s9", "s13", "s15"],
+            ),
+            PlanStep(
+                id="s17",
+                skill="workflow_gap_detector",
+                args={"trusted_harness_mode": False},
+                description="Audit missing databases, MCP tools and generated-skill proposals for future automatic evolution",
+                depends_on=["s16"],
+            ),
+            PlanStep(
+                id="s17a",
+                skill="agent_workflow_evolver",
+                args={"goal_profile": "juvenile_hair_multiomics_mechanism", "trusted_harness_mode": False},
+                description="Audit planner, harness and MCP evolution opportunities so repeated runs can migrate brittle rules into skills and trajectory profiles",
+                depends_on=["s17"],
+                criticality="diagnostic",
+            ),
+        ])
+
+        if present("deep_research"):
+            steps.append(PlanStep(
+                id="s18",
+                skill="deep_research",
+                args={
+                    "topic": "juvenile hair whitening WGS scATAC scRNA spatial transcriptomics melanocyte transcription factor chromatin accessibility",
+                    "max_sources": 8,
+                },
+                description="Collect literature context for hair whitening, melanocyte biology, immune loci and multi-omics mechanism validation",
+                depends_on=["s7"],
+                criticality="diagnostic",
+            ))
+            review_deps = ["s17a", "s18"]
+        else:
+            review_deps = ["s17a"]
+
+        steps.extend([
+            PlanStep(
+                id="s19",
+                skill="statistical_review",
+                args={"scope": "session"},
+                description="Review small-sample, multi-omics and fallback limitations before reporting",
+                depends_on=review_deps,
+            ),
+            PlanStep(
+                id="s20",
+                skill="safety_check",
+                args={"scope": "session", "k": 5},
+                description="Check donor-linked multi-omics privacy, small-cell reporting and claim-safety constraints",
+                depends_on=["s19"],
+            ),
+            PlanStep(
+                id="s21",
+                skill="world_model_audit",
+                args={
+                    "task": "Juvenile hair whitening WGS-to-epigenome-to-transcriptome-to-spatial mechanism workflow",
+                    "simulation_type": "multiomics_mechanism_hypothesis_generation",
+                    "input_modalities": "WGS VCF, scATAC h5ad, scRNA h5ad, Stereo-seq h5ad, BWhair phenotype manifest",
+                    "available_tokens": 28,
+                    "training_distribution_coverage": 0.2,
+                    "calibration_status": "not_validated",
+                    "external_validation_status": "not_validated",
+                },
+                description="Audit whether the evidence supports mechanism hypotheses rather than causal claims",
+                depends_on=["s20"],
+            ),
+            PlanStep(
+                id="s22",
+                skill="generate_report",
+                args={"title": "Juvenile Hair Whitening Multi-Omics Mechanism Analysis", "format": "dual"},
+                description="Generate Markdown and HTML reports with the four task trajectories, Action Graph trace and reproducibility notes",
+                depends_on=["s21"],
+            ),
+        ])
+
+        plan = LongHorizonPlan(goal=goal, steps=steps, title=self._default_title_for_goal(goal))
+        plan.assumptions = [
+            "Primary biological target is Juvenile_White donor-linked hair whitening; WGS comparison defaults to Juvenile_White versus Vitiligo_White with Senile_White as context.",
+            "White-vs-black hair analyses use matched BWhair donor/sample metadata where available and degrade to readiness/fallback reports when matrix-level contrasts are unavailable.",
+            "Default CLI planning does not run heavy WGS annotation/association unless full WGS execution is explicitly requested; candidate variants are anchored by upstream WGS results when present, otherwise curated pigmentation/autoimmune loci are explicitly labelled as fallback hypotheses.",
+            "TF binding, scATAC peak overlap, scRNA differential expression and Stereo spatial interactions require external databases or matrix extraction for quantitative claims; missing pieces are recorded as workflow gaps.",
+            "Generated skill proposals are review-gated unless a trusted harness explicitly enables activation.",
+        ]
+        return plan
+
+    def _wgs_vitiligo_default_plan(
+        self,
+        goal: str,
+        available_skills: list[str] | None = None,
+    ) -> LongHorizonPlan:
+        """Deterministic CLI plan for the VirtualCell WGS vitiligo task."""
+        available = set(available_skills or [])
+
+        def present(skill: str) -> bool:
+            return not available or skill in available
+
+        steps: list[PlanStep] = [
+            *([
+                PlanStep(
+                    id="s0p",
+                    skill="trajectory_profile_match",
+                    args={"goal": goal, "available_skills": ",".join(sorted(available)), "use_llm": False},
+                    description="Match the WGS request to a trajectory profile with skill, artifact, report and MCP contracts",
+                )
+            ] if present("trajectory_profile_match") else []),
+            PlanStep(
+                id="s1",
+                skill="wgs_environment_check",
+                args={},
+                description="Check WGS toolchain, annotation databases, VCF discovery and standard-workflow readiness",
+                depends_on=["s0p"] if present("trajectory_profile_match") else [],
+            ),
+            PlanStep(
+                id="s2",
+                skill="cohort_phenotype_summary",
+                args={"group_by": "phenotype_group"},
+                description="Summarize WGS samples by phenotype group, age, sex and sampling site",
+                depends_on=["s1"],
+            ),
+            PlanStep(
+                id="s3",
+                skill="vcf_sample_list",
+                args={"check_index": True},
+                description="List available single-sample WGS VCF files and index status",
+                depends_on=["s1"],
+            ),
+            PlanStep(
+                id="s4",
+                skill="vcf_qc",
+                args={
+                    "min_qual": 30.0,
+                    "min_dp": 10,
+                    "min_gq": 20,
+                    "min_call_rate": 0.90,
+                    "output_filtered": True,
+                    "region": "chr22",
+                    "max_variants_per_sample": 200000,
+                },
+                description="Run VCF-level and sample-level QC with chr22 smoke window for CLI validation",
+                depends_on=["s2", "s3"],
+            ),
+            PlanStep(
+                id="s5",
+                skill="vcf_annotation",
+                args={"genes": "SOX10", "min_qual": 30.0, "max_variants_per_gene": 5000},
+                description="Annotate vitiligo candidate variants with standard SnpEff/VEP fallback where available",
+                depends_on=["s4"],
+            ),
+            PlanStep(
+                id="s6",
+                skill="vcf_pca",
+                args={"maf_threshold": 0.05, "n_components": 5, "max_variants": 1000, "chromosomes": "chr22"},
+                description="Compute common-variant PCA and phenotype-colored population-structure plots",
+                depends_on=["s4"],
+            ),
+            PlanStep(
+                id="s7",
+                skill="vcf_kinship",
+                args={"maf_threshold": 0.05, "max_snps": 1000, "kinship_threshold": 0.1, "region": "chr22"},
+                description="Estimate pairwise kinship and flag potentially related WGS samples",
+                depends_on=["s4"],
+            ),
+            PlanStep(
+                id="s8",
+                skill="vcf_association",
+                args={
+                    "case_group": "J",
+                    "control_group": "V",
+                    "maf_min": 0.01,
+                    "chromosomes": "chr22",
+                    "max_variants": 2000,
+                },
+                description="Run Juvenile_White versus Vitiligo_White single-variant association testing",
+                depends_on=["s4", "s6", "s7"],
+            ),
+            PlanStep(
+                id="s9",
+                skill="vcf_burden_test",
+                args={
+                    "case_group": "J",
+                    "control_group": "V",
+                    "maf_max": 0.05,
+                    "min_variants_per_gene": 1,
+                    "gene_list": "SOX10",
+                },
+                description="Run rare-variant burden testing for vitiligo candidate genes",
+                depends_on=["s5", "s8"],
+            ),
+            PlanStep(
+                id="s10",
+                skill="pathway_enrichment",
+                args={"gene_list": "TYR,OCA2,MC1R,HLA,NLRP1,PAX3,SOX10", "database": "all", "top_n": 20},
+                description="Run pathway enrichment focused on melanogenesis, autoimmunity and oxidative stress",
+                depends_on=["s9"],
+            ),
+        ]
+
+        if present("vcf_phenotype_comparison"):
+            steps.append(PlanStep(
+                id="s11",
+                skill="vcf_phenotype_comparison",
+                args={"region": "chr22", "group_by": "phenotype_group", "max_variants_per_sample": 50000},
+                description="Compare variant burden and genotype quality summaries across phenotype groups",
+                depends_on=["s4"],
+            ))
+            model_dep = "s11"
+        else:
+            model_dep = "s4"
+
+        if present("train_phenotype_model"):
+            steps.append(PlanStep(
+                id="s12",
+                skill="train_phenotype_model",
+                args={
+                    "target": "phenotype_group",
+                    "positive_class": "J",
+                    "model_type": "auto",
+                    "features": "all_numeric",
+                    "n_folds": 0,
+                    "include_classes": "J,V",
+                },
+                description="Train a small-sample phenotype classifier for Juvenile_White versus Vitiligo_White only",
+                depends_on=[model_dep],
+                criticality="diagnostic",
+            ))
+            if present("feature_importance"):
+                steps.append(PlanStep(
+                    id="s13",
+                    skill="feature_importance",
+                    args={"top_n": 10, "method": "tree"},
+                    description="Extract feature importance for the diagnostic phenotype model",
+                    depends_on=["s12"],
+                    criticality="diagnostic",
+                ))
+            if present("embedding"):
+                steps.append(PlanStep(
+                    id="s14",
+                    skill="embedding",
+                    args={"method": "tsne", "sample_size": 0},
+                    description="Visualize model feature space with a two-dimensional embedding",
+                    depends_on=["s12"],
+                    criticality="diagnostic",
+                ))
+
+        if present("deep_research"):
+            steps.append(PlanStep(
+                id="s15",
+                skill="deep_research",
+                args={
+                    "topic": "vitiligo genome-wide association HLA TYR OCA2 MC1R NLRP1 PAX3 SOX10 rare variant burden",
+                    "max_sources": 8,
+                },
+                description="Collect related literature for vitiligo genetics, GWAS, HLA and candidate genes",
+                depends_on=["s1"],
+                criticality="diagnostic",
+            ))
+        elif present("web_search"):
+            steps.append(PlanStep(
+                id="s15",
+                skill="web_search",
+                args={"query": "vitiligo GWAS HLA TYR OCA2 NLRP1 candidate genes", "max_results": 8},
+                description="Search related literature for vitiligo genetic associations",
+                depends_on=["s1"],
+                criticality="diagnostic",
+            ))
+
+        analysis_ids = [step.id for step in steps]
+        steps.extend([
+            PlanStep(
+                id="s16",
+                skill="statistical_review",
+                args={"scope": "session"},
+                description="Review WGS QC, PCA, kinship, association, burden and model limitations",
+                depends_on=analysis_ids,
+            ),
+            PlanStep(
+                id="s17",
+                skill="safety_check",
+                args={"scope": "session", "k": 5},
+                description="Check privacy, small-cell and reporting constraints before final output",
+                depends_on=["s16"],
+            ),
+            PlanStep(
+                id="s18",
+                skill="world_model_audit",
+                args={
+                    "task": "VirtualCell WGS Juvenile_White versus Vitiligo_White vitiligo genetics workflow",
+                    "simulation_type": "association_conditioned_forecast",
+                    "input_modalities": "WGS VCF, phenotype manifest, age, sex",
+                    "available_tokens": 28,
+                    "training_distribution_coverage": 0.2,
+                    "calibration_status": "unknown",
+                    "external_validation_status": "not_validated",
+                },
+                description="Audit claim boundaries for a small exploratory WGS cohort",
+                depends_on=["s17"],
+            ),
+            PlanStep(
+                id="s19",
+                skill="generate_report",
+                args={"title": "VirtualCell WGS Vitiligo Case-Control Analysis", "format": "dual"},
+                description="Generate Markdown and HTML reports with WGS methods, figures, top hits, caveats and reproducibility notes",
+                depends_on=["s18"],
+            ),
+        ])
+
+        plan = LongHorizonPlan(
+            goal=goal,
+            steps=steps,
+            title=self._default_title_for_goal(goal),
+        )
+        plan.assumptions = [
+            "Juvenile_White is encoded as phenotype_group J and is the case group.",
+            "Vitiligo_White is encoded as phenotype_group V and is the main comparison/control group.",
+            "Senile_White samples are summarized and QC-screened but excluded from the main J versus V case-control tests.",
+            "The CLI validation template uses chr22/SOX10-bounded WGS steps for tractable end-to-end testing; full-genome runs can broaden chromosomes/genes with the same skill interfaces.",
+        ]
+        return plan
 
     def _concise_e11_report_default_plan(self, goal: str) -> LongHorizonPlan:
         """Short deterministic E11 report plan used when LLM planning degrades."""
@@ -1773,11 +2627,27 @@ class PlanMode:
         as endpoint selection, trajectory fallback policy, or model-selection
         strategy.
         """
+        try:
+            policy_questions = build_clarification_questions(goal, available_skills=self.available_skills)
+            if policy_questions:
+                return policy_questions[:max_questions]
+        except Exception as e:
+            logger.debug("Clarification policy skill fallback: %s", e)
+
         lower = (goal or "").lower()
         questions: list[dict] = []
 
         if self.planner._is_metabolic_showcase_goal(goal):
             return []
+
+        profile = self.planner._trajectory_profile(goal, self.available_skills)
+        profile_questions = list(profile.get("clarification_questions") or [])
+        if profile.get("trajectory_id") in {
+            "juvenile_hair_multiomics_mechanism",
+            "virtualcell_multimodal",
+            "wgs_vitiligo_case_control",
+        } and profile_questions:
+            return profile_questions[:max_questions]
 
         def has_any(tokens: tuple[str, ...]) -> bool:
             return any(token in lower for token in tokens)
@@ -1920,6 +2790,8 @@ class PlanMode:
             tool_schemas=self.tool_schemas,
             spec=self.current_study_spec,
         )
+        if self.plan and not self.plan.title:
+            self.plan.title = LongHorizonPlanner._default_title_for_goal(goal)
         self._attach_study_spec_metadata()
         self._validate_current_plan()
         self.state = PlanState.REVIEW
@@ -1934,6 +2806,23 @@ class PlanMode:
                 f"Fix before approval:\n{self.validation_summary()}"
             )
         return f"Plan generated with {self.plan.total_steps} steps. Awaiting your review."
+
+    def rename(self, title: str) -> str:
+        """Rename the active plan without changing the original goal."""
+        clean = " ".join(str(title or "").split()).strip(" -:;")
+        if not clean:
+            return "Usage: /plan-title <new title>"
+        if not self.plan:
+            return "No active plan to rename."
+        self.plan.title = clean[:200]
+        for step in self.plan.steps:
+            if step.skill == "generate_report":
+                args = dict(step.args or {})
+                args["title"] = self.plan.title
+                step.args = args
+        self.revision += 1
+        self._save_plan_file()
+        return f"Plan title updated to: {self.plan.title}"
 
     def refine(self, feedback: str) -> str:
         """Refine the plan based on user feedback.
@@ -2317,7 +3206,8 @@ class PlanMode:
             return
         now = datetime.now()
         if not self.current_plan_file:
-            slug = self.goal[:40].lower().replace(" ", "-").replace("/", "-")
+            slug_source = (self.plan.title or self.goal)[:60]
+            slug = slug_source.lower().replace(" ", "-").replace("/", "-")
             slug = "".join(c for c in slug if c.isalnum() or c == "-")
             plan_id = now.strftime(f"%Y-%m-%d-%H%M-{slug}")
             self.current_plan_file = self.plans_dir / f"{plan_id}.md"
@@ -2327,7 +3217,8 @@ class PlanMode:
             validation_block = f"## Validation errors\n{self.validation_summary()}\n\n"
 
         content = (
-            f"# Plan: {self.goal}\n\n"
+            f"# Plan: {(self.plan.title if self.plan and self.plan.title else self.goal)}\n\n"
+            f"- Original goal: {self.goal}\n"
             f"- Status: {self.state.value}\n"
             f"- Revision: v{self.revision}\n"
             f"- Updated: {now.strftime('%Y-%m-%d %H:%M')}\n\n"

@@ -48,10 +48,14 @@ from pathlib import Path
 from typing import Any, Optional, Protocol
 
 from biobank_agent.core.tools.protocol import (
+    ActionClass,
     Capability,
+    SafetyClass,
     ToolContext,
     ToolHandler,
     ToolSpec,
+    TrajectorySerialization,
+    WorkspaceScope,
     _BaseHandler,
 )
 from biobank_agent.core.tools.registry import ToolRegistry
@@ -544,6 +548,11 @@ class McpManager:
                 required=list(
                     (tool.get("inputSchema") or {}).get("required", [])
                 ),
+                safety_class=SafetyClass.NETWORK,
+                approval_requirement="ask_before_network",
+                workspace_scope=WorkspaceScope.EXTERNAL_READ,
+                action_classes=(ActionClass.NETWORK,),
+                trajectory_serialization=TrajectorySerialization.METADATA_ONLY,
             )
             handler = _McpToolHandler(
                 server_name=server_name,

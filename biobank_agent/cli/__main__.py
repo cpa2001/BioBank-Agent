@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from biobank_agent.cli_legacy import main
+from . import main
 
 
 if __name__ == "__main__":

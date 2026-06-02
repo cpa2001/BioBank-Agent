@@ -1,0 +1,48 @@
+bank_id: virtualcell
+display_name: VirtualCell/BWhair Multimodal Cohort
+description: "VirtualCell/BWhair cohort with 28-sample WGS VCF manifest plus Stereo-seq, scRNA-seq and scATAC-seq h5ad resources. Donor links WGS to single-cell/spatial modalities; h5ad obs fields provide modality-specific sample metadata."
+caveats: "small WGS cohort (N=28); h5ad files may be large and should be inspected in backed/chunked mode; no ICD10 diagnosis data; no death records; some local deployments may lack h5ad files, VCF indexes or annotation databases"
+coding_system: none
+
+patient_id_column: sample_id
+diagnoses_code_column: diag_code
+deaths_code_column: cause_code
+field_column_pattern: "{field_id}"
+default_instance: 0
+default_array: 0
+
+biomarker_parquet_name: "vc_samples.parquet"
+diagnoses_parquet_name: ""
+deaths_parquet_name: ""
+catalog_fields_file: ""
+catalog_categories_file: ""
+
+feature_groups:
+  demographics:
+    age: Age (years)
+    sex: Biological sex (M/F)
+    is_male: Is male (0/1)
+
+  clinical:
+    phenotype: Phenotype (Juvenile_White / Senile_White / Vitiligo_White)
+    phenotype_group: Phenotype group (J / S / V)
+    part: Sampling site (Occipital / Temple / Vertex / Frontal)
+    donor: Donor ID
+
+  genomics:
+    vcf_path: Path to genotyper VCF file
+
+  multimodal:
+    modality: Data modality (wgs / spatial / scrna / scatac)
+    technology: Measurement technology (WGS / Stereo-seq / scRNA-seq / scATAC-seq)
+    file_path: Resolved source file path
+    hair_state: Hair state code (B / W / WB / G / GB)
+    hair_state_label: Hair state label
+    cells: Manifest cell count for h5ad modalities
+
+  spatial_transcriptomics:
+    spatial_h5ad_path: Stereo-seq h5ad file path
+
+  single_cell:
+    scrna_h5ad_path: scRNA-seq h5ad file path
+    scatac_h5ad_path: scATAC-seq h5ad file path

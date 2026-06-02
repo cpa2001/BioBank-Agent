@@ -9,11 +9,11 @@ def _mcp_call(ctx: CommandContext, arg: str) -> None:
     if not arg:
         ctx.console.print("[yellow]Usage: /mcp-call <mcp_server__tool> '{\"arg\":\"value\"}'[/]")
         return
-    ctx.action("mcp_call")(arg)
+    return ctx.action("mcp_call")(arg)
 
 
 def _mcp_health(ctx: CommandContext, arg: str) -> None:
-    ctx.action("mcp_health")(arg)
+    return ctx.action("mcp_health")(arg)
 
 
 def commands() -> list[RegisteredCommand]:

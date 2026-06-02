@@ -161,6 +161,9 @@ class Settings(BaseSettings):
     preferred_multi_models: str = "deepseek/deepseek-v4-pro,moonshotai/kimi-k2.6,z-ai/glm-5.1"
     max_auto_model_pool: int = 3
     debate_rounds: int = 2
+    plan_debate_enabled: bool = True               # multi-model /plan debate rounds
+    plan_consensus_threshold: float = 0.85         # plan-similarity above which two drafts are homogeneous
+    plan_debate_confidence_floor: float = 0.45     # prune a draft whose self-confidence is below this
     complexity_threshold: float = 0.7   # score above this triggers multi-model
     enable_reflexion: bool = True       # structured self-correction on failure
     enable_tot: bool = False            # Tree-of-Thought for branching decisions

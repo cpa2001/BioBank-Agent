@@ -9,6 +9,7 @@ outputs.
 from __future__ import annotations
 
 from pathlib import Path
+import math
 import re
 
 from biobank_agent.registry import skill
@@ -88,16 +89,22 @@ def _resolve_project_doc(path: str) -> Path | None:
 
 
 def _title_for(path: Path, text: str | None = None) -> str:
+    # Sanitize the title at the source: every mode (list/search/read) surfaces
+    # this string, so a document whose heading contains a credential term must
+    # not leak it. Making redaction structural here — rather than at each call
+    # site — guarantees the protection regardless of which doc ranks highest.
     if text is None:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return path.stem
+            return _sanitize_doc_text(path.stem)
+    title = path.stem
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("#"):
-            return line.lstrip("#").strip() or path.stem
-    return path.stem
+            title = line.lstrip("#").strip() or path.stem
+            break
+    return _sanitize_doc_text(title)
 
 
 def _sanitize_doc_text(text: str) -> str:
@@ -127,17 +134,71 @@ def _snippet(text: str, query: str, max_len: int = 360) -> tuple[str, int | None
     return _sanitize_doc_text(snippet), line_no
 
 
-def _score(text: str, query: str, path: Path) -> int:
-    haystack = f"{path.as_posix()}\n{text}".lower()
-    terms = [term for term in re.findall(r"[a-zA-Z0-9_/-]{2,}", query.lower())]
-    if not terms:
-        return 0
-    score = 0
-    for term in terms:
-        if term in haystack:
-            score += 1
-        score += haystack.count(term)
-    return score
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _query_terms(query: str) -> list[str]:
+    """Order-preserving, de-duplicated query terms (drop 1-char noise)."""
+    return list(dict.fromkeys(re.findall(r"[a-zA-Z0-9_/-]{2,}", query.lower())))
+
+
+def _rank_documents(
+    corpus: list[tuple[str, str]],
+    query: str,
+    *,
+    k1: float = 1.5,
+    b: float = 0.75,
+) -> list[tuple[str, float]]:
+    """Rank documents by BM25 relevance with length normalization.
+
+    ``corpus`` is a list of ``(rel_path, text)``. Returns ``(rel_path, score)``
+    for every document that contains at least one query term, best first.
+
+    Raw term-frequency scoring favoured long documents that merely *mention*
+    the query terms many times over short, focused documents that are *about*
+    them — a multi-thousand-word architecture dump would bury the one-page guide
+    a user actually wants. BM25 normalises term frequency by document length and
+    saturates repeated hits, so a focused guide outranks a sprawling reference.
+    On top of BM25 we add small, interpretable bonuses for full-term coverage
+    and exact-phrase matches.
+    """
+    docs = [(rel, text, _tokenize(f"{rel}\n{text}")) for rel, text in corpus]
+    n_docs = len(docs)
+    terms = _query_terms(query)
+    if not n_docs or not terms:
+        return []
+
+    avgdl = (sum(len(toks) for _, _, toks in docs) / n_docs) or 1.0
+    df = {term: sum(1 for _, _, toks in docs if term in toks) for term in terms}
+    phrase = query.lower().strip()
+    multi_term = len(terms) > 1
+
+    ranked: list[tuple[str, float]] = []
+    for rel, text, toks in docs:
+        dl = len(toks) or 1
+        counts = {term: toks.count(term) for term in terms}
+        coverage = sum(1 for term in terms if counts[term] > 0)
+        if coverage == 0:
+            continue
+        bm25 = 0.0
+        for term in terms:
+            f = counts[term]
+            if f == 0:
+                continue
+            idf = math.log(1 + (n_docs - df[term] + 0.5) / (df[term] + 0.5))
+            bm25 += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl))
+        score = bm25
+        if coverage == len(terms):
+            score += 2.0  # reward documents that contain ALL query terms
+        if multi_term and phrase:
+            phrase_hits = text.lower().count(phrase)
+            if phrase_hits:
+                score += 1.5 * phrase_hits  # exact contiguous-phrase relevance
+        ranked.append((rel, round(score, 4)))
+
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    return ranked
 
 
 @skill(
@@ -243,25 +304,33 @@ def project_doc(
             "error": "Search mode requires a query. Use mode=list to enumerate available docs.",
         }
 
-    matches = []
+    # Read each candidate once, build the corpus, then rank with BM25.
+    corpus: list[tuple[str, str]] = []
+    doc_by_rel: dict[str, Path] = {}
+    text_by_rel: dict[str, str] = {}
     for doc_path in docs:
         try:
             text = doc_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        score = _score(text, query, doc_path.relative_to(_REPO_ROOT))
-        if score <= 0:
-            continue
+        rel = doc_path.relative_to(_REPO_ROOT).as_posix()
+        corpus.append((rel, text))
+        doc_by_rel[rel] = doc_path
+        text_by_rel[rel] = text
+
+    ranked = _rank_documents(corpus, query)
+    matches = []
+    for rel, score in ranked:
+        text = text_by_rel[rel]
         snippet, line = _snippet(text, query)
         matches.append({
-            "path": doc_path.relative_to(_REPO_ROOT).as_posix(),
-            "title": _title_for(doc_path, text),
+            "path": rel,
+            "title": _title_for(doc_by_rel[rel], text),
             "score": score,
             "line": line,
             "snippet": snippet,
         })
 
-    matches.sort(key=lambda item: (-item["score"], item["path"]))
     return {
         "status": "success",
         "mode": "search",

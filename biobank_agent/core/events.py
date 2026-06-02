@@ -100,6 +100,31 @@ class AgentEventType(str, Enum):
     EVIDENCE_LINKED = "evidence_linked"
     REPRODUCIBILITY_CHECKPOINT = "reproducibility_checkpoint"
 
+    # Runtime substrate / Codex-like session lifecycle
+    SESSION_STARTED = "session_started"
+    USER_TURN_STARTED = "user_turn_started"
+    MODEL_REQUEST_STARTED = "model_request_started"
+    MODEL_DELTA = "model_delta"
+    COMMAND_STARTED = "command_started"
+    COMMAND_FINISHED = "command_finished"
+    COMMAND_FAILED = "command_failed"
+    PLAN_UPDATED = "plan_updated"
+    GOAL_UPDATED = "goal_updated"
+    CHECKPOINT_CREATED = "checkpoint_created"
+    VERIFICATION_STARTED = "verification_started"
+    VERIFICATION_COMPLETED = "verification_completed"
+    REPAIR_ATTEMPTED = "repair_attempted"
+    RESUME_COMPLETED = "resume_completed"
+    TOOL_CALL_REQUESTED = "tool_call_requested"
+    APPROVAL_REQUESTED = "approval_requested"
+    TOOL_CALL_STARTED = "tool_call_started"
+    TOOL_CALL_COMPLETED = "tool_call_completed"
+    ACTION_GRAPH_NODE_CREATED = "action_graph_node_created"
+    COMPACT_STARTED = "compact_started"
+    COMPACT_COMPLETED = "compact_completed"
+    USER_TURN_COMPLETED = "user_turn_completed"
+    SESSION_SAVED = "session_saved"
+
 
 # ── Event dataclass ──────────────────────────────────────────
 
@@ -150,6 +175,23 @@ class AgentEvent:
             "schema_version": self.schema_version,
             "payload": self.payload,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AgentEvent":
+        event_type = data.get("type")
+        if isinstance(event_type, AgentEventType):
+            parsed_type = event_type
+        else:
+            parsed_type = AgentEventType(str(event_type))
+        return cls(
+            type=parsed_type,
+            payload=dict(data.get("payload") or {}),
+            ts=float(data.get("ts", time.time())),
+            turn_id=data.get("turn_id"),
+            tool_call_id=data.get("tool_call_id"),
+            model_id=data.get("model_id"),
+            schema_version=int(data.get("schema_version", 1)),
+        )
 
     # ── Legacy compatibility ─────────────────────────────────
 

@@ -690,6 +690,8 @@ class TestPlanExecutor:
                 "nature_markdown_with_css": str(report_dir / "_report_nature_with_css.md"),
                 "nature_html": str(report_dir / "report_nature.html"),
             },
+            "polished": True,
+            "polisher": {"quality_checks": {"figure_links_resolvable": True, "no_forbidden_main_body_patterns": True}},
         }
         pm = self._make_plan_mode(
             tmp_path,
@@ -779,6 +781,8 @@ class TestPlanExecutor:
                             "nature_markdown_with_css": str(report_dir / "_report_nature_with_css.md"),
                             "nature_html": str(report_dir / "report_nature.html"),
                         },
+                        "polished": True,
+                        "polisher": {"quality_checks": {"figure_links_resolvable": True, "no_forbidden_main_body_patterns": True}},
                     },
                     "is_error": False,
                 }

@@ -1,6 +1,8 @@
 """Feature importance — SHAP or tree-based importance."""
 
 import numpy as np
+from sklearn.inspection import permutation_importance
+
 from biobank_agent.data.features import ALL_BIOMARKERS
 from biobank_agent.registry import skill
 from biobank_agent.utils.plotting import nature_figure, save_figure, PALETTE
@@ -34,6 +36,10 @@ from biobank_agent.utils.plotting import nature_figure, save_figure, PALETTE
 )
 def feature_importance(model_key: str = "", top_n: int = 20,
                        method: str = "tree", *, ctx=None) -> dict:
+    method = str(method or "tree").strip().lower()
+    if method not in {"tree", "shap"}:
+        method = "tree"
+
     # Find model
     if not model_key:
         if not ctx.state.models:
@@ -48,6 +54,8 @@ def feature_importance(model_key: str = "", top_n: int = 20,
     feature_names = meta.get("feature_names", [])
     requested_method = method
     fallback_warning = ""
+    importance = None
+    importance_type = ""
 
     if method == "shap" and ctx.state.feature_matrix is None:
         method = "tree"
@@ -71,8 +79,50 @@ def feature_importance(model_key: str = "", top_n: int = 20,
             fallback_warning = f"SHAP was requested but unavailable or failed; used tree-based importance instead ({exc})."
 
     if method == "tree":
-        importance = model.feature_importances_
-        importance_type = "Tree-based"
+        if hasattr(model, "feature_importances_"):
+            importance = np.asarray(model.feature_importances_, dtype=float)
+            importance_type = "Tree-based"
+        elif hasattr(model, "coef_"):
+            coef = np.asarray(model.coef_, dtype=float)
+            importance = np.abs(coef).mean(axis=0) if coef.ndim > 1 else np.abs(coef)
+            importance_type = "Coefficient magnitude"
+        else:
+            X = ctx.state.feature_matrix
+            y = ctx.state.labels
+            if X is None or y is None:
+                return {
+                    "error": (
+                        f"Model type {type(model).__name__} does not expose native feature importances "
+                        "and no feature matrix/labels are available for permutation importance."
+                    )
+                }
+            try:
+                perm = permutation_importance(
+                    model,
+                    X,
+                    y,
+                    n_repeats=10,
+                    random_state=42,
+                    scoring="balanced_accuracy",
+                )
+                importance = np.asarray(perm.importances_mean, dtype=float)
+                importance_type = "Permutation balanced-accuracy"
+                fallback_warning = (
+                    fallback_warning
+                    or f"Model type {type(model).__name__} does not expose native feature importances; "
+                    "used permutation importance."
+                )
+            except Exception as exc:
+                return {
+                    "error": (
+                        f"Model type {type(model).__name__} does not support feature importance extraction "
+                        f"and permutation importance failed: {exc}"
+                    )
+                }
+
+    if importance is None:
+        return {"error": f"Could not compute feature importance for model '{model_key}'."}
+    importance = np.ravel(np.asarray(importance, dtype=float))
 
     # Map to names
     named_importance = {}

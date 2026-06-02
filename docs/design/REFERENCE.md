@@ -145,14 +145,14 @@ claude_check_execution, git_clean_push
 ## 9. CLI Commands
 
 ```
-/plan <goal>      — Enter plan mode with DAG decomposition
-/show_plan        — Display current plan
-/execute_plan     — Execute planned steps
-/skills           — List registered skills
+/plan <goal>      — Draft a structured plan (DAG decomposition)
+/graph            — Display the current plan / action graph
+/plan-approve     — Approve and execute the active plan
+/skills           — List registered skills (alias: /tools)
 /evidence <id>    — Show evidence for claim
 /memory           — Inspect memory tiers
 /models           — Show available models
-/routing          — Show orchestration status
+/routing-status   — Show orchestration status
 ```
 
 ---

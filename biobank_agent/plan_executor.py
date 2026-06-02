@@ -81,6 +81,26 @@ def _report_artifact_error(step: PlanStep, result: dict) -> str:
     broken_links = result.get("broken_figure_links") or []
     if broken_links:
         return "generate_report produced broken linked artifact(s): " + ", ".join(str(x) for x in broken_links[:8])
+    if result.get("polished") is not True:
+        return "generate_report did not pass through academic_report_polisher"
+    polish_payloads: list[dict] = []
+    for key in ("polisher", "polisher_css"):
+        value = result.get(key)
+        if isinstance(value, dict):
+            if value.get("quality_checks"):
+                polish_payloads.append(value)
+            else:
+                polish_payloads.extend(v for v in value.values() if isinstance(v, dict) and v.get("quality_checks"))
+    if not polish_payloads:
+        return "generate_report did not return report polishing quality metadata"
+    for payload in polish_payloads:
+        checks = payload.get("quality_checks") or {}
+        if checks.get("figure_links_resolvable") is False:
+            missing = checks.get("missing_figure_links") or []
+            return "academic_report_polisher found broken figure link(s): " + ", ".join(str(x) for x in missing[:8])
+        if checks.get("no_forbidden_main_body_patterns") is False:
+            patterns = checks.get("forbidden_main_body_patterns") or []
+            return "academic_report_polisher found machine-output pattern(s): " + ", ".join(str(x) for x in patterns[:8])
     return ""
 
 

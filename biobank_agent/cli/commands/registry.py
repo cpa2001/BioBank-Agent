@@ -10,13 +10,16 @@ from __future__ import annotations
 import os
 from importlib import import_module
 from types import ModuleType
+from typing import Any
 
-from .base import CommandContext, Handler, RegisteredCommand
+from .base import CommandContext, Handler, ParsedSlashCommand, RegisteredCommand, parse_slash_command
 
 
 BUILTIN_COMMAND_MODULES = (
     "session",
+    "runtime",
     "plan",
+    "research",
     "external",
     "mcp",
     "reproducibility",
@@ -70,12 +73,37 @@ def build_core_registry() -> dict[str, RegisteredCommand]:
     return registry
 
 
+class SlashCommandRegistry:
+    """Dispatch slash commands through a shared parser and command table."""
+
+    def __init__(self, commands: dict[str, RegisteredCommand] | None = None) -> None:
+        self.commands = dict(commands or build_core_registry())
+
+    def parse(self, text: str) -> ParsedSlashCommand | None:
+        return parse_slash_command(text)
+
+    def get(self, name: str) -> RegisteredCommand | None:
+        return self.commands.get(str(name or "").lower())
+
+    def dispatch(self, text: str, ctx: CommandContext) -> Any:
+        parsed = self.parse(text)
+        if parsed is None:
+            raise ValueError("not a slash command")
+        command = self.get(parsed.name)
+        if command is None:
+            raise KeyError(parsed.name)
+        return command.handle(ctx, parsed.arg)
+
+
 __all__ = [
     "BUILTIN_COMMAND_MODULES",
     "CommandContext",
     "EXTRA_COMMAND_MODULES_ENV",
     "Handler",
+    "ParsedSlashCommand",
     "RegisteredCommand",
+    "SlashCommandRegistry",
     "build_core_registry",
     "iter_registered_commands",
+    "parse_slash_command",
 ]

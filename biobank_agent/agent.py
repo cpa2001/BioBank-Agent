@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -334,7 +335,7 @@ class Agent:
             n_diag = self.dm.conn.execute("SELECT COUNT(*) FROM diagnoses").fetchone()[0]
             parts.append(f"- **{n_diag:,} diagnosis records** with coded diagnoses")
         except Exception:
-            parts.append("- Diagnosis records available")
+            pass
 
         try:
             n_deaths = self.dm.conn.execute("SELECT COUNT(*) FROM deaths").fetchone()[0]
@@ -344,7 +345,26 @@ class Agent:
 
         try:
             n_fields = len(self.catalog.fields)
-            parts.append(f"- **{n_fields:,} field definitions** in the catalogue")
+            if n_fields > 0:
+                parts.append(f"- **{n_fields:,} field definitions** in the catalogue")
+        except Exception:
+            pass
+
+        try:
+            cols = self.dm.list_parquet_columns()
+            id_col = self.settings.subject_id_col
+            data_cols = [c for c in cols if c != id_col]
+            if data_cols:
+                parts.append(f"- Available fields: {', '.join(data_cols)}")
+        except Exception:
+            pass
+
+        try:
+            vcf_dir = os.getenv("VC_WGS_VCF_DIR", "")
+            if vcf_dir and Path(vcf_dir).exists():
+                n_vcf = len(list(Path(vcf_dir).glob("*.genotyper.vcf.gz")))
+                if n_vcf:
+                    parts.append(f"- **{n_vcf} WGS VCF files** (hg38, GATK HaplotypeCaller)")
         except Exception:
             pass
 

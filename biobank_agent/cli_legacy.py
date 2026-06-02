@@ -19,6 +19,8 @@ import subprocess
 import sys
 import time
 import asyncio
+import termios
+import tty
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,12 +28,51 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.formatted_text import FormattedText, HTML
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.styles import Style as PTStyle
+try:  # pragma: no cover - optional runtime dependency
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.formatted_text import FormattedText, HTML
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.styles import Style as PTStyle
+    _PROMPT_TOOLKIT_AVAILABLE = True
+except Exception:  # pragma: no cover - import fallback
+    _PROMPT_TOOLKIT_AVAILABLE = False
+
+    class PromptSession:  # type: ignore[override]
+        def __init__(self, *args, **kwargs):
+            self._args = args
+            self._kwargs = kwargs
+
+        def prompt(self, *args, **kwargs):
+            raise RuntimeError("prompt_toolkit is not available")
+
+    class AutoSuggestFromHistory:  # type: ignore[override]
+        pass
+
+    class Completer:  # type: ignore[override]
+        pass
+
+    class Completion:  # type: ignore[override]
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    class FormattedText(list):  # type: ignore[override]
+        pass
+
+    def HTML(text):  # type: ignore[override]
+        return text
+
+    class FileHistory:  # type: ignore[override]
+        def __init__(self, *args, **kwargs):
+            self._args = args
+            self._kwargs = kwargs
+
+    class PTStyle:  # type: ignore[override]
+        @staticmethod
+        def from_dict(data):
+            return data
 from rich import box
 from rich.columns import Columns
 from rich.console import Console
@@ -40,12 +81,14 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .agent import Agent
 from . import __version__
 from .config import get_settings
 from .plan_state import DEFAULT_CHECKPOINT_FILE, PlanCheckpoint
 from .plan_executor import PlanExecutor
 from .planner import LongHorizonPlanner, PlanMode, PlanState
+
+run_interactive_shell = None
+Agent = None
 
 console = Console()
 _PENDING_STDIN_LINES: list[str] = []
@@ -58,7 +101,7 @@ def _plan_checkpoint_path(settings) -> Path:
     return Path(settings.plans_dir) / DEFAULT_CHECKPOINT_FILE
 
 
-def _sync_plan_execution_log(agent: Agent, planner: PlanMode) -> None:
+def _sync_plan_execution_log(agent, planner: PlanMode) -> None:
     """Expose plan execution results to report generation as sanitized rows."""
     rows = []
     for item in getattr(planner, "execution_log", []) or []:
@@ -77,7 +120,7 @@ def _sync_plan_execution_log(agent: Agent, planner: PlanMode) -> None:
 
 
 def _emit_tui_plan_event(
-    agent: Agent,
+    agent,
     phase: str,
     actor: str,
     status: str,
@@ -108,7 +151,7 @@ def _emit_tui_plan_event(
         logger.debug("Failed to forward TUI plan event", exc_info=True)
 
 
-def _stream_agent_response(agent: Agent, query: str) -> tuple[str, bool]:
+def _stream_agent_response(agent, query: str) -> tuple[str, bool]:
     """Run one normal agent turn through AsyncAgent and render events live.
 
     Returns ``(final_text, streamed)``. ``streamed=False`` means the caller
@@ -255,6 +298,8 @@ HELP_SECTIONS = [
         ("/plan <task>", "Design and execute a structured plan"),
         ("/plan-approve", "Approve plan and begin execution"),
         ("/plan-edit <feedback>", "Refine plan with natural language"),
+        ("/plan-title <title>", "Rename the active plan/report title"),
+        ("/plan-rename <title>", "Alias for /plan-title"),
         ("/plan-pause", "Pause plan execution"),
         ("/plan-resume", "Resume paused plan execution after repair"),
         ("/plan-option <A|B|C|N>", "Choose a suggested repair/review option after a block"),
@@ -339,6 +384,8 @@ class SlashCommandCompleter(Completer):
 
 def _build_prompt_session(settings) -> PromptSession:
     """Create an interactive prompt session with slash autocomplete."""
+    if not _PROMPT_TOOLKIT_AVAILABLE:
+        raise RuntimeError("prompt_toolkit is not available")
     settings.memory_dir.mkdir(parents=True, exist_ok=True)
     history_path = settings.memory_dir / "cli_history.txt"
     hints = _command_hints()
@@ -397,6 +444,32 @@ def _read_query(prompt_session: PromptSession | None, planner: PlanMode) -> str:
         return console.input(prompt_str)
     plan_status = getattr(planner, "status", "") if planner.is_active else ""
     return prompt_session.prompt(_prompt_message(planner.is_active, plan_status))
+
+
+def _read_multiline_plan_goal() -> str:
+    """Read a natural-language task after a bare /plan command."""
+    console.print(Panel(
+        "\n".join([
+            "[bold]Describe the task to plan.[/bold]",
+            "",
+            "Type a short natural-language request. Finish with an empty line.",
+            "Example: 分析这批白癜风WGS数据，比较青少年白癜风和白癜风组",
+        ]),
+        title="New Plan",
+        border_style="cyan",
+    ))
+    lines: list[str] = []
+    while True:
+        try:
+            raw = console.input("[bold cyan]task[/] > " if not lines else "[dim]...[/] ")
+        except EOFError:
+            break
+        if not raw.strip():
+            break
+        lines.append(raw.rstrip())
+        if len(lines) >= 200:
+            break
+    return "\n".join(lines).strip()
 
 
 def _looks_like_plan_paste_start(query: str) -> bool:
@@ -556,6 +629,104 @@ def _refresh_plan_from_pasted_goal(planner: PlanMode) -> str | None:
         return "Could not rebuild plan from pasted goal; keeping the current reviewed plan."
 
 
+def _read_single_key() -> str:
+    """Read one raw key sequence from stdin for lightweight TTY selectors."""
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        first = sys.stdin.read(1)
+        if first == "\x1b":
+            ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+            if ready:
+                second = sys.stdin.read(1)
+                if second == "[":
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    third = sys.stdin.read(1) if ready else ""
+                    return first + second + third
+                return first + second
+        return first
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _keyboard_select_option(question: dict, options: list[dict]) -> dict | None:
+    """Interactive up/down/space/enter selector for single-choice clarifications."""
+    result = _keyboard_select(question, options, multi=False)
+    if isinstance(result, dict):
+        return result
+    return None
+
+
+def _keyboard_select(question: dict, options: list[dict], *, multi: bool = False) -> dict | list[dict] | None:
+    """Interactive up/down/space/enter selector for plan clarification choices."""
+    if not _stdin_is_interactive():
+        return None
+    try:
+        selected = 0
+        checked: set[int] = {idx for idx, opt in enumerate(options) if opt.get("default_checked")}
+        if not checked:
+            checked = {0}
+
+        def render() -> None:
+            mode = "multi-select" if multi else "single-select"
+            rows = [
+                f"[bold]{question.get('question', 'Clarification needed')}[/bold]",
+                "",
+            ]
+            for idx, opt in enumerate(options):
+                cursor = ">" if idx == selected else " "
+                marker = "●" if idx in checked else "○"
+                rows.append(
+                    f"{cursor} {marker} {opt.get('label', f'Option {idx + 1}')} - "
+                    f"{opt.get('description', '')}"
+                )
+            rows.extend([
+                "",
+                f"[dim]{mode}: Use ↑/↓ to move, Space to select, Enter to confirm. "
+                "Press 1-9 for direct choice.[/dim]",
+            ])
+            console.print(Panel(
+                "\n".join(rows),
+                title=f"Clarification: {question.get('header', question.get('id', 'Plan'))}",
+                border_style="yellow",
+            ))
+
+        while True:
+            render()
+            key = _read_single_key()
+            if key in ("\r", "\n"):
+                selected_options = [options[idx] for idx in sorted(checked) if 0 <= idx < len(options)]
+                if multi:
+                    return selected_options or [options[0]]
+                return selected_options[0] if selected_options else options[0]
+            if key == " ":
+                if multi:
+                    if selected in checked and len(checked) > 1:
+                        checked.remove(selected)
+                    else:
+                        checked.add(selected)
+                else:
+                    checked = {selected}
+                continue
+            if key in ("\x1b[A", "k"):
+                selected = (selected - 1) % len(options)
+                continue
+            if key in ("\x1b[B", "j"):
+                selected = (selected + 1) % len(options)
+                continue
+            if key and key.isdigit():
+                index = int(key) - 1
+                if 0 <= index < len(options):
+                    if multi:
+                        return [options[index]]
+                    return options[index]
+            if key in ("\x03", "\x04"):
+                raise KeyboardInterrupt
+    except (OSError, termios.error):
+        return None
+
+
 def _collect_plan_clarifications(planner: PlanMode, goal: str) -> tuple[str, list[dict]]:
     """Ask only critical plan-shaping questions before decomposition."""
     questions = planner.identify_clarifications(goal)
@@ -567,57 +738,120 @@ def _collect_plan_clarifications(planner: PlanMode, goal: str) -> tuple[str, lis
         options = list(question.get("options", []) or [])
         if not options:
             continue
-        console.print()
-        console.print(Panel(
-            "\n".join(
-                [
-                    f"[bold]{question.get('question', 'Clarification needed')}[/bold]",
-                    "",
-                    *[
-                        f"[cyan]{idx + 1}[/cyan]. {opt.get('label', f'Option {idx + 1}')} - {opt.get('description', '')}"
-                        for idx, opt in enumerate(options)
-                    ],
-                    "",
-                    "[dim]Press Enter to accept option 1, or type a number/custom answer.[/dim]",
-                ]
-            ),
-            title=f"Clarification: {question.get('header', question.get('id', 'Plan'))}",
-            border_style="yellow",
-        ))
         selected = options[0]
+        is_multi = bool(question.get("multi"))
+        selected_multi: list[dict] | None = None
         if _stdin_is_interactive():
-            raw = console.input("[bold yellow]Choice[/] > ").strip()
-            if raw:
-                try:
-                    index = int(raw) - 1
-                    if 0 <= index < len(options):
-                        selected = options[index]
-                    else:
+            if is_multi:
+                keyboard_selected = _keyboard_select(question, options, multi=True)
+                if keyboard_selected:
+                    selected_multi = [item for item in keyboard_selected if isinstance(item, dict)]
+                    selected = keyboard_selected[0]
+            else:
+                keyboard_selected = _keyboard_select_option(question, options)
+                if keyboard_selected is not None:
+                    selected = keyboard_selected
+            if not is_multi and keyboard_selected is None:
+                console.print()
+                console.print(Panel(
+                    "\n".join(
+                        [
+                            f"[bold]{question.get('question', 'Clarification needed')}[/bold]",
+                            "",
+                            *[
+                                f"[cyan]{idx + 1}[/cyan]. {opt.get('label', f'Option {idx + 1}')} - {opt.get('description', '')}"
+                                for idx, opt in enumerate(options)
+                            ],
+                            "",
+                            "[dim]Press Enter to accept option 1, or type a number/custom answer.[/dim]",
+                        ]
+                    ),
+                    title=f"Clarification: {question.get('header', question.get('id', 'Plan'))}",
+                    border_style="yellow",
+                ))
+                raw = console.input("[bold yellow]Choice[/] > ").strip()
+                if raw:
+                    try:
+                        index = int(raw) - 1
+                        if 0 <= index < len(options):
+                            selected = options[index]
+                        else:
+                            selected = {
+                                "label": "Custom",
+                                "value": raw,
+                                "description": "User supplied custom clarification.",
+                            }
+                    except ValueError:
                         selected = {
                             "label": "Custom",
                             "value": raw,
                             "description": "User supplied custom clarification.",
                         }
-                except ValueError:
-                    selected = {
-                        "label": "Custom",
-                        "value": raw,
-                        "description": "User supplied custom clarification.",
-                    }
         else:
+            console.print()
+            console.print(Panel(
+                "\n".join(
+                    [
+                        f"[bold]{question.get('question', 'Clarification needed')}[/bold]",
+                        "",
+                        *[
+                            f"[cyan]{idx + 1}[/cyan]. {opt.get('label', f'Option {idx + 1}')} - {opt.get('description', '')}"
+                            for idx, opt in enumerate(options)
+                        ],
+                    ]
+                ),
+                title=f"Clarification: {question.get('header', question.get('id', 'Plan'))}",
+                border_style="yellow",
+            ))
             console.print(f"[dim]Non-interactive mode: using default clarification {selected.get('label')}.[/dim]")
 
+        if is_multi and selected_multi:
+            answer_value = "\n".join(
+                str(item.get("value") or item.get("description") or item.get("label") or "")
+                for item in selected_multi
+            )
+            answer_label = ", ".join(str(item.get("label") or "") for item in selected_multi if item.get("label"))
+        else:
+            answer_value = selected.get("value") or selected.get("description") or selected.get("label") or ""
+            answer_label = str(selected.get("label", ""))
         answers.append({
             "id": str(question.get("id", "")),
             "question": str(question.get("question", "")),
-            "label": str(selected.get("label", "")),
-            "answer": str(selected.get("value") or selected.get("description") or selected.get("label") or ""),
+            "label": answer_label,
+            "answer": str(answer_value),
+            "source": str(question.get("source") or "planner"),
         })
 
     if not answers:
         return goal, []
 
     clarification_text = "\n".join(f"- {item['id']}: {item['answer']}" for item in answers)
+    is_wgs_vitiligo = bool(planner.planner._is_wgs_vitiligo_goal(goal))
+    is_juvenile_mechanism = bool(planner.planner._is_juvenile_hair_mechanism_goal(goal))
+    if is_juvenile_mechanism and not is_wgs_vitiligo:
+        clarification_text = (
+            f"{clarification_text}\n"
+            "- juvenile_hair_mechanism_policy: Treat this as a Juvenile hair-whitening multi-omics "
+            "mechanism analysis. Infer the WGS candidate variant, TF binding, scATAC accessibility, "
+            "scRNA expression, Stereo spatial, Action Graph, workflow-gap and report trajectory from "
+            "registered skills rather than requiring the user to enumerate each analysis step."
+        )
+    elif is_wgs_vitiligo:
+        clarification_text = (
+            f"{clarification_text}\n"
+            "- wgs_agent_policy: Treat this as a VirtualCell vitiligo WGS analysis. "
+            "Infer the executable workflow from available WGS skills and data inventory rather than requiring "
+            "the user to enumerate QC, annotation, population genetics, association, burden, enrichment, "
+            "model diagnostics, literature, Action Graph, reproducibility, or report steps."
+        )
+    elif planner.planner._is_virtualcell_multimodal_goal(goal):
+        clarification_text = (
+            f"{clarification_text}\n"
+            "- virtualcell_agent_policy: Treat this as a VirtualCell/BWhair multimodal analysis. "
+            "Infer WGS, Stereo-seq, scRNA-seq, scATAC-seq, donor linkage, backed h5ad inspection, "
+            "literature context, Action Graph, reproducibility and report steps from the registered skills "
+            "rather than requiring the user to enumerate them."
+        )
     clarified_goal = f"{goal.rstrip()}\n\nClarifications:\n{clarification_text}".strip()
     return clarified_goal, answers
 
@@ -1798,6 +2032,11 @@ def eval_cmd() -> None:
 
 def main() -> None:
     """CLI entry point."""
+    global Agent
+    if Agent is None:
+        from .agent import Agent as _Agent
+
+        Agent = _Agent
     # Check for subcommands
     if len(sys.argv) > 1 and sys.argv[1] == "rebuild-parquet":
         rebuild_parquet_cmd()
@@ -1809,14 +2048,27 @@ def main() -> None:
         eval_cmd()
         return
 
-    # Parse optional args
+    # Parse optional args. The single interactive `biobank` REPL is the ONLY
+    # interaction mode: the former --tui (Textual) and --legacy-repl modes were
+    # removed during consolidation; any leftover dashes are ignored.
     model = None
-    use_tui = False
+    positional_task: list[str] = []
+    skip_next = False
     for i, arg in enumerate(sys.argv[1:], 1):
+        if skip_next:
+            skip_next = False  # this token was consumed as the --model value
+            continue
         if arg.startswith("--model="):
             model = arg.split("=", 1)[1]
-        elif arg == "--tui":
-            use_tui = True
+        elif arg == "--model" and i + 1 < len(sys.argv):
+            model = sys.argv[i + 1]
+            skip_next = True
+        elif arg.startswith("-"):
+            if positional_task and positional_task[0].startswith("/"):
+                positional_task.append(arg)
+            continue
+        else:
+            positional_task.append(arg)
 
     # Setup logging
     logging.basicConfig(
@@ -1829,10 +2081,20 @@ def main() -> None:
     settings.ensure_dirs()
     if model:
         settings.llm_model = model
-    if use_tui:
-        from .cli.tui import run_tui
-        if run_tui(settings):
-            return
+
+    global run_interactive_shell
+    if run_interactive_shell is None:
+        from .cli.interactive import run_interactive_shell as _run_interactive_shell
+        run_interactive_shell = _run_interactive_shell
+    if run_interactive_shell is None:
+        raise RuntimeError("Interactive shell is unavailable")
+    # Final safety net: the shell loop already contains command-level interrupts,
+    # but guarantee that no interrupt at any layer ever surfaces as a raw traceback.
+    try:
+        run_interactive_shell(settings, initial_task=" ".join(positional_task).strip(), console=console)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrupted. Goodbye.[/]")
+    return
 
     # Create agent
     with console.status("[bold green]Loading data layer..."):
@@ -1861,7 +2123,7 @@ def main() -> None:
             f"[yellow]Restored paused plan checkpoint:[/] {planner.goal} "
             f"({planner.state.value}, v{planner.revision})"
         )
-    prompt_session = _build_prompt_session(settings) if sys.stdin.isatty() else None
+    prompt_session = _build_prompt_session(settings) if sys.stdin.isatty() and _PROMPT_TOOLKIT_AVAILABLE else None
 
     # Token tracking
     token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_cost_usd": 0.0}
@@ -2055,6 +2317,7 @@ def _build_registered_command_actions(
         "plan": lambda value: _cmd_plan(agent, planner, value),
         "plan_approve": lambda: _cmd_plan_approve(agent, planner, token_usage),
         "plan_edit": lambda value: _cmd_plan_edit(agent, planner, value),
+        "plan_title": lambda value: _cmd_plan_title(agent, planner, value),
         "plan_pause": lambda: _cmd_plan_pause(agent, planner),
         "plan_resume": lambda: _cmd_plan_resume(agent, planner, token_usage),
         "plan_option": lambda value: _cmd_plan_option(agent, planner, value, token_usage),
@@ -2115,13 +2378,20 @@ def _cmd_plan(agent: Agent, planner: PlanMode, arg: str) -> None:
     """Registry-backed implementation of /plan."""
     if not arg:
         if planner.state == PlanState.INACTIVE:
-            console.print("[dim]No active plan. Use /plan <goal> to start.[/]")
+            if not _stdin_is_interactive():
+                console.print("[dim]No active plan. Use /plan <goal> to start.[/]")
+                return
+            arg = _read_multiline_plan_goal()
+            if not arg:
+                console.print("[dim]No task entered.[/]")
+                return
+        else:
+            console.print(f"[bold]Plan:[/bold] {planner.plan.title if planner.plan and planner.plan.title else planner.goal}")
+            console.print(f"[bold]Original goal:[/bold] {planner.goal}")
+            console.print(f"[bold]State:[/bold] {planner.state.value} (v{planner.revision})")
+            if planner.plan:
+                console.print(f"[bold]Progress:[/bold] {planner.plan.done_steps}/{planner.plan.total_steps} steps done")
             return
-        console.print(f"[bold]Plan:[/bold] {planner.goal}")
-        console.print(f"[bold]State:[/bold] {planner.state.value} (v{planner.revision})")
-        if planner.plan:
-            console.print(f"[bold]Progress:[/bold] {planner.plan.done_steps}/{planner.plan.total_steps} steps done")
-        return
 
     if planner.is_active:
         console.print("[yellow]A plan is already active. Use /plan-exit first.[/]")
@@ -2311,6 +2581,19 @@ def _cmd_plan_edit(agent: Agent, planner: PlanMode, arg: str) -> None:
         from .progress import PlanProgressDisplay
         display = PlanProgressDisplay(planner.plan, console)
         display.show_plan_for_review(revision=planner.revision)
+
+
+def _cmd_plan_title(agent: Agent, planner: PlanMode, arg: str) -> None:
+    """Rename the active plan/report title."""
+    result = planner.rename(arg)
+    if result.startswith("Plan title updated"):
+        PlanCheckpoint.from_plan_mode(planner).save(_plan_checkpoint_path(agent.settings))
+        console.print(f"[green]{result}[/green]\n")
+        if planner.plan:
+            from .progress import PlanProgressDisplay
+            PlanProgressDisplay(planner.plan, console).show_plan_for_review(revision=planner.revision)
+    else:
+        console.print(f"[yellow]{result}[/yellow]")
 
 
 def _cmd_plan_pause(agent: Agent, planner: PlanMode) -> None:
@@ -4174,7 +4457,7 @@ def _show_evolution_status(agent: Agent, raw_arg: str = "") -> None:
             if confirm_fn is None:
                 console.print(
                     "[yellow]MEDIUM proposals require an explicit confirmation callback. "
-                    "Run this from `biobank --tui` or provide `state.custom_data['evolve_confirm_fn']`.[/]"
+                    "Provide `state.custom_data['evolve_confirm_fn']` to approve them.[/]"
                 )
             outcomes = _apply_evolution_proposals(
                 agent,

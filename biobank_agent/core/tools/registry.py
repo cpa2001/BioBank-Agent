@@ -13,6 +13,8 @@ from typing import Iterable, Optional
 
 from biobank_agent.registry import SkillRegistry, get_registry as _get_legacy_registry
 
+from .native import build_native_tools
+
 from .protocol import (
     Capability,
     LegacySkillToolHandler,
@@ -37,11 +39,13 @@ _LEGACY_CAP_OVERRIDES: dict[str, frozenset[Capability]] = {
     "literature_qa": frozenset({Capability.READ_DATA, Capability.NETWORK, Capability.WRITE_REPORTS}),
     "web_search": frozenset({Capability.NETWORK}),
     "web_fetch": frozenset({Capability.NETWORK}),
-    "external_agents": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
+    "external_agent_status": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
     "codex_plan": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
-    "codex_check": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
+    "codex_check_execution": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
     "claude_plan": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
-    "claude_check": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
+    "claude_check_execution": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
+    "gemini_plan": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
+    "gemini_check_execution": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
     # Memory-mutating skills
     "create_skill": frozenset(
         {Capability.WRITE_REPORTS, Capability.MUTATE_MEMORY}
@@ -82,6 +86,7 @@ class ToolRegistry:
         self._legacy = legacy or _get_legacy_registry()
         self._handlers: dict[str, ToolHandler] = {}
         self._handlers_loaded_from_legacy: bool = False
+        self._native_loaded: bool = False
 
     # ── Discovery / registration ─────────────────────────────
 
@@ -120,6 +125,10 @@ class ToolRegistry:
             self._handlers[name] = handler
             loaded += 1
         self._handlers_loaded_from_legacy = True
+        if not self._native_loaded:
+            for handler in build_native_tools():
+                self.register(handler)
+            self._native_loaded = True
         return loaded
 
     def register(self, handler: ToolHandler) -> None:

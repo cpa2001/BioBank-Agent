@@ -54,6 +54,50 @@ class Capability(str, Enum):
     SHELL_EXEC = "shell_exec"
 
 
+class SafetyClass(str, Enum):
+    """High-level local-action class used by approvals and audits."""
+
+    READ = "read"
+    WRITE = "write"
+    SHELL_SAFE = "shell_safe"
+    SHELL_DESTRUCTIVE = "shell_destructive"
+    NETWORK = "network"
+    PRIVILEGED = "privileged"
+    SENSITIVE_DATA = "sensitive_data"
+    SELF_MODIFICATION = "self_modification"
+
+
+class WorkspaceScope(str, Enum):
+    """Filesystem scope a tool is allowed to touch."""
+
+    NONE = "none"
+    WORKSPACE = "workspace"
+    REPORTS = "reports"
+    EXTERNAL_READ = "external_read"
+
+
+class ActionClass(str, Enum):
+    """Low-level action classification used by permissions and audits."""
+
+    READ = "read"
+    WRITE = "write"
+    SHELL_SAFE = "shell_safe"
+    SHELL_DESTRUCTIVE = "shell_destructive"
+    NETWORK = "network"
+    PRIVILEGED = "privileged"
+    SENSITIVE_DATA = "sensitive_data"
+    SELF_MODIFICATION = "self_modification"
+
+
+class TrajectorySerialization(str, Enum):
+    """How a tool result should be represented in trajectory records."""
+
+    FULL = "full"
+    TRUNCATED = "truncated"
+    REDACTED = "redacted"
+    METADATA_ONLY = "metadata_only"
+
+
 _DEFAULT_CAPS = frozenset({Capability.READ_DATA, Capability.WRITE_REPORTS})
 
 
@@ -65,6 +109,12 @@ class ToolSpec:
     description: str
     parameters: dict[str, Any]  # OpenAI-style JSON schema dict
     required: list[str] = field(default_factory=list)
+    output_schema: dict[str, Any] = field(default_factory=dict)
+    safety_class: SafetyClass | str = SafetyClass.READ
+    approval_requirement: str = "allow"
+    workspace_scope: WorkspaceScope | str = WorkspaceScope.NONE
+    action_classes: tuple[ActionClass | str, ...] = ()
+    trajectory_serialization: TrajectorySerialization | str = TrajectorySerialization.TRUNCATED
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {
@@ -78,6 +128,28 @@ class ToolSpec:
                     "required": list(self.required),
                 },
             },
+        }
+
+    def metadata(self) -> dict[str, Any]:
+        """Return audit metadata not exposed to model tool schemas."""
+        safety = self.safety_class.value if isinstance(self.safety_class, SafetyClass) else str(self.safety_class)
+        scope = self.workspace_scope.value if isinstance(self.workspace_scope, WorkspaceScope) else str(self.workspace_scope)
+        action_classes = [
+            item.value if isinstance(item, ActionClass) else str(item)
+            for item in (self.action_classes or ())
+        ]
+        trajectory = (
+            self.trajectory_serialization.value
+            if isinstance(self.trajectory_serialization, TrajectorySerialization)
+            else str(self.trajectory_serialization)
+        )
+        return {
+            "output_schema": dict(self.output_schema or {}),
+            "safety_class": safety,
+            "approval_requirement": str(self.approval_requirement or ""),
+            "workspace_scope": scope,
+            "action_classes": action_classes,
+            "trajectory_serialization": trajectory,
         }
 
 
@@ -107,9 +179,13 @@ class ToolContext:
     state: Any = None
     memory: Any = None
     report_dir: Any = None
+    workspace_root: Any = None
+    permission_mode: str = ""
     emit_progress: Optional[Callable[..., None]] = None
     turn_id: Optional[str] = None
     tool_call_id: Optional[str] = None
+    record_trajectory: Optional[Callable[..., None]] = None
+    record_action_graph: Optional[Callable[..., None]] = None
 
     def has(self, cap: Capability) -> bool:
         return cap in self.capabilities
@@ -211,6 +287,10 @@ class LegacySkillToolHandler(_BaseHandler):
 
 __all__ = [
     "Capability",
+    "SafetyClass",
+    "WorkspaceScope",
+    "ActionClass",
+    "TrajectorySerialization",
     "ToolSpec",
     "ToolContext",
     "ToolHandler",

@@ -168,15 +168,41 @@ class BiobankConstraintVerifier:
           - Each count ≥ 0
           - If total provided: n_cases + n_controls ≤ total ≤ total_participants
           - n_excluded + total ≤ total_participants (if both provided)
+
+        Strategy: ALWAYS run the descriptive bounds checks — they produce the
+        human-readable, per-constraint issues and corrections the rest of the
+        system relies on ("n_excluded=… exceeds …"). When z3 is installed,
+        additionally run the formal Z3 consistency proof + Minimal Correction
+        Subset extraction and merge its findings on top. A solver-only path
+        silently degraded output to a single opaque "contradictory" verdict;
+        merging keeps the rich diagnostics regardless of whether z3 is present.
+        """
+        if n_cases is None and n_controls is None and total is None and n_excluded is None:
+            return VerificationResult(status="verified", claims_checked=0)
+
+        bounds = self._verify_cohort_bounds(n_cases, n_controls, total, n_excluded)
+        if not _Z3_AVAILABLE:
+            return bounds
+
+        z3_result = self._verify_cohort_z3(n_cases, n_controls, total, n_excluded)
+        return self._merge_cohort_results(bounds, z3_result)
+
+    def _verify_cohort_bounds(
+        self,
+        n_cases: Optional[int] = None,
+        n_controls: Optional[int] = None,
+        total: Optional[int] = None,
+        n_excluded: Optional[int] = None,
+    ) -> VerificationResult:
+        """Descriptive arithmetic bounds checking (no solver required).
+
+        Emits a Check + human-readable Issue per violated constraint so callers
+        get actionable, specific diagnostics rather than one opaque verdict.
         """
         checks: list[Check] = []
         issues: list[Issue] = []
         corrections: list[MinimalCorrection] = []
 
-        if _Z3_AVAILABLE:
-            return self._verify_cohort_z3(n_cases, n_controls, total, n_excluded)
-
-        # Fallback: simple bounds checking
         if n_cases is not None:
             if n_cases < 0:
                 checks.append(Check("n_cases_non_negative", passed=False, output=f"n_cases={n_cases}"))
@@ -320,6 +346,39 @@ class BiobankConstraintVerifier:
                 checks.append(Check("sum_all_provided_within_ukb", passed=True))
 
         status = "violated" if any(not c.passed for c in checks) else "verified"
+        return VerificationResult(
+            status=status,
+            claims_checked=len(checks),
+            checks=checks,
+            issues=issues,
+            corrections=corrections,
+        )
+
+    @staticmethod
+    def _merge_cohort_results(
+        bounds: VerificationResult,
+        z3_result: VerificationResult,
+    ) -> VerificationResult:
+        """Combine descriptive bounds output with the formal Z3 proof.
+
+        - checks/issues: union (bounds first → specific descriptions lead, the
+          Z3 consistency verdict follows).
+        - corrections: Z3 MCS first (it pinpoints the minimal relaxation),
+          then the bounds-derived corrections.
+        - status: violated if either path failed; undecidable only if Z3 could
+          not decide and nothing else flagged a violation; otherwise verified.
+        """
+        checks = [*bounds.checks, *z3_result.checks]
+        issues = [*bounds.issues, *z3_result.issues]
+        corrections = [*z3_result.corrections, *bounds.corrections]
+
+        if any(not c.passed for c in checks):
+            status = "violated"
+        elif z3_result.status == "undecidable":
+            status = "undecidable"
+        else:
+            status = "verified"
+
         return VerificationResult(
             status=status,
             claims_checked=len(checks),

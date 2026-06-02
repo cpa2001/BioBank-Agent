@@ -77,6 +77,18 @@ def build_cohort(
     if hasattr(dm, "normalize_icd_code"):
         icd_code = dm.normalize_icd_code(icd_code)
 
+    try:
+        conn.execute("SELECT 1 FROM diagnoses LIMIT 0")
+    except Exception:
+        bank_id = getattr(dm, "bank_id", getattr(dm.settings, "bank_id", ""))
+        raise ValueError(
+            f"No diagnosis data available for bank '{bank_id}'. "
+            f"ICD10-based cohort building requires a diagnoses table. "
+            f"For VirtualCell/WGS cohorts, use 'cohort_phenotype_summary' "
+            f"to describe the cohort or 'train_phenotype_model' to train "
+            f"a phenotype classifier."
+        )
+
     # 1. Identify cases from diagnoses (parameterized query)
     if hasattr(dm, "code_prefix_filter"):
         case_where, case_params = dm.code_prefix_filter("diagnoses", icd_code, diag_col)

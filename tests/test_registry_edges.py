@@ -177,6 +177,31 @@ def test_skill_decorator_infers_required_fields_and_registers_globally():
         registry.unregister(name)
 
 
+def test_skill_decorator_strips_property_required_metadata():
+    name = "unit_required_property_metadata"
+    registry = get_registry()
+    registry.unregister(name)
+
+    try:
+        @skill(
+            name=name,
+            description="Decorator metadata test",
+            parameters={
+                "required_arg": {"type": "string", "description": "Required", "required": True},
+                "optional_arg": {"type": "integer", "description": "Optional", "required": False},
+            },
+        )
+        def decorated(required_arg, optional_arg=None):
+            return {"required_arg": required_arg, "optional_arg": optional_arg}
+
+        params = decorated._skill_schema["function"]["parameters"]
+        assert params["required"] == ["required_arg"]
+        assert "required" not in params["properties"]["required_arg"]
+        assert "required" not in params["properties"]["optional_arg"]
+    finally:
+        registry.unregister(name)
+
+
 def test_autodiscover_missing_package_logs_warning(caplog):
     with caplog.at_level(logging.WARNING):
         autodiscover_skills("not_a_real_skill_package_for_tests")

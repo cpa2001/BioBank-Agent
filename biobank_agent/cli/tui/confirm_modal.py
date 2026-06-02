@@ -94,7 +94,7 @@ async def confirm_with_app(
 ) -> bool:
     """Ask for confirmation through a Textual app when possible."""
     push_wait = getattr(app, "push_screen_wait", None)
-    if not callable(push_wait) or Button is None:
+    if not callable(push_wait):
         return default
     try:
         return bool(await push_wait(ConfirmationModal(request)))

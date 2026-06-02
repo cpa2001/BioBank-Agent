@@ -47,9 +47,9 @@ class FieldCatalog:
                 parts = line.rstrip("\n").split("\t")
                 if len(parts) < 2:
                     continue
-                fid = parts[0]
-                if not fid.isdigit():
-                    continue  # skip header
+                fid = parts[0].strip()
+                if not fid or fid.startswith("#") or fid == "field_id":
+                    continue
                 title = parts[1] if len(parts) > 1 else ""
                 cat_id = parts[12] if len(parts) > 12 else ""
                 units = parts[11] if len(parts) > 11 else ""

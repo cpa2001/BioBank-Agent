@@ -370,6 +370,72 @@ class TestSlashCommands:
         _handle_command("/plan test task", mock_agent, mock_planner, {})
         mock_planner.start.assert_called_with("test task")
 
+    def test_plan_short_wgs_prompt_adds_framework_clarifications(self, mock_agent, mock_planner, monkeypatch):
+        from biobank_agent import cli
+        from biobank_agent.cli import _handle_command
+        from biobank_agent.planner import PlanState, LongHorizonPlan, PlanStep
+
+        monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
+        mock_planner.state = PlanState.INACTIVE
+        mock_planner.is_active = False
+        mock_planner.planner._is_wgs_vitiligo_goal.return_value = True
+        mock_planner.identify_clarifications.return_value = [
+            {
+                "id": "wgs_data_source",
+                "header": "Data",
+                "question": "Which WGS data source should anchor this plan?",
+                "options": [
+                    {
+                        "label": "Auto Discover",
+                        "value": "Auto-discover WGS data and record fallback.",
+                        "description": "Recommended.",
+                    }
+                ],
+            }
+        ]
+        mock_planner.plan = LongHorizonPlan(
+            goal="wgs",
+            steps=[PlanStep(id="s1", skill="wgs_environment_check", description="Check")],
+        )
+
+        _handle_command("/plan 分析这批白癜风WGS数据", mock_agent, mock_planner, {})
+
+        started_goal = mock_planner.start.call_args.args[0]
+        assert "wgs_data_source" in started_goal
+        assert "wgs_agent_policy" in started_goal
+        assert "QC, annotation" in started_goal
+        mock_planner.record_clarification_answers.assert_called()
+
+    def test_plan_title_renames_active_plan(self, mock_agent, cli_capture_console, tmp_path):
+        from biobank_agent.cli import _handle_command
+        from biobank_agent.planner import LongHorizonPlan, PlanMode, PlanState, PlanStep
+
+        planner = PlanMode(plans_dir=tmp_path / "plans")
+        planner.goal = "分析这批白癜风WGS数据"
+        planner.plan = LongHorizonPlan(
+            goal=planner.goal,
+            title="VirtualCell WGS Vitiligo Case-Control Analysis",
+            steps=[
+                PlanStep(id="s1", skill="think", description="Think"),
+                PlanStep(
+                    id="s2",
+                    skill="generate_report",
+                    args={"title": "VirtualCell WGS Vitiligo Case-Control Analysis", "format": "dual"},
+                    description="Report",
+                    depends_on=["s1"],
+                ),
+            ],
+        )
+        planner.state = PlanState.REVIEW
+        planner.revision = 1
+
+        _handle_command("/plan-title Short WGS Smoke", mock_agent, planner, {})
+
+        assert planner.plan.title == "Short WGS Smoke"
+        assert planner.plan.steps[1].args["title"] == "Short WGS Smoke"
+        assert planner.goal == "分析这批白癜风WGS数据"
+        assert "Plan title updated" in cli_capture_console.getvalue()
+
     def test_plan_skip_refuses_required_and_allows_optional(self, mock_agent, cli_capture_console, tmp_path):
         from biobank_agent.cli import _handle_command
         from biobank_agent.planner import LongHorizonPlan, PlanMode, PlanState, PlanStep
@@ -2151,111 +2217,68 @@ class TestMainCommand:
 
         assert calls == ["rebuild", "eval"]
 
-    def test_main_repl_slash_and_exit_paths(self, tmp_path, monkeypatch, cli_capture_console):
+    def test_main_opens_interactive_shell_by_default(self, tmp_path, monkeypatch):
         from biobank_agent import cli
 
         settings = FakeMainSettings(tmp_path)
-        agents = []
+        captured = {}
 
-        def fake_agent_factory(settings_arg):
-            agent = FakeMainAgent(settings_arg, count_subjects=RuntimeError("no data"), fields={})
-            agents.append(agent)
-            return agent
-
-        monkeypatch.setattr(cli.sys, "argv", ["biobank", "--model=override-model"])
-        monkeypatch.setattr(cli, "get_settings", lambda: settings)
-        monkeypatch.setattr(cli, "Agent", fake_agent_factory)
-        monkeypatch.setattr(cli, "PlanMode", lambda **kwargs: FakeMainPlanner(kwargs.get("plans_dir", tmp_path)))
-        monkeypatch.setattr(cli, "_read_query", MagicMock(side_effect=["", "/help", "quit"]))
-        monkeypatch.setenv("UKB_PARQUET_DIR", "/old")
-        monkeypatch.delenv("DATA_DIR", raising=False)
-
-        cli.main()
-
-        assert settings.llm_model == "override-model"
-        output = cli_capture_console.getvalue()
-        assert "deprecated" in output
-        assert "Biomarker data not found" in output
-        assert "Field catalogue empty" in output
-        assert "Goodbye" in output
-
-    def test_main_repl_runs_queries_figures_interrupts_and_errors(self, tmp_path, monkeypatch, cli_capture_console):
-        from biobank_agent import cli
-
-        settings = FakeMainSettings(tmp_path)
-        agent = FakeMainAgent(
-            settings,
-            count_subjects=123,
-            fields={"30740": {}},
-            run_side_effect=[KeyboardInterrupt(), RuntimeError("boom"), "final response"],
-        )
-
-        def fake_agent_factory(settings_arg):
-            return agent
-
-        def fake_read_query(prompt_session, planner):
-            if not hasattr(fake_read_query, "queries"):
-                fake_read_query.queries = iter(["interrupt", "error", "normal", "quit"])
-            return next(fake_read_query.queries)
-
-        def fake_status(message):
-            class DummyStatus:
-                def __enter__(self):
-                    if "Thinking" in message and agent.run.call_count == 2:
-                        agent.state.figures.append(str(tmp_path / "new.png"))
-                    return self
-
-                def __exit__(self, exc_type, exc, tb):
-                    return False
-
-            return DummyStatus()
-
-        monkeypatch.setattr(cli.sys, "argv", ["biobank", "--noop"])
-        monkeypatch.setattr(cli, "get_settings", lambda: settings)
-        monkeypatch.setattr(cli, "Agent", fake_agent_factory)
-        monkeypatch.setattr(cli, "PlanMode", lambda **kwargs: FakeMainPlanner(kwargs.get("plans_dir", tmp_path), active=True))
-        monkeypatch.setattr(cli, "_read_query", fake_read_query)
-        monkeypatch.setattr(cli.console, "status", fake_status)
-
-        cli.main()
-
-        assert agent.run.call_count == 3
-        assert "[PLAN MODE" in agent.run.call_args_list[0].args[0]
-        output = cli_capture_console.getvalue()
-        assert "Interrupted" in output
-        assert "Error: boom" in output
-        assert "final response" in output
-
-    def test_main_repl_runs_plain_query_outside_plan_mode(self, tmp_path, monkeypatch, cli_capture_console):
-        from biobank_agent import cli
-
-        settings = FakeMainSettings(tmp_path)
-        agent = FakeMainAgent(settings, run_side_effect=["plain response"])
+        def fake_interactive(settings_arg, *, initial_task="", console=None):
+            captured["settings"] = settings_arg
+            captured["initial_task"] = initial_task
+            captured["console"] = console
 
         monkeypatch.setattr(cli.sys, "argv", ["biobank"])
         monkeypatch.setattr(cli, "get_settings", lambda: settings)
-        monkeypatch.setattr(cli, "Agent", lambda settings_arg: agent)
-        monkeypatch.setattr(cli, "PlanMode", lambda **kwargs: FakeMainPlanner(kwargs.get("plans_dir", tmp_path), active=False))
-        monkeypatch.setattr(cli, "_read_query", MagicMock(side_effect=["plain question", "quit"]))
-
-        cli.main()
-
-        agent.run.assert_called_once_with("plain question")
-        assert "plain response" in cli_capture_console.getvalue()
-
-    def test_main_repl_eof_exit(self, tmp_path, monkeypatch, cli_capture_console):
-        from biobank_agent import cli
-
-        settings = FakeMainSettings(tmp_path)
-        monkeypatch.setattr(cli.sys, "argv", ["biobank"])
-        monkeypatch.setattr(cli, "get_settings", lambda: settings)
+        monkeypatch.setattr(cli, "run_interactive_shell", fake_interactive)
         monkeypatch.setattr(cli, "Agent", lambda settings_arg: FakeMainAgent(settings_arg))
-        monkeypatch.setattr(cli, "PlanMode", lambda **kwargs: FakeMainPlanner(kwargs.get("plans_dir", tmp_path)))
-        monkeypatch.setattr(cli, "_read_query", MagicMock(side_effect=EOFError()))
 
         cli.main()
 
-        assert "Goodbye" in cli_capture_console.getvalue()
+        assert captured["settings"] is settings
+        assert captured["initial_task"] == ""
+        assert captured["console"] is cli.console
+
+    def test_main_model_space_form_does_not_contaminate_task(self, tmp_path, monkeypatch):
+        # Regression: `--model foo` must consume `foo` as the model value, not also
+        # leak it into the seeded interactive task.
+        from biobank_agent import cli
+
+        settings = FakeMainSettings(tmp_path)
+        captured = {}
+
+        def fake_interactive(settings_arg, *, initial_task="", console=None):
+            captured["initial_task"] = initial_task
+
+        monkeypatch.setattr(cli.sys, "argv", ["biobank", "--model", "model-b", "Analyze", "cohort"])
+        monkeypatch.setattr(cli, "get_settings", lambda: settings)
+        monkeypatch.setattr(cli, "run_interactive_shell", fake_interactive)
+        monkeypatch.setattr(cli, "Agent", lambda settings_arg: FakeMainAgent(settings_arg))
+
+        cli.main()
+
+        assert settings.llm_model == "model-b"
+        assert captured["initial_task"] == "Analyze cohort"
+
+    def test_main_compatibility_task_seeds_interactive_shell(self, tmp_path, monkeypatch):
+        from biobank_agent import cli
+
+        settings = FakeMainSettings(tmp_path)
+        captured = {}
+
+        def fake_interactive(settings_arg, *, initial_task="", console=None):
+            captured["settings"] = settings_arg
+            captured["initial_task"] = initial_task
+
+        monkeypatch.setattr(cli.sys, "argv", ["biobank", "Analyze the cohort"])
+        monkeypatch.setattr(cli, "get_settings", lambda: settings)
+        monkeypatch.setattr(cli, "run_interactive_shell", fake_interactive)
+        monkeypatch.setattr(cli, "Agent", lambda settings_arg: FakeMainAgent(settings_arg))
+
+        cli.main()
+
+        assert captured["settings"] is settings
+        assert captured["initial_task"] == "Analyze the cohort"
 
 
 class TestCliRemainingBranches:

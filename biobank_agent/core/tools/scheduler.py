@@ -207,6 +207,19 @@ class ToolScheduler:
             await self._emit_terminal(request, outcome)
             return outcome
 
+        if callable(getattr(ctx, "record_trajectory", None)):
+            try:
+                ctx.record_trajectory(
+                    {
+                        "phase": "tool_started",
+                        "tool": request.handler.name,
+                        "call_id": request.call_id,
+                        "args": dict(request.args or {}),
+                    }
+                )
+            except Exception:
+                pass
+
         # Execute
         await bus.publish(
             AgentEvent.make(
@@ -263,6 +276,21 @@ class ToolScheduler:
             )
         finally:
             self._cancel.pop(request.call_id, None)
+
+        if callable(getattr(ctx, "record_trajectory", None)):
+            try:
+                ctx.record_trajectory(
+                    {
+                        "phase": "tool_finished",
+                        "tool": request.handler.name,
+                        "call_id": request.call_id,
+                        "state": outcome.state.value,
+                        "error": outcome.error,
+                        "result": outcome.result,
+                    }
+                )
+            except Exception:
+                pass
 
         await self._emit_terminal(request, outcome)
         return outcome

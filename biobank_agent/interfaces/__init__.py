@@ -1,1 +1,1 @@
-"""Interfaces package — stubs for future extensions."""
+"""Public interface adapters for external and embedded BioBank-Agent clients."""

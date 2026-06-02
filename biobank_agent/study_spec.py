@@ -252,12 +252,25 @@ class StudySpec(BaseModel):
 
     def constrain_skills(self, available_skills: list[str]) -> list[str]:
         """Filter available skills to only those relevant to this spec's modalities."""
+        try:
+            from .skills.goal_intent_classifier import classify_goal_intent
+
+            profile = classify_goal_intent(self.source_query, available_skills=available_skills)
+            if (
+                profile.get("task_family") in {"juvenile_hair_multiomics_mechanism", "virtualcell_multimodal"}
+                and float(profile.get("confidence") or 0.0) >= 0.55
+            ):
+                return available_skills
+        except Exception:
+            logger.debug("StudySpec intent-profile skill preservation skipped", exc_info=True)
+
         # Map modalities to relevant skill prefixes
         modality_skill_map: dict[Modality, list[str]] = {
-            Modality.GENOMICS: ["gwas", "phewas", "snp", "gene", "variant", "graphpop"],
+            Modality.GENOMICS: ["gwas", "phewas", "snp", "gene", "variant", "graphpop", "wgs", "vcf"],
             Modality.IMAGING: ["imaging", "brain", "mri", "scan"],
             Modality.EHR: ["icd10", "diagnosis", "medication", "hospital"],
             Modality.BLOOD_BIOCHEMISTRY: ["blood", "biomarker", "biochem"],
+            Modality.TRANSCRIPTOMICS: ["rna", "scrna", "transcript", "expression", "singlecell"],
             Modality.PHENOTYPE: ["phenotype", "trait", "measure"],
             Modality.LIFESTYLE: ["lifestyle", "diet", "exercise", "smoking"],
             Modality.MORTALITY: ["mortality", "death", "survival"],
@@ -502,6 +515,43 @@ Respond with ONLY the JSON object. No markdown fences."""
         Uses keyword matching to infer study type and basic parameters.
         Returns a valid but potentially overly permissive StudySpec.
         """
+        try:
+            from .skills.goal_intent_classifier import classify_goal_intent
+
+            profile = classify_goal_intent(query)
+            if (
+                profile.get("task_family") == "juvenile_hair_multiomics_mechanism"
+                and float(profile.get("confidence") or 0.0) >= 0.55
+            ):
+                return StudySpec(
+                    title="Juvenile Hair Whitening Multi-Omics Mechanism Analysis",
+                    design=StudyDesign.EXPLORATORY,
+                    cohort=CohortSpec(
+                        inclusion_criteria=[
+                            "VirtualCell/BWhair donors with WGS and linked hair-state omics metadata where available"
+                        ],
+                    ),
+                    exposure_variables=["Juvenile_White linked WGS candidate variants"],
+                    outcome_variables=["hair whitening multi-omics mechanism evidence"],
+                    covariates=["age", "sex", "donor"],
+                    modalities=[Modality.GENOMICS, Modality.TRANSCRIPTOMICS, Modality.PHENOTYPE],
+                    statistical_plan=StatisticalPlan(
+                        primary_method="multiomics_mechanism_mapping",
+                        multiple_testing_correction="fdr",
+                        significance_threshold=0.05,
+                        sensitivity_analyses=[
+                            "Juvenile_White versus Vitiligo_White WGS context",
+                            "Juvenile donor white-versus-black hair-state follow-up",
+                            "fallback readiness audit when matrix-level extraction is unavailable",
+                        ],
+                    ),
+                    tool_budget=60,
+                    source_query=query,
+                    compiled_by="intent_profile",
+                )
+        except Exception:
+            logger.debug("StudySpec intent-profile compilation skipped", exc_info=True)
+
         q_lower = query.lower()
 
         # Infer study design from keywords

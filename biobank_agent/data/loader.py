@@ -27,6 +27,7 @@ from ..domain.banks import (
     HPPAdapter,
     RAPAdapter,
     UKBAdapter,
+    VirtualCellAdapter,
     BankAdapter,
     Modality,
     canonical_bank_id,
@@ -50,6 +51,7 @@ _BANK_COLUMN_DEFAULTS = {
     "ukb_rap": ("eid", "diag_icd10", "cause_icd10"),
     "hpp": ("participant_id", "icd10", "cause_icd10"),
     "ckb": ("study_id", "icd10_code", "cause_icd10"),
+    "virtualcell": ("sample_id", "diag_code", "cause_code"),
 }
 
 _BANK_ADAPTER_TYPES = {
@@ -59,6 +61,7 @@ _BANK_ADAPTER_TYPES = {
     "ukb_rap": RAPAdapter,
     "rap": RAPAdapter,
     "ukb-rap": RAPAdapter,
+    "virtualcell": VirtualCellAdapter,
 }
 
 
@@ -94,7 +97,11 @@ def _resolve_column(settings: Settings, configured: str, position: int) -> str:
     bank_id = canonical_bank_id(getattr(settings, "bank_id", "ukb"))
     ukb_default = _BANK_COLUMN_DEFAULTS["ukb"][position]
     bank_default = _BANK_COLUMN_DEFAULTS.get(bank_id, _BANK_COLUMN_DEFAULTS["ukb"])[position]
-    return bank_default if configured == ukb_default else configured
+    known_defaults = {cols[position] for cols in _BANK_COLUMN_DEFAULTS.values()}
+    # ``Settings(bank_id="hpp")`` may still inherit VirtualCell/UKB column
+    # defaults from .env. Treat known defaults as bank presets, not bespoke
+    # user overrides, and switch them to the requested bank.
+    return bank_default if configured in known_defaults or configured == ukb_default else configured
 
 
 class DataManager:
@@ -170,6 +177,8 @@ class DataManager:
         ]:
             path = self._configured_parquet_path(attr, modality)
             if not path.exists():
+                if view_name == "biomarkers":
+                    self._register_wgs_manifest_view()
                 continue
             safe = _escape_path(path)
             if path.is_file() and path.suffix == ".parquet":
@@ -187,6 +196,28 @@ class DataManager:
 
         self._register_category_parquets()
         self._register_full_feature_store()
+
+    def _register_wgs_manifest_view(self) -> bool:
+        """Register a WGS sample manifest as the biomarkers view when parquet is absent."""
+        if self.bank_id != "virtualcell":
+            return False
+        try:
+            from .vcf_loader import discover_sample_manifest, load_sample_manifest
+            from .virtualcell_multimodal import load_default_wgs_manifest
+
+            manifest = discover_sample_manifest(self.settings.data_dir, self.settings.raw_dir)
+            if manifest is not None and manifest.name != "vc_samples.parquet":
+                df = load_sample_manifest(manifest)
+                source = str(manifest)
+            else:
+                df = load_default_wgs_manifest()
+                source = "embedded VirtualCell WGS manifest"
+            self.conn.register("biomarkers", df)
+            logger.info("Registered biomarkers view from %s", source)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to register WGS sample manifest: %s", exc)
+            return False
 
     def _register_category_parquets(self) -> None:
         """Register category parquet files as individual DuckDB views."""
@@ -510,7 +541,8 @@ class DataManager:
         if code_prefix:
             where_sql, params = self.code_prefix_filter("diagnoses", code_prefix, self._diag_col)
             if not where_sql:
-                return pd.DataFrame()
+                normalized = self.normalize_icd_code(code_prefix)
+                return self.query(sql + f" WHERE {_quote_ident(self._diag_col)} LIKE ?", [f"{normalized}%"])
             sql += f" WHERE {where_sql}"
             return self.query(sql, params)
         return self.query(sql)
@@ -524,7 +556,8 @@ class DataManager:
         if code_prefix:
             where_sql, params = self.code_prefix_filter("deaths", code_prefix, self._death_col)
             if not where_sql:
-                return pd.DataFrame()
+                normalized = self.normalize_icd_code(code_prefix)
+                return self.query(sql + f" WHERE {_quote_ident(self._death_col)} LIKE ?", [f"{normalized}%"])
             sql += f" WHERE {where_sql}"
             return self.query(sql, params)
         return self.query(sql)

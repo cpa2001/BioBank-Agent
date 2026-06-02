@@ -136,6 +136,31 @@ def get_registry() -> SkillRegistry:
 
 # ── Decorator ───────────────────────────────────────────────
 
+def _parameter_property_schema(pdef: dict[str, Any]) -> dict[str, Any]:
+    """Return the JSON Schema property exposed to model providers.
+
+    Some skill decorators use ``required`` as local metadata on an individual
+    parameter. OpenAI-compatible function schemas only accept ``required`` as an
+    object-level array, so the property-level marker must not be forwarded.
+    """
+    return {k: v for k, v in pdef.items() if k != "required"}
+
+
+def _infer_required_parameters(parameters: dict[str, Any]) -> list[str]:
+    required: list[str] = []
+    for pname, pdef in parameters.items():
+        if not isinstance(pdef, dict):
+            continue
+        marker = pdef.get("required", None)
+        if marker is True:
+            required.append(pname)
+        elif marker is False:
+            continue
+        elif "default" not in pdef:
+            required.append(pname)
+    return required
+
+
 def skill(
     name: str,
     description: str,
@@ -154,10 +179,10 @@ def skill(
     # Build OpenAI function-calling schema
     props = {}
     for pname, pdef in parameters.items():
-        props[pname] = {k: v for k, v in pdef.items()}
+        props[pname] = _parameter_property_schema(pdef)
 
     if required is None:
-        required = [p for p in parameters if "default" not in parameters[p]]
+        required = _infer_required_parameters(parameters)
 
     schema = {
         "type": "function",
@@ -279,7 +304,7 @@ def _schema_from_skill_decorator(decorator: ast.AST) -> tuple[str, dict] | None:
 
     required = values.get("required")
     if required is None:
-        required = [p for p, pdef in parameters.items() if isinstance(pdef, dict) and "default" not in pdef]
+        required = _infer_required_parameters(parameters)
 
     schema = {
         "type": "function",
@@ -288,7 +313,7 @@ def _schema_from_skill_decorator(decorator: ast.AST) -> tuple[str, dict] | None:
             "description": description,
             "parameters": {
                 "type": "object",
-                "properties": {pname: {k: v for k, v in pdef.items()} for pname, pdef in parameters.items()},
+                "properties": {pname: _parameter_property_schema(pdef) for pname, pdef in parameters.items()},
                 "required": list(required),
             },
         },

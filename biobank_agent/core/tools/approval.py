@@ -69,20 +69,94 @@ def builtin_profile(level: str = "default") -> ApprovalProfile:
     """Return one of the named profiles.
 
     Levels:
-        "readonly"   - only READ_DATA passes; everything else denied.
-        "default"    - the dataclass default (research-friendly).
-        "permissive" - allow all except EXPORT_PII / SHELL_EXEC.
-        "yolo"       - allow everything (research-only, never CI).
+        "read_only" / "readonly"     - only READ_DATA passes.
+        "plan"                       - read-only plus approval for edits, shell,
+                                       network, memory mutation, reviewers.
+        "ask_before_edits"           - like plan, but files/workspace writes are
+                                       asked explicitly while read-only tools pass.
+        "workspace_write"            - allow workspace writes, ask for shell/network.
+        "accept_edits"               - allow edits after approval prompts; shell
+                                       and network still ask.
+        "full_auto" / "yolo"         - allow everything; explicit opt-in only.
     """
-    if level == "readonly":
+    mode = str(level or "default").strip().lower().replace("-", "_")
+    if mode in {"read_only", "readonly"}:
         return ApprovalProfile(
-            name="readonly",
+            name="read_only",
             allow=frozenset({Capability.READ_DATA}),
             ask=frozenset(),
             deny=frozenset({c for c in Capability if c is not Capability.READ_DATA}),
             escalate_mutating=True,
         )
-    if level == "permissive":
+    if mode == "plan":
+        return ApprovalProfile(
+            name="plan",
+            allow=frozenset({Capability.READ_DATA}),
+            ask=frozenset({
+                Capability.NETWORK,
+                Capability.EXPORT_AGGREGATE,
+                Capability.MUTATE_MEMORY,
+                Capability.CALL_REVIEWER,
+            }),
+            deny=frozenset({
+                Capability.EXPORT_PII,
+                Capability.WRITE_REPORTS,
+                Capability.SHELL_EXEC,
+            }),
+            escalate_mutating=True,
+        )
+    if mode == "ask_before_edits":
+        return ApprovalProfile(
+            name="ask_before_edits",
+            allow=frozenset({Capability.READ_DATA}),
+            ask=frozenset({
+                Capability.WRITE_REPORTS,
+                Capability.NETWORK,
+                Capability.EXPORT_AGGREGATE,
+                Capability.MUTATE_MEMORY,
+                Capability.CALL_REVIEWER,
+                Capability.SHELL_EXEC,
+            }),
+            deny=frozenset({Capability.EXPORT_PII}),
+            escalate_mutating=True,
+        )
+    if mode == "workspace_write":
+        return ApprovalProfile(
+            name="workspace_write",
+            allow=frozenset({Capability.READ_DATA, Capability.WRITE_REPORTS}),
+            ask=frozenset({
+                Capability.NETWORK,
+                Capability.EXPORT_AGGREGATE,
+                Capability.MUTATE_MEMORY,
+                Capability.CALL_REVIEWER,
+                Capability.SHELL_EXEC,
+            }),
+            deny=frozenset({Capability.EXPORT_PII}),
+            escalate_mutating=True,
+        )
+    if mode == "accept_edits":
+        return ApprovalProfile(
+            name="accept_edits",
+            allow=frozenset({Capability.READ_DATA, Capability.WRITE_REPORTS}),
+            ask=frozenset({
+                Capability.NETWORK,
+                Capability.EXPORT_AGGREGATE,
+                Capability.MUTATE_MEMORY,
+                Capability.CALL_REVIEWER,
+                Capability.SHELL_EXEC,
+            }),
+            deny=frozenset({Capability.EXPORT_PII}),
+            escalate_mutating=False,
+        )
+    if mode in {"full_auto", "yolo"}:
+        return ApprovalProfile(
+            name="full_auto",
+            allow=frozenset(c for c in Capability),
+            ask=frozenset(),
+            deny=frozenset(),
+            escalate_mutating=False,
+        )
+    if mode == "permissive":
         return ApprovalProfile(
             name="permissive",
             allow=frozenset(

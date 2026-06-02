@@ -125,7 +125,7 @@ Useful plan commands:
 | `/plan-use key=value` | Add repair context such as `vcf_dir=data/vc_wgs_vcf`. |
 | `/plan-retry [step_id]` | Retry a failed or named plan step. |
 | `/plan-resume` | Resume a paused or repaired plan. |
-| `/plan-skip <step_id>` | Explicitly skip an optional diagnostic step. |
+| `/plan-skip <step_id>` | Record a step id to skip (advisory — does not yet alter execution; use `/plan-edit` to change the plan). |
 
 ### WGS and VirtualCell
 
