@@ -1672,6 +1672,31 @@ def _write_reproducibility_scripts(ctx, report_dir: Path) -> dict[str, str]:
             "Large full-genome runs may require widening the deterministic chr22 validation window used by CLI E2E tests.",
         ],
     }
+    # M7: attach a reproducibility receipt (git code version, python + key package
+    # versions, input-file fingerprints) so the report carries everything needed to
+    # re-run, not just the command list. Best-effort — never breaks report generation.
+    try:
+        from biobank_agent.runtime.receipt import build_receipt, write_receipt
+
+        _data_paths: list[str] = []
+        for _line in plan_lines:
+            for _v in (_line.get("args") or {}).values():
+                if isinstance(_v, str) and _v.endswith(
+                    (".vcf", ".vcf.gz", ".csv", ".tsv", ".parquet", ".bed", ".bgen", ".gz", ".txt")
+                ):
+                    _data_paths.append(_v)
+        _receipt = build_receipt(
+            objective=str(replay_task)[:200],
+            skill="generate_report",
+            params={"executed_steps": len(plan_lines)},
+            data_paths=_data_paths[:50],
+            extra={"environment": env},
+        )
+        manifest["receipt"] = _receipt
+        write_receipt(_receipt, report_dir)
+    except Exception:
+        pass
+
     manifest_path = report_dir / "reproducibility_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
 

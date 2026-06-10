@@ -98,7 +98,7 @@ EXPECTED_DIRECTIONS: dict[str, dict[str, str]] = {
     },
 }
 
-# Biomarkers that are NEVER legitimate top predictors for most diseases
+# Biomarkers that are never legitimate top predictors for most diseases
 # (likely data leakage if they appear as #1 feature)
 LEAKAGE_SUSPECT_FEATURES: set[str] = {
     "date_of_death", "death_date", "cause_of_death",

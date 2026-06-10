@@ -263,7 +263,7 @@ class AgentEvent:
 #   - 31 sex (administrative)
 #   - 34 year of birth, 52 month of birth (DOB triangulation)
 #   - 40000 date of death, 40001 cause of death
-#   - 21001 BMI is allowed (not PHI, but kept here as nothing for now)
+#   - 21001 BMI is allowed (not PHI)
 SENSITIVE_FIELD_IDS: frozenset[str] = frozenset({
     "20074", "20075",
     "22001",

@@ -68,8 +68,45 @@ def run_external(
     timeout: int = 1800,
     cwd: str | Path | None = None,
     stdout_path: str | Path | None = None,
+    settings: Any = None,
+    line_sink: Any = None,
+    log_path: str | Path | None = None,
 ) -> dict:
-    """Run an external bioinformatics tool and return a compact audit record."""
+    """Run an external bioinformatics tool and return a compact audit record.
+
+    ``timeout`` follows the project convention: a positive value is honored
+    verbatim; ``0`` (or negative) means "auto" — scale to the tool's known
+    baseline (plink/gatk/bcftools/...) via :mod:`biobank_agent.utils.exec_policy`.
+    The historical default (1800s) is preserved for existing callers.
+
+    When ``line_sink`` or ``log_path`` is provided (and no ``stdout_path`` redirect),
+    the command is run via the streaming substrate so stdout/stderr can be surfaced
+    live and persisted (issue #2). Callers that pass neither keep the original
+    capture-and-return behavior unchanged.
+    """
+    from biobank_agent.utils.exec_policy import resolve_timeout
+
+    # Foreground resolution always yields a concrete int (never None).
+    timeout = int(resolve_timeout(argv=args, override=timeout, settings=settings) or 1800)
+
+    # Opt-in streaming path (no behavior change for existing callers that pass
+    # neither line_sink nor log_path, nor a stdout_path redirect).
+    if stdout_path is None and (line_sink is not None or log_path is not None):
+        from biobank_agent.runtime.proc import run_streaming
+
+        result = run_streaming(
+            args, cwd=cwd, timeout=timeout, line_sink=line_sink,
+            log_path=log_path, tail_chars=5000,
+        )
+        return {
+            "cmd": args,
+            "returncode": result.returncode,
+            "stdout": (result.stdout_tail or "")[-5000:],
+            "stderr": (result.stderr_tail or "")[-5000:],
+            "ok": result.ok,
+            "log_path": result.log_path,
+        }
+
     stdout_handle = None
     try:
         if stdout_path is not None:

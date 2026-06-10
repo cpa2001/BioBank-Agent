@@ -175,9 +175,16 @@ class SessionStore:
     def append_trajectory(self, session_id: str, events: Iterable[AgentEvent]) -> Path:
         rollout = self.rollout_file(session_id)
         rollout.parent.mkdir(parents=True, exist_ok=True)
+        # Continue the sequence from the existing rollout so the append-only log stays
+        # monotonic across calls and process restarts (M6 durable rollout). A reset-to-0
+        # seq would collide with earlier records and corrupt replay/resume ordering.
+        base = 0
+        if rollout.exists():
+            with rollout.open("r", encoding="utf-8") as fh:
+                base = sum(1 for line in fh if line.strip())
         with rollout.open("a", encoding="utf-8") as fh:
-            for seq, event in enumerate(events):
-                record = RuntimeTrajectoryRecord(session_id, event, seq)
+            for offset, event in enumerate(events):
+                record = RuntimeTrajectoryRecord(session_id, event, base + offset)
                 fh.write(json.dumps(record.to_dict(), ensure_ascii=False, default=str) + "\n")
         return rollout
 
@@ -335,6 +342,8 @@ class AgentRuntime:
                     permission_mode=self.config.approval_profile,
                     turn_id=resolved_turn_id,
                     tool_call_id=call_id,
+                    tool_registry=self.tool_registry,
+                    activate_skills=self._make_activate_skills(session),
                 )
 
             runtime_context_factory = _default_context_factory
@@ -946,23 +955,57 @@ class AgentRuntime:
         This establishes identity, the workspace sandbox, and the tool-use
         discipline a coding/research agent needs (write→run→observe→fix; never
         repeat a succeeded action; finish with a concrete answer)."""
+        lazy_tools = (
+            getattr(self.config, "lazy_tools_enabled", True)
+            and hasattr(self.tool_registry, "exposed_handlers")
+        )
         try:
-            tool_names = [h.spec().name for h in self.tool_registry.list_handlers()]
+            if lazy_tools:
+                tool_names = [h.spec().name for h in self.tool_registry.exposed_handlers()]
+            else:
+                tool_names = [h.spec().name for h in self.tool_registry.list_handlers()]
         except Exception:
             tool_names = []
-        tools_hint = ", ".join(sorted(tool_names)[:40]) if tool_names else "(none registered)"
+        tools_hint = ", ".join(sorted(tool_names)[:60]) if tool_names else "(none registered)"
+        more_tools = ""
+        if lazy_tools:
+            use_tree = getattr(self.config, "skill_tree_enabled", True)
+            try:
+                from biobank_agent.skills import manifest as _skill_manifest
+
+                if use_tree and _skill_manifest.tree_available():
+                    cat_lines = "\n".join(
+                        f"  - {r}: {_skill_manifest.node_summary(r)}" for r in _skill_manifest.root_nodes()
+                    )
+                    more_tools = (
+                        "\nMORE TOOLS ON DEMAND: only high-frequency tools are listed above. The full "
+                        "skill corpus is organized as a tree — call navigate_skill_tree('<node>') to "
+                        "browse a category, or skill_search('<intent>') to load by intent (matched skills "
+                        "become callable on your next step). Top-level categories:\n" + cat_lines + "\n"
+                    )
+                else:
+                    cats = _skill_manifest.category_summaries()
+                    if cats:
+                        cat_lines = "\n".join(f"  - {dom}: {summary}" for dom, summary in cats.items())
+                        more_tools = (
+                            "\nMORE TOOLS ON DEMAND: only high-frequency tools are listed above. Many more "
+                            "domain skills exist, grouped by category — call skill_search('<intent>') to load "
+                            "the ones you need (they become callable on your next step):\n" + cat_lines + "\n"
+                        )
+            except Exception:
+                more_tools = ""
         return (
             "You are BioBank Agent — an autonomous AI agent for biobank research and software "
             "engineering, operating in a command-line session with REAL tools that take REAL "
             "actions (read/write/edit files, run shell commands, run tests, search, git, and "
             "domain analysis skills).\n\n"
-            f"WORKSPACE: your working directory is {session.cwd}. Every file and shell path MUST "
-            "stay inside this workspace (use relative paths, or paths under it). Paths outside it "
-            "(e.g. /tmp, $HOME) are rejected — if you need scratch space, use a subdirectory of the "
-            "workspace.\n"
+            f"WORKSPACE: your working directory is {session.cwd}. Use relative paths, or paths under "
+            "it (or another allowed root). If a path is rejected, the error message lists the allowed "
+            "roots — pick one of those instead of retrying the rejected path. For scratch space, use a "
+            "subdirectory of the workspace.\n"
             f"PERMISSIONS: approval profile is '{self.config.approval_profile}'. Act autonomously; "
             "do not ask the user to confirm steps you can perform yourself.\n"
-            f"TOOLS AVAILABLE: {tools_hint}.\n\n"
+            f"TOOLS AVAILABLE: {tools_hint}.\n{more_tools}\n"
             "HOW TO WORK (important):\n"
             "1. Take real actions with tools, then USE the result. After a tool call SUCCEEDS, move "
             "forward — NEVER repeat a call that already succeeded.\n"
@@ -976,7 +1019,14 @@ class AgentRuntime:
             "states the concrete result you observed (e.g. the exact program output).\n"
             "5. If the request is empty, gibberish, or unclear, briefly say so and ask for specifics "
             "— do NOT call tools speculatively.\n"
-            "6. Report only what actually happened. Never fabricate tool output or results."
+            "6. Report only what actually happened. Never fabricate tool output or results.\n"
+            "7. For commands that take many minutes (plink/gatk/bcftools, a WGS pipeline), use the "
+            "run_job tool to run them in the BACKGROUND, then job_wait/job_status — do not block on a "
+            "long foreground command.\n"
+            "8. If the input data does NOT match what a standard tool expects (wrong format, a missing "
+            "FORMAT field, a missing file or uninstalled tool), call pause_and_ask to surface the "
+            "mismatch with options. Do NOT silently write a simplified replacement script that only "
+            "partially does the job — pause and let the user fix the data or redirect."
         )
 
     def _history_messages(self, session: AgentSession, current: UserTurn, *, max_turns: int = 6) -> list[dict[str, Any]]:
@@ -993,8 +1043,8 @@ class AgentRuntime:
         for t in prior:
             if t.content:
                 msgs.append({"role": "user", "content": _cap(str(t.content))})
-            # Only replay the assistant conclusion of turns that actually COMPLETED;
-            # a FAILED turn's final text is not authoritative and would mislead.
+            # Only replay the assistant conclusion of turns that actually completed;
+            # a failed turn's final text is not authoritative and would mislead.
             if str(getattr(t, "status", "")) != RuntimeStatus.COMPLETED.value:
                 continue
             final = ""
@@ -1005,6 +1055,21 @@ class AgentRuntime:
             if final:
                 msgs.append({"role": "assistant", "content": _cap(final)})
         return msgs
+
+    @staticmethod
+    def _make_activate_skills(session: "AgentSession"):
+        """Closure for skill_search to append activated skill names to the session's
+        active set, so their schemas inject on the next round (M0 lazy exposure).
+        Wired into every ToolContext so lazy exposure works for bare AgentRuntime
+        callers (harness/headless), not only the interactive CLI."""
+
+        def _activate(names: list[str]) -> None:
+            active = session.state.custom_data.setdefault("active_skills", [])
+            for name in names:
+                if name and name not in active:
+                    active.append(name)
+
+        return _activate
 
     def run_turn(self, session: AgentSession, user_text: str) -> AgentSession:
         turn = UserTurn(id=uuid.uuid4().hex, content=user_text)
@@ -1023,7 +1088,20 @@ class AgentRuntime:
         except KeyError:
             provider = self.provider_router.resolve(ProviderRole.PRIMARY_EXECUTOR)
             active_role = ProviderRole.PRIMARY_EXECUTOR
-        tool_schemas = [handler.spec().to_openai_schema() for handler in self.tool_registry.list_handlers()]
+        lazy_tools = (
+            getattr(self.config, "lazy_tools_enabled", True)
+            and hasattr(self.tool_registry, "exposed_schemas")
+        )
+
+        def _round_tool_schemas() -> list[dict]:
+            # Recomputed each round so a skill_search activation surfaces the matched
+            # skill on the NEXT round of the same turn (M0 lazy tool exposure).
+            if not lazy_tools:
+                return self.tool_registry.tool_schemas()
+            active = session.state.custom_data.get("active_skills") or []
+            return self.tool_registry.exposed_schemas(active)
+
+        tool_schemas = _round_tool_schemas()
         messages = [{"role": "system", "content": self._executor_system_prompt(session)}]
         messages.extend(self._history_messages(session, turn))
         messages.append({"role": "user", "content": user_text})
@@ -1070,6 +1148,7 @@ class AgentRuntime:
                 return f"{name}:{args!r}"
 
         for round_index in range(max_rounds):
+            tool_schemas = _round_tool_schemas()
             request = ProviderRequest(
                 session_id=session.session_id,
                 turn_id=turn.id,
@@ -1161,6 +1240,8 @@ class AgentRuntime:
                             permission_mode=self.config.approval_profile,
                             turn_id=turn.id,
                             tool_call_id=req.call_id,
+                            tool_registry=self.tool_registry,
+                            activate_skills=self._make_activate_skills(session),
                         )
                     context_factory = _request_context_factory
                 outcome = self.invoke_tool(
@@ -1214,7 +1295,7 @@ class AgentRuntime:
                 })
 
         turn.completed_at = time.time()
-        # COMPLETED iff the model converged to a final answer and the provider did
+        # Completed iff the model converged to a final answer and the provider did
         # not fail. Recovered tool errors do not fail the turn (they remain visible
         # as tool_call_completed events for audit / evolution feedback).
         turn_ok = converged and not provider_error

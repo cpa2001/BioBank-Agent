@@ -132,7 +132,7 @@ def _elapsed_str(seconds: float) -> str:
 
 
 def _styled(text: Any, style: str) -> str:
-    """Wrap ``text`` in a Rich style tag — but ONLY when ``style`` is non-empty.
+    """Wrap ``text`` in a Rich style tag — but only when ``style`` is non-empty.
 
     A status that is absent from ``DASHBOARD_STATUS_STYLES`` used to default to
     ``""``, so ``f"[{style}]{icon}[/{style}]"`` rendered ``[]<icon>[/]`` and the
@@ -275,7 +275,7 @@ class PlanRunDashboard:
                 return
             self._last_render_ts = now
             # Defense in depth: a single malformed frame (e.g. a Rich MarkupError
-            # from some future dynamic string) must NEVER kill the background
+            # from some future dynamic string) must never kill the background
             # refresh thread or abort a milestone record(). Degrade to a skipped
             # frame and keep going — the next event/tick repaints.
             try:
@@ -361,7 +361,7 @@ class PlanRunDashboard:
         saturate rendering; the background refresh thread picks it up. Drops the
         delta if the row already finished. Text is sanitised before display in
         ``_build_panel``."""
-        # This is the AUTHORITATIVE, atomic guard against late/orphaned deltas:
+        # This is the authoritative, atomic guard against late/orphaned deltas:
         # the check-and-append happens under the same lock that ``record`` uses to
         # pop a finished row to history (and that ``stop`` uses to clear all rows),
         # so a delta that slipped past the council's (lock-free, best-effort)
@@ -798,7 +798,13 @@ class PlanProgressDisplay:
     # ─── Final Report ────────────────────────────────────────────
 
     def show_report(self, results: list[StepResult]) -> None:
-        """Show execution summary after completion."""
+        """Show execution summary after completion.
+
+        DEPRECATED (legacy engine): the live v3 CLI renders execution via
+        ``InteractiveShell._finalize_execution`` + ``cli/render.render_result_payload``
+        (which surface each step's real output). This method is reached only by the
+        legacy PlanMode path; fix live output rendering in the v3 engine.
+        """
         table = Table(
             title="[bold]Execution Report[/bold]",
             show_header=True,

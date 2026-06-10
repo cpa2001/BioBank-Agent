@@ -29,7 +29,7 @@ class VerdictStatus(Enum):
     """Final verdict — exactly one of three states."""
     PASS = "PASS"        # all checks passed, no blocking issues
     FAIL = "FAIL"        # at least one blocking issue
-    PARTIAL = "PARTIAL"  # could not complete (environment blocker ONLY)
+    PARTIAL = "PARTIAL"  # could not complete (environment blocker only)
 
 
 class Severity(Enum):

@@ -16,8 +16,9 @@ sdist/
 venv/
 env/
 
-# Local data files
-/data/
+# Data files
+data/
+reference/
 
 # Testing & Coverage
 .pytest_cache/
@@ -27,6 +28,7 @@ htmlcov/
 .coverage.*
 coverage.xml
 *.cover
+tmp_runtime_redaction/
 
 # Type checking
 .mypy_cache/
@@ -48,15 +50,13 @@ Thumbs.db
 .env
 
 # Generated output (not source code)
-/reports/
-/report_backup/
-/reports_backup/
-/plans/
-/custom_skills/
+reports/
+reports_backup/
+plans/
+custom_skills/
 brainstorm/
 data_insights/
 docs/deep_research/
-/tmp_runtime_redaction/
 
 # Claude Code & Agent session data. Keep repo-local plugin manifests tracked.
 .agents/*

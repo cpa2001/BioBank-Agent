@@ -2223,7 +2223,7 @@ class TestMainCommand:
         settings = FakeMainSettings(tmp_path)
         captured = {}
 
-        def fake_interactive(settings_arg, *, initial_task="", console=None):
+        def fake_interactive(settings_arg, *, initial_task="", console=None, workspace=""):
             captured["settings"] = settings_arg
             captured["initial_task"] = initial_task
             captured["console"] = console
@@ -2247,7 +2247,7 @@ class TestMainCommand:
         settings = FakeMainSettings(tmp_path)
         captured = {}
 
-        def fake_interactive(settings_arg, *, initial_task="", console=None):
+        def fake_interactive(settings_arg, *, initial_task="", console=None, workspace=""):
             captured["initial_task"] = initial_task
 
         monkeypatch.setattr(cli.sys, "argv", ["biobank", "--model", "model-b", "Analyze", "cohort"])
@@ -2266,7 +2266,7 @@ class TestMainCommand:
         settings = FakeMainSettings(tmp_path)
         captured = {}
 
-        def fake_interactive(settings_arg, *, initial_task="", console=None):
+        def fake_interactive(settings_arg, *, initial_task="", console=None, workspace=""):
             captured["settings"] = settings_arg
             captured["initial_task"] = initial_task
 
@@ -2279,6 +2279,46 @@ class TestMainCommand:
 
         assert captured["settings"] is settings
         assert captured["initial_task"] == "Analyze the cohort"
+
+    def test_main_workspace_flag_is_parsed(self, tmp_path, monkeypatch):
+        # `--workspace <dir>` (and `--cwd`) must be consumed as the workspace value
+        # and forwarded to the shell, not leaked into the seeded task (issue #4).
+        from biobank_agent import cli
+
+        settings = FakeMainSettings(tmp_path)
+        captured = {}
+
+        def fake_interactive(settings_arg, *, initial_task="", console=None, workspace=""):
+            captured["initial_task"] = initial_task
+            captured["workspace"] = workspace
+
+        monkeypatch.setattr(cli.sys, "argv", ["biobank", "--workspace", "/proj/X", "Analyze", "cohort"])
+        monkeypatch.setattr(cli, "get_settings", lambda: settings)
+        monkeypatch.setattr(cli, "run_interactive_shell", fake_interactive)
+        monkeypatch.setattr(cli, "Agent", lambda settings_arg: FakeMainAgent(settings_arg))
+
+        cli.main()
+
+        assert captured["workspace"] == "/proj/X"
+        assert captured["initial_task"] == "Analyze cohort"
+
+    def test_main_workspace_equals_form_is_parsed(self, tmp_path, monkeypatch):
+        from biobank_agent import cli
+
+        settings = FakeMainSettings(tmp_path)
+        captured = {}
+
+        def fake_interactive(settings_arg, *, initial_task="", console=None, workspace=""):
+            captured["workspace"] = workspace
+
+        monkeypatch.setattr(cli.sys, "argv", ["biobank", "--cwd=/data/proj"])
+        monkeypatch.setattr(cli, "get_settings", lambda: settings)
+        monkeypatch.setattr(cli, "run_interactive_shell", fake_interactive)
+        monkeypatch.setattr(cli, "Agent", lambda settings_arg: FakeMainAgent(settings_arg))
+
+        cli.main()
+
+        assert captured["workspace"] == "/data/proj"
 
 
 class TestCliRemainingBranches:

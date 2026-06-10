@@ -62,14 +62,40 @@ def _safe_prefix(text: str) -> str:
     )
 
 
+def _pc_columns(df: pd.DataFrame, n_pcs: int) -> list[str]:
+    """Names of the first ``n_pcs`` principal-component columns (PC1, PC2, …)."""
+    pcs = [c for c in df.columns if str(c).upper().startswith("PC") and str(c)[2:].isdigit()]
+    pcs.sort(key=lambda c: int(str(c)[2:]))
+    return pcs[: max(0, int(n_pcs))]
+
+
+def _pcs_from_ctx(ctx) -> "pd.DataFrame | None":
+    """Per-sample principal components from a prior vcf_pca step (population-structure
+    covariates), if present in session state (``pca_result.pcs``)."""
+    try:
+        pca = ctx.state.custom_data.get("pca_result") if hasattr(ctx, "state") else None
+        pcs = (pca or {}).get("pcs")
+        if pcs is not None and hasattr(pcs, "empty") and not pcs.empty:
+            return pcs
+    except Exception:
+        pass
+    return None
+
+
 def _write_plink2_inputs(
     pheno_df: pd.DataFrame,
     case_samples: list[str],
     ctrl_samples: list[str],
     id_col: str,
     out_dir: Path,
+    pcs_df: pd.DataFrame | None = None,
+    n_pcs: int = 10,
 ) -> tuple[Path, Path | None]:
-    """Write PLINK2 phenotype/covariate files for a binary case-control GWAS."""
+    """Write PLINK2 phenotype/covariate files for a binary case-control GWAS.
+
+    Population-structure correction: when ``pcs_df`` (from ``vcf_pca``) is supplied,
+    the top ``n_pcs`` principal components are merged in as covariates alongside
+    age/sex."""
     out_dir.mkdir(parents=True, exist_ok=True)
     case_set = set(case_samples)
     ctrl_set = set(ctrl_samples)
@@ -97,6 +123,16 @@ def _write_plink2_inputs(
         sex = covar_df["sex"].astype(str).str.upper().str[0]
         covar_df["is_male"] = (sex == "M").astype(int)
         covar_cols.append("is_male")
+
+    # Merge principal components as covariates for population-structure correction.
+    if pcs_df is not None and not pcs_df.empty:
+        pc_id = id_col if id_col in pcs_df.columns else (
+            "sample_id" if "sample_id" in pcs_df.columns else None)
+        pc_cols = _pc_columns(pcs_df, n_pcs)
+        if pc_id is not None and pc_cols:
+            pcs_small = pcs_df[[pc_id] + pc_cols].rename(columns={pc_id: id_col})
+            covar_df = covar_df.merge(pcs_small, on=id_col, how="left")
+            covar_cols.extend(pc_cols)
 
     if not covar_cols:
         return pheno_path, None
@@ -166,6 +202,8 @@ def _run_plink2_association(
     id_col: str,
     report_dir: Path,
     label: str,
+    pcs_df: pd.DataFrame | None = None,
+    n_pcs: int = 10,
 ) -> dict:
     """Run PLINK2 logistic/Firth association on one merged VCF."""
     plink2 = find_executable("plink2")
@@ -173,7 +211,8 @@ def _run_plink2_association(
         return {"ok": False, "reason": "plink2 executable not found"}
 
     pheno_path, covar_path = _write_plink2_inputs(
-        pheno_df, case_samples, ctrl_samples, id_col, report_dir
+        pheno_df, case_samples, ctrl_samples, id_col, report_dir,
+        pcs_df=pcs_df, n_pcs=n_pcs,
     )
     out_prefix = report_dir / f"plink2_assoc_{_safe_prefix(label)}"
     cmd = [
@@ -536,6 +575,8 @@ def vcf_association(
                 id_col,
                 report_dir,
                 rgn or "all",
+                pcs_df=_pcs_from_ctx(ctx),
+                n_pcs=10,
             )
             plink_runs.append({k: v for k, v in plink_run.items() if k != "records"})
             if plink_run.get("records"):

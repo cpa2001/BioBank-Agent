@@ -9,6 +9,7 @@ tools in M2.4) register here directly.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Iterable, Optional
 
 from biobank_agent.registry import SkillRegistry, get_registry as _get_legacy_registry
@@ -149,6 +150,83 @@ class ToolRegistry:
 
     def tool_schemas(self) -> list[dict]:
         return [h.spec().to_openai_schema() for h in self._handlers.values()]
+
+    # ── Lazy / tiered exposure ──────────────────────────
+    # Native workspace tools (non-legacy handlers) are always Direct; legacy
+    # @skills are tiered by skills/manifest.json. Direct skills are always
+    # offered to the model; Deferred skills only once activated (e.g. by
+    # skill_search); Hidden skills are runtime/curator-only and never offered.
+
+    def _exposure(self, handler: ToolHandler) -> str:
+        from biobank_agent.skills import manifest as skill_manifest
+
+        if not isinstance(handler, LegacySkillToolHandler):
+            return skill_manifest.DIRECT  # native workspace tools
+        return skill_manifest.exposure_of(handler.name)
+
+    def exposed_handlers(self, active: Optional[Iterable[str]] = None) -> list[ToolHandler]:
+        """Handlers to offer the model this round: all Direct + any activated Deferred."""
+        from biobank_agent.skills import manifest as skill_manifest
+
+        active_set = set(active or ())
+        out: list[ToolHandler] = []
+        for handler in self._handlers.values():
+            exposure = self._exposure(handler)
+            if exposure == skill_manifest.DIRECT:
+                out.append(handler)
+            elif exposure == skill_manifest.DEFERRED and handler.name in active_set:
+                out.append(handler)
+            # hidden: never offered to the model (runtime/curator call it directly)
+        return out
+
+    def exposed_schemas(self, active: Optional[Iterable[str]] = None) -> list[dict]:
+        return [h.spec().to_openai_schema() for h in self.exposed_handlers(active)]
+
+    def search(self, query: str, *, k: int = 8, include_hidden: bool = False,
+               subtree: Optional[str] = None) -> list[dict]:
+        """Rank Deferred (and Direct) skills by token overlap of the query against
+        name + description. Returns ``[{name, description, domain, exposure}]`` —
+        used by the skill_search tool to surface on-demand skills. ``subtree`` restricts
+        candidates to skills under a given skill-tree node (default: the whole corpus)."""
+        from biobank_agent.skills import manifest as skill_manifest
+
+        def _tokens(text: str) -> set[str]:
+            return {t for t in re.split(r"[^a-z0-9]+", str(text).lower()) if len(t) > 1}
+
+        q = _tokens(query)
+        if not q:
+            return []
+        allowed: Optional[set[str]] = None
+        if subtree:
+            from biobank_agent.skills import skill_tree as _skill_tree
+
+            allowed = set(_skill_tree.subtree_skills(subtree))
+        scored: list[tuple[float, dict]] = []
+        for handler in self._handlers.values():
+            if allowed is not None and handler.name not in allowed:
+                continue
+            exposure = self._exposure(handler)
+            if exposure == skill_manifest.DIRECT:
+                continue  # already in the model's tool list every round
+            if exposure == skill_manifest.HIDDEN and not include_hidden:
+                continue
+            spec = handler.spec()
+            doc = _tokens(f"{handler.name} {handler.name.replace('_', ' ')} {spec.description}")
+            doc |= _tokens(skill_manifest.domain_of(handler.name))
+            if not doc:
+                continue
+            overlap = len(q & doc)
+            if overlap <= 0:
+                continue
+            score = overlap / (len(q) ** 0.5)
+            scored.append((score, {
+                "name": handler.name,
+                "description": (spec.description or "")[:200],
+                "domain": skill_manifest.domain_of(handler.name),
+                "exposure": exposure,
+            }))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [payload for _score, payload in scored[: max(1, int(k))]]
 
     def __len__(self) -> int:
         return len(self._handlers)

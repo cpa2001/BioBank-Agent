@@ -1,4 +1,4 @@
-"""Self-evolution layer (M4).
+"""Self-evolution layer.
 
 Reflexion 4-actions, tool_learner pattern mining, patch_classifier,
 auto_merger with risk-graded LOW/MEDIUM/HIGH handling.

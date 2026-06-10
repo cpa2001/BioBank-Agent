@@ -29,6 +29,18 @@ def _diff(ctx: CommandContext, arg: str):
     return _call(ctx, "diff", arg)
 
 
+def _cd(ctx: CommandContext, arg: str):
+    return _call(ctx, "cd", arg)
+
+
+def _jobs(ctx: CommandContext, arg: str):
+    return _call(ctx, "jobs", arg)
+
+
+def _job_tail(ctx: CommandContext, arg: str):
+    return _call(ctx, "job_tail", arg)
+
+
 def _permissions(ctx: CommandContext, arg: str):
     return _call(ctx, "permissions", arg)
 
@@ -99,6 +111,10 @@ def commands() -> list[RegisteredCommand]:
         RegisteredCommand("/resume", "/resume [session-id|--last]", "Resume or inspect saved sessions", _resume),
         RegisteredCommand("/new", "/new [title]", "Start a new interactive session", _new),
         RegisteredCommand("/fork", "/fork [session-id]", "Fork the current or selected session", _fork),
+        RegisteredCommand("/cd", "/cd <path>", "Switch the active workspace directory (inputs/outputs go here)", _cd),
+        RegisteredCommand("/workspace", "/workspace <path>", "Alias for /cd", _cd),
+        RegisteredCommand("/jobs", "/jobs", "List background jobs (run_job) and their state", _jobs),
+        RegisteredCommand("/job-tail", "/job-tail <job-id>", "Show the tail of a background job's log", _job_tail),
         RegisteredCommand("/diff", "/diff", "Show current workspace changes", _diff),
         RegisteredCommand("/permissions", "/permissions [profile]", "Show or change permission mode", _permissions),
         RegisteredCommand("/mcp", "/mcp [list|start|health|call|stop]", "Manage MCP servers and tools", _mcp),

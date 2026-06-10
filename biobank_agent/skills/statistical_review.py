@@ -44,6 +44,24 @@ def statistical_review(scope: str = "session", *, ctx=None) -> dict:
 
     issues = []
 
+    # Methodology reviewer: structured consensus-statistical-sin flags
+    # (uncorrected multiple testing, underpowered arms, missing CIs, unaddressed
+    # stratification) layered on the bespoke per-skill checks below.
+    try:
+        from biobank_agent.runtime.methodology import review_methodology
+
+        for r in records:
+            for flag in review_methodology(getattr(r, "key_results", None) or {}):
+                issues.append({
+                    "severity": "CRITICAL" if flag.get("severity") == "block" else "WARNING",
+                    "skill": getattr(r, "skill", ""),
+                    "type": flag.get("issue"),
+                    "message": flag.get("detail"),
+                    "recommendation": flag.get("detail"),
+                })
+    except Exception:
+        pass
+
     for r in records:
         # Check 1: Suspiciously high AUC (data leakage)
         if r.skill == "train_model":

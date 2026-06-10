@@ -13,7 +13,7 @@ Layers:
     memory/        - action graph and memory-facing helpers
     planning/      - planning protocol helpers
     orchestration/ - sub-agent prototype
-    evolution/     - reflexion / patch_classifier / auto_merger (M4)
+    evolution/     - reflexion / patch_classifier / auto_merger
     safety/        - reproducibility auto-hook / data_fingerprint / disclosure
     llm/           - streaming-first client + incremental tool args parser
 """

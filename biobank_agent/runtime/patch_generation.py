@@ -247,7 +247,7 @@ def _extract_json(text: str) -> dict | None:
 
 
 def _normalize_declared_path(target_path: str) -> tuple[str | None, str]:
-    """Syntactic-only check of the DECLARED target path (no filesystem access).
+    """Syntactic-only check of the declared target path (no filesystem access).
 
     Authoritative path/symlink validation happens in the apply loop against a
     real worktree (`.resolve()` catches symlink escapes, which pure string logic
@@ -291,8 +291,8 @@ def _validate_generated(
         return f"target_path {rel!r} is a protected path (core/runtime/tests)", []
 
     # A unified diff can declare an allowed `target_path` while its hunks edit a
-    # DIFFERENT, out-of-scope file. Validate every path the diff headers touch —
-    # not just the declared target. (The apply loop re-checks the ACTUALLY changed
+    # different, out-of-scope file. Validate every path the diff headers touch —
+    # not just the declared target. (The apply loop re-checks the actually changed
     # files authoritatively from `git status`; this is the matching generation-side
     # guard so we don't hand the apply loop a patch that's doomed to a review branch.)
     if _looks_like_unified_diff(diff):

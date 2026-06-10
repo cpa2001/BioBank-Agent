@@ -80,11 +80,14 @@ def test_council_produces_objective_specific_plan():
     assert any(c.role.value == "critic" for c in fake.calls)
 
 
-def test_council_fails_loudly_when_no_valid_json():
+def test_council_falls_back_to_scaffold_when_no_valid_json():
+    # M5: when no candidate yields valid JSON, planning degrades to a labeled
+    # deterministic scaffold (never a hard CouncilError dead-end) so the user can act.
     router, _ = _router(lambda req: "Sorry, I can't produce JSON.")
     planner = RuntimePlanner(router, num_candidates=2, enable_clarification=False)
-    with pytest.raises(CouncilError):
-        planner.build_plan("analyze something", tool_names=["vcf_qc"])
+    plan = planner.build_plan("analyze something", tool_names=["python_exec", "generate_report"])
+    assert [s.id for s in plan.steps][:2] == ["gather", "execute"]
+    assert "fallback" in plan.audit_summary.lower()
 
 
 def test_single_candidate_skips_merge():

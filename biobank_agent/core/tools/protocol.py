@@ -180,8 +180,23 @@ class ToolContext:
     memory: Any = None
     report_dir: Any = None
     workspace_root: Any = None
+    # Extra roots (besides workspace_root) that file/shell paths may live under,
+    # e.g. a prior project dir kept readable after ``/cd``. Empty by default, so
+    # confinement stays single-root unless the user opts in.
+    extra_roots: list[str] = field(default_factory=list)
     permission_mode: str = ""
     emit_progress: Optional[Callable[..., None]] = None
+    # Live line streaming sink: (stream_name, line) for subprocess stdout/stderr,
+    # so long commands surface progress in real time. Optional.
+    emit_line: Optional[Callable[[str, str], None]] = None
+    # Background job manager (biobank_agent.runtime.jobs.JobManager) for the
+    # run_job / job_* tools. Optional; tools degrade if absent.
+    job_manager: Any = None
+    # Tool registry + activation hook for lazy skill exposure: skill_search
+    # ranks deferred skills via tool_registry and calls activate_skills(names) to
+    # add them to the model's tool list next round. Both optional.
+    tool_registry: Any = None
+    activate_skills: Optional[Callable[[list[str]], None]] = None
     turn_id: Optional[str] = None
     tool_call_id: Optional[str] = None
     record_trajectory: Optional[Callable[..., None]] = None

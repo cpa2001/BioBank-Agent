@@ -240,7 +240,7 @@ def run_parallel(ctx: CouncilContext, jobs: list[CouncilJob]) -> list[CouncilRes
         stage_cancel.set()  # stop orphaned workers in this stage from streaming further
         ctx.emit_event(jobs[0].stage, status="error", message=f"timeout after {ctx.timeout_s:.0f}s; using {len(results)} partial result(s)")
         # Resolve every job that never came through ``as_completed``. A future
-        # that actually FINISHED between the timeout firing and now is reported
+        # that actually finished between the timeout firing and now is reported
         # with its real result (no false "timed out"); only genuinely unfinished
         # jobs get a timeout. Either way a per-subagent terminal event is emitted
         # so the dashboard clears that model's live row (its timer would tick

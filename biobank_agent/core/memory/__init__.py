@@ -1,4 +1,4 @@
-"""Hierarchical memory + rollout split (M1)."""
+"""Hierarchical memory + rollout split."""
 
 from .action_graph import ActionGraph
 from .hierarchy import MemoryBlock, MemoryInjector

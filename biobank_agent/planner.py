@@ -4,6 +4,12 @@ Implements a full Plan → Review → Approve → Execute → Report lifecycle
 with iterative refinement, progress tracking, and pause/resume support.
 
 State machine: INACTIVE → PLANNING → REVIEW ⇄ REFINING → APPROVED → EXECUTING ⇄ PAUSED → DONE
+
+DEPRECATED (legacy engine): the live ``biobank`` CLI does NOT use this module. It
+uses the v3 ``InteractiveShell`` (``biobank_agent/cli/interactive.py``) backed by
+``RuntimePlanner`` (``biobank_agent/runtime/planner.py``). ``LongHorizonPlanner`` /
+``PlanMode`` / ``_specialized_default_plan`` / the WGS templates here are reached
+only by the Textual TUI. Fix live-CLI planning/routing in the v3 engine, not here.
 """
 
 from __future__ import annotations

@@ -34,6 +34,7 @@ from rich.tree import Tree
 from biobank_agent import __version__
 from biobank_agent.cli.commands import CommandContext
 from biobank_agent.cli.commands.registry import SlashCommandRegistry
+from biobank_agent.cli.render import render_result_payload
 from biobank_agent.core.events import AgentEvent, AgentEventType
 from biobank_agent.core.memory.action_graph import ActionGraph
 from biobank_agent.core.tools.registry import ToolRegistry
@@ -58,6 +59,7 @@ from biobank_agent.runtime.evolution import LearningReport, learn_from_session, 
 from biobank_agent.runtime.completion import CompletionGate
 from biobank_agent.runtime.council import CouncilError
 from biobank_agent.runtime.harness import write_harness_report
+from biobank_agent.runtime.jobs import JobManager
 from biobank_agent.runtime.planner import RuntimePlanner
 from biobank_agent.runtime.replay import replay_trajectory
 from biobank_agent.runtime.researcher import RuntimeResearcher
@@ -194,6 +196,9 @@ class InteractiveShell:
 
     settings: Any
     console: Console = field(default_factory=Console)
+    # Initial workspace (cwd) for the session; defaults to the launch directory.
+    # Set via the `--workspace`/`--cwd` flag (issue #4).
+    workspace: str = ""
     runtime: AgentRuntime | None = None
     session: AgentSession | None = None
     legacy_agent: Agent | None = None
@@ -209,6 +214,11 @@ class InteractiveShell:
     _completion_gate: Any = None
     _activity: str = "idle"
     _activity_started_at: float = field(default_factory=time.time)
+    # The live execution view during _execute_plan_autonomously, so streamed
+    # subprocess lines (ctx.emit_line) can surface on it in real time (issue #2).
+    _active_exec_view: Any = None
+    # Background job manager for run_job / job_* tools and /jobs (issue #1).
+    job_manager: Any = None
 
     def initialize(self, *, initial_title: str = "Interactive session") -> AgentSession:
         if self.legacy_agent_factory is None:
@@ -256,7 +266,31 @@ class InteractiveShell:
                 clock=time.time,
             ),
         )
-        self.session = self.runtime.create_session(title=initial_title, cwd=str(Path.cwd()))
+        initial_cwd = str(Path.cwd())
+        if str(self.workspace or "").strip():
+            candidate = Path(str(self.workspace)).expanduser()
+            if candidate.is_dir():
+                initial_cwd = str(candidate.resolve())
+            else:
+                self.console.print(
+                    f"[yellow]--workspace {self.workspace!r} is not a directory; "
+                    f"using the launch directory instead.[/]"
+                )
+        self.session = self.runtime.create_session(title=initial_title, cwd=initial_cwd)
+        # Background job manager rooted under the active workspace (issue #1),
+        # with completion notifications (durable JSONL + optional command) so an
+        # unattended long run pings the operator when it finishes (issue #3).
+        jobs_dir = str(getattr(self.settings, "jobs_dir_name", ".biobank_jobs") or ".biobank_jobs")
+        from biobank_agent.runtime.notify import notify as _notify
+
+        def _job_notifier(event: str, *, title: str = "", body: str = "") -> None:
+            _notify(event, title=title, body=body, settings=self.settings)
+
+        self.job_manager = JobManager(Path(self.session.cwd) / jobs_dir, notifier=_job_notifier)
+        try:
+            self.job_manager.reattach()
+        except Exception:
+            pass
         self.mcp_manager = McpManager(
             tool_registry,
             config_path=Path(str(getattr(self.settings, "mcp_config_path", "")).strip()).expanduser()
@@ -452,6 +486,9 @@ class InteractiveShell:
             "resume": self._cmd_resume,
             "new": self._cmd_new,
             "fork": self._cmd_fork,
+            "cd": self._cmd_cd,
+            "jobs": self._cmd_jobs,
+            "job_tail": self._cmd_job_tail,
             "diff": self._cmd_diff,
             "permissions": self._cmd_permissions,
             "doctor": self._cmd_doctor,
@@ -569,10 +606,10 @@ class InteractiveShell:
                 self.console.print("[dim]Use /plan <task> to draft a structured plan.[/]")
                 return {"status": "none"}
         previous_mode = runtime.config.approval_profile
-        # Remember the user's REAL profile (captured BEFORE drafting flips the
+        # Remember the user's real profile (captured before drafting flips the
         # runtime to the read-only "plan" profile) so approval can restore it for
-        # autonomous execution. NOTE: session.config IS runtime.config (shared
-        # object), so it gets mutated to "plan" too — it must NOT be used as the
+        # autonomous execution. session.config is runtime.config (a shared
+        # object), so it gets mutated to "plan" too — it must not be used as the
         # restore source; this captured string is the safe source.
         self._pre_plan_profile = previous_mode
         try:
@@ -655,12 +692,28 @@ class InteractiveShell:
         total = len(plan.steps)
         ordered = self._iter_steps_in_dependency_order(plan)
         plan.status = PlanStatus.EXECUTING
+        # Lazy tool exposure: pre-activate the tools the planner named so the
+        # executor sees their schemas immediately — no extra skill_search round for
+        # planned steps. Token savings hold (only the plan's tools are added, not all).
+        planned_tools: list[str] = list(getattr(plan, "proposed_tool_scope", []) or [])
+        for step in plan.steps:
+            planned_tools.extend(getattr(step, "tool_scope", []) or [])
+        if planned_tools:
+            active = session.state.custom_data.setdefault("active_skills", [])
+            for tool_name in planned_tools:
+                if tool_name and tool_name not in active:
+                    active.append(tool_name)
         runtime.save_session(session)
 
         view = self._make_execution_view()
-        done = failed = 0
+        self._active_exec_view = view  # so streamed subprocess lines surface live (#2)
+        done = failed = unverified = 0
         halted: "tuple[int, Any] | None" = None
         current = None
+        # Capture each completed step's real output (tool results + final text)
+        # so _finalize_execution can surface it — otherwise the data the agent
+        # produced is invisible (issue #7). Keyed by step id.
+        step_outputs: dict[str, dict[str, Any]] = {}
         try:
             view.start()  # inside try so finally always tears the Live down,
             #              even if Ctrl-C lands during dashboard startup
@@ -696,12 +749,27 @@ class InteractiveShell:
                     plan, step, position, total, view
                 )
                 if status_ == "ok":
-                    step.status = "done"
-                    done += 1
-                    view.record("Execution", actor=step.id, status="success",
-                                message=f"step {position}/{total} done: {step.title} ({tool_calls} tool call(s))",
-                                metadata={"subagent": step.id, "current_step": step.id,
-                                          "total_steps": total, "completed_steps": done})
+                    captured = self._capture_step_output()
+                    step_outputs[step.id] = captured
+                    # Evidence Contract: a step that declared a verification but
+                    # produced no observable artifact is "unverified", not "done" — so a
+                    # confidently-narrated step with nothing behind it can't pass silently.
+                    verified, ev_reason = self._assess_step_evidence(step, captured)
+                    if verified:
+                        step.status = "done"
+                        done += 1
+                        view.record("Execution", actor=step.id, status="success",
+                                    message=f"step {position}/{total} done: {step.title} ({tool_calls} tool call(s))",
+                                    metadata={"subagent": step.id, "current_step": step.id,
+                                              "total_steps": total, "completed_steps": done})
+                    else:
+                        step.status = "unverified"
+                        unverified += 1
+                        self._store_plan_diagnosis(plan, step, reason=f"unverified: {ev_reason}")
+                        view.record("Execution", actor=step.id, status="warning",
+                                    message=f"step {position}/{total} UNVERIFIED: {ev_reason}",
+                                    metadata={"subagent": step.id, "current_step": step.id,
+                                              "total_steps": total, "completed_steps": done})
                 elif status_ == "needs_input":
                     # Agent asked the user a question — pause and hand control back.
                     reason = reason or f"step {position}/{total} needs input"
@@ -752,6 +820,7 @@ class InteractiveShell:
             self.console.print(f"\n[yellow]Execution cancelled at step {pos}/{total}.[/] {done} done, {failed} failed.")
             return {"status": "cancelled", "done": done, "failed": failed}
         finally:
+            self._active_exec_view = None
             view.stop()  # idempotent — the Live must always be torn down
 
         if halted and len(halted) > 2 and halted[2] == "paused":
@@ -759,23 +828,147 @@ class InteractiveShell:
         else:
             plan.status = PlanStatus.FAILED if halted else PlanStatus.COMPLETED
         runtime.save_session(session)
-        return self._finalize_execution(plan, done, failed, halted, total)
+        return self._finalize_execution(plan, done, failed, halted, total, step_outputs, unverified)
 
-    def _finalize_execution(self, plan, done: int, failed: int, halted, total: int) -> dict[str, Any]:
+    def _finalize_execution(self, plan, done: int, failed: int, halted, total: int,
+                            step_outputs: dict[str, dict] | None = None,
+                            unverified: int = 0) -> dict[str, Any]:
+        unv = f", [yellow]{unverified} unverified[/]" if unverified else ""
         if halted:
-            style = "yellow" if len(halted) > 2 and halted[2] == "paused" else "red"
+            paused = len(halted) > 2 and halted[2] == "paused"
+            style = "yellow" if paused else "red"
             reason = str(halted[3]) if len(halted) > 3 else ""
             suffix = f" Reason: {_rich_escape(reason)}" if reason else ""
-            self.console.print(f"[{style}]Execution halted at step {halted[0]}/{total}.[/] {done} done, {failed} failed.{suffix}")
+            self.console.print(f"[{style}]Execution halted at step {halted[0]}/{total}.[/] {done} done, {failed} failed{unv}.{suffix}")
             self._render_plan_diagnosis(plan)
+            # Notify (durable JSONL + optional command + bell) so an unattended run
+            # surfaces that it is waiting for input / has failed (issues #1, #3).
+            try:
+                from biobank_agent.runtime.notify import notify
+                notify("awaiting_user" if paused else "plan_failed",
+                       title=f"plan {'paused' if paused else 'failed'} at step {halted[0]}/{total}",
+                       body=reason or "", settings=self.settings)
+            except Exception:
+                pass
         else:
-            self.console.print(f"[green]Execution complete.[/] {done} done, {failed} failed.")
+            self.console.print(f"[green]Execution complete.[/] {done} done, {failed} failed{unv}.")
+            if unverified:
+                self.console.print(
+                    "[dim]Unverified steps ran but produced no artifact matching their declared "
+                    "verification — treat their results as unconfirmed.[/]"
+                )
         rows = [
             {"label": f"{i}/{total} {step.title}", "status": step.status, "detail": (step.purpose or "")[:160]}
             for i, step in enumerate(plan.steps, 1)
         ]
         self._render_progress_rows("Plan Execution Summary", rows)
+        # Surface what each step produced + a final answer.
+        self._render_step_outputs(plan, step_outputs or {})
         return {"status": getattr(plan.status, "value", str(plan.status)), "done": done, "failed": failed}
+
+    def _capture_step_output(self) -> dict[str, Any]:
+        """Snapshot the most recent turn's tool outputs + final text for a step.
+
+        The step ran via ``run_turn``; its real output lives in the turn's
+        ``tool_results`` (each a name + result dict) and the agent's closing
+        ``assistant_messages`` text. Captured immediately after the step
+        completes, so ``session.turns[-1]`` is still that step's turn."""
+        session = self._require_session()
+        turns = getattr(session, "turns", None) or []
+        if not turns:
+            return {}
+        turn = turns[-1]
+        tool_results: list[tuple[str, dict]] = []
+        for result in (getattr(turn, "tool_results", None) or []):
+            payload = getattr(result, "result", None)
+            if isinstance(payload, dict) and payload:
+                tool_results.append((str(getattr(result, "name", "")), payload))
+        messages = getattr(turn, "assistant_messages", None) or []
+        text = messages[-1].text.strip() if messages and getattr(messages[-1], "text", "") else ""
+        return {"tool_results": tool_results, "text": text}
+
+    def _render_step_outputs(self, plan, step_outputs: dict[str, dict]) -> None:
+        """Render each completed step's real output and a final-answer panel.
+
+        Runs after the live dashboard is torn down, printing to ``self.console``
+        so both the interactive console and the headless line-logger capture it.
+        Output is bounded (``render_result_payload`` caps rows/cols/chars; at most
+        a few tool results per step) so long runs do not flood the terminal."""
+        if not step_outputs:
+            return
+        for index, step in enumerate(plan.steps, 1):
+            captured = step_outputs.get(step.id)
+            if not captured:
+                continue
+            body: list[Any] = []
+            for name, result in (captured.get("tool_results") or [])[:6]:
+                payload = render_result_payload(result)
+                if payload is not None:
+                    body.append(Text(f"[{name}]", style="bold dim"))
+                    body.append(payload)
+            if not body:
+                continue
+            self.console.print(Panel(
+                Group(*body),
+                title=f"[bold]Step {index} output[/] — {_rich_escape(str(step.title))}",
+                border_style="blue",
+                padding=(0, 1),
+            ))
+        final = self._final_answer_text(plan, step_outputs)
+        if final:
+            self.console.print(Panel(
+                Markdown(final),
+                title="[bold green]Final Answer[/]",
+                border_style="green",
+                padding=(1, 2),
+            ))
+
+    @staticmethod
+    def _final_answer_text(plan, step_outputs: dict[str, dict]) -> str:
+        """The closing text of the last executed step that produced one — the
+        agent's brief 'what I did' answer that the plan summary alone never showed."""
+        for step in reversed(list(plan.steps)):
+            captured = step_outputs.get(step.id)
+            if captured and captured.get("text"):
+                return str(captured["text"])
+        return ""
+
+    _EVIDENCE_ARTIFACT_KEYS = (
+        "path", "output_path", "out_path", "report_path", "report_dir", "figure", "figures",
+        "artifact", "artifacts", "file", "files", "saved_to", "log_path",
+        "columns", "column_names", "rows", "head", "preview", "results", "n_rows",
+    )
+
+    def _assess_step_evidence(self, step, captured: dict) -> tuple[bool, str]:
+        """Evidence Contract: a finished step must have produced a real artifact
+        matching its declared verification. The exemption is derived from the absence of
+        a declared verification — not from a self-assigned step.kind — so 'just call it a
+        design step' cannot bypass the gate. Conservative: any concrete artifact (a file
+        path, structured columns/rows, or substantial console output) counts as evidence,
+        so only a step that declared a deliverable yet produced nothing observable is
+        flagged unverified."""
+        if not getattr(self.settings, "evidence_contract_enabled", True):
+            return True, "evidence contract disabled"
+        declared = [str(v).strip() for v in (getattr(step, "verification", None) or []) if str(v).strip()]
+        if not declared:
+            return True, "no verification contract declared"
+        tool_results = (captured or {}).get("tool_results") or []
+
+        def _has_artifact(result) -> bool:
+            if not isinstance(result, dict):
+                return False
+            for key in self._EVIDENCE_ARTIFACT_KEYS:
+                val = result.get(key)
+                if val not in (None, "", [], {}, 0):
+                    return True
+            out = str(result.get("stdout") or result.get("output") or result.get("stdout_tail") or "")
+            return len(out.strip()) >= 40
+
+        if any(_has_artifact(r) for _name, r in tool_results):
+            return True, "artifact produced"
+        if not tool_results:
+            return False, "declared a verification but ran no tools and produced no artifact"
+        return False, "declared a verification but produced no observable artifact/output"
 
     def _make_execution_view(self):
         """Live dashboard on a TTY; a line-logger shim otherwise (so execution
@@ -851,21 +1044,28 @@ class InteractiveShell:
 
     @staticmethod
     def _pending_ask_user_question(session) -> str:
-        """If the most recent turn ended by calling ``ask_user``, return that
-        question; otherwise "". Detection is via the LAST tool result, so an agent
-        that asked and then kept working (self-resolved) is not treated as blocked."""
+        """If the most recent turn ended by asking the user (``ask_user`` OR
+        ``pause_and_ask`` — any tool result flagged ``awaiting_user``), return the
+        enriched question; otherwise "". Detection is via the LAST tool result, so
+        an agent that asked and then kept working (self-resolved) is not treated as
+        blocked."""
         turns = getattr(session, "turns", None) or []
         if not turns:
             return ""
         results = getattr(turns[-1], "tool_results", None) or []
         if not results:
             return ""
-        last = results[-1]
-        if str(getattr(last, "name", "")) == "ask_user":
-            payload = getattr(last, "result", None) or {}
-            if isinstance(payload, dict) and payload.get("awaiting_user"):
-                return str(payload.get("question") or "").strip()
-        return ""
+        payload = getattr(results[-1], "result", None) or {}
+        if not (isinstance(payload, dict) and payload.get("awaiting_user")):
+            return ""
+        question = str(payload.get("question") or "").strip()
+        reason = str(payload.get("reason") or "").strip()
+        options = payload.get("options") or []
+        if reason and reason.lower() not in question.lower():
+            question = f"{question}  (reason: {reason})"
+        if isinstance(options, list) and options:
+            question = f"{question}  [options: {', '.join(str(o) for o in options)}]"
+        return question.strip()
 
     @staticmethod
     def _plan_answer_suffix(session) -> str:
@@ -1622,6 +1822,16 @@ class InteractiveShell:
         except Exception:
             tool_names = []
 
+        # Data-grounded planning: probe the files the objective references and
+        # inject a bounded DataContext so the council plans around the actual data
+        # shape (a GWAS-results CSV is a table, not genotypes — kills CSV→WGS at root).
+        data_ctx = ""
+        try:
+            from biobank_agent.runtime.data_probe import probe_objective
+
+            data_ctx = probe_objective(objective, cwd=session.cwd).get("text", "")
+        except Exception:
+            data_ctx = ""
         try:
             runtime.set_approval_profile("plan")
             plan = runtime.update_plan(
@@ -1632,7 +1842,7 @@ class InteractiveShell:
                 clarifier=clarifier if interactive else None,
                 tool_names=tool_names,
                 interactive=interactive,
-                context=f"Workspace: {session.cwd}",
+                context=(f"Workspace: {session.cwd}" + (f"\n\n{data_ctx}" if data_ctx else "")),
                 session_id=session.session_id,
                 turn_id=session.session_id,
                 stream=use_live,
@@ -2621,7 +2831,7 @@ class InteractiveShell:
         )
         return True
 
-    _TERMINAL_STEP_STATUS = {"done", "completed", "failed", "skipped"}
+    _TERMINAL_STEP_STATUS = {"done", "completed", "failed", "skipped", "unverified"}
 
     @classmethod
     def _first_incomplete_step(cls, plan):
@@ -2692,7 +2902,7 @@ class InteractiveShell:
                 tool = str(event.payload.get("tool", "?"))
                 state = str(event.payload.get("state", "")).lower()
                 tool_calls.append(f"{tool}:{state}")
-                # A report only counts if the report tool actually SUCCEEDED.
+                # A report only counts if the report tool succeeded.
                 if "report" in tool.lower() and state in _ok_states:
                     report_present = True
             elif event.type == AgentEventType.VERIFICATION_COMPLETED:
@@ -2961,6 +3171,100 @@ class InteractiveShell:
         self.session = forked
         self.console.print(f"[green]Forked session:[/] {forked.session_id}")
         return {"session_id": forked.session_id, "source": source.session_id}
+
+    def _cmd_cd(self, arg: str = "") -> dict[str, Any]:
+        """Switch the active workspace directory mid-session (issue #4).
+
+        Subsequent tool/shell/file paths and generated outputs resolve under the
+        new directory; the previous workspace is kept as an extra readable root so
+        earlier files stay reachable when moving between projects."""
+        runtime = self._require_runtime()
+        session = self._require_session()
+        target = str(arg or "").strip().strip('"').strip("'")
+        if not target:
+            extras = session.state.custom_data.get("workspace_extra_roots", []) or []
+            self.console.print(f"[dim]workspace:[/] {session.cwd}")
+            if extras:
+                self.console.print(f"[dim]also readable:[/] {', '.join(extras)}")
+            self.console.print("[dim]usage: /cd <path>[/]")
+            return {"status": "ok", "workspace": session.cwd, "extra_roots": list(extras)}
+        candidate = Path(target).expanduser()
+        if not candidate.is_dir():
+            self.console.print(f"[red]/cd: not a directory:[/] {target}")
+            return {"status": "error", "error": "not_a_directory", "path": target}
+        new_cwd = str(candidate.resolve())
+        old_cwd = str(session.cwd)
+        if new_cwd == old_cwd:
+            self.console.print(f"[dim]Already in[/] {new_cwd}")
+            return {"status": "ok", "workspace": new_cwd}
+        # Keep the previous workspace readable so cross-project work isn't stranded.
+        extras = list(session.state.custom_data.get("workspace_extra_roots", []) or [])
+        if old_cwd not in extras:
+            extras.append(old_cwd)
+        session.state.custom_data["workspace_extra_roots"] = extras
+        session.cwd = new_cwd
+        try:
+            session.workspace_fingerprint = runtime.workspace_fingerprint(new_cwd)
+        except Exception:
+            pass
+        # Re-root background jobs under the new workspace.
+        if self.job_manager is not None:
+            jobs_dir = str(getattr(self.settings, "jobs_dir_name", ".biobank_jobs") or ".biobank_jobs")
+            self.job_manager.jobs_root = Path(new_cwd) / jobs_dir
+        runtime.save_session(session)
+        try:
+            self._record_event(
+                AgentEvent.make(
+                    AgentEventType.PLAN_PHASE,
+                    session_id=session.session_id,
+                    phase="Workspace",
+                    actor="biobank",
+                    status="success",
+                    message=f"workspace -> {new_cwd}",
+                    metadata={"old": old_cwd, "new": new_cwd, "extra_roots": extras},
+                )
+            )
+        except Exception:
+            pass
+        self.console.print(
+            f"[green]Workspace:[/] {new_cwd}\n"
+            f"[dim]New files and reports go here. Previous dir kept readable: {old_cwd}[/]"
+        )
+        return {"status": "ok", "workspace": new_cwd, "extra_roots": extras}
+
+    def _cmd_jobs(self, *_args: Any) -> dict[str, Any]:
+        """List background jobs (run_job) with state, elapsed time and log path."""
+        jm = self.job_manager
+        recs = jm.list() if jm is not None else []
+        if not recs:
+            self.console.print("[dim]No background jobs.[/]")
+            return {"status": "ok", "jobs": []}
+        table = Table(title="[bold]Background Jobs[/bold]", box=box.SIMPLE)
+        table.add_column("Job"); table.add_column("State"); table.add_column("Label")
+        table.add_column("Elapsed", justify="right"); table.add_column("Log", overflow="fold")
+        for r in recs:
+            elapsed = round((r.ended_at or time.time()) - (r.started_at or time.time()), 1)
+            table.add_row(r.job_id, self._format_status(r.state), str(r.label or r.tool)[:40],
+                          f"{elapsed}s", str(r.log_path))
+        self.console.print(table)
+        self.console.print("[dim]Tail one with /job-tail <job-id>[/]")
+        return {"status": "ok", "jobs": [r.to_dict() for r in recs]}
+
+    def _cmd_job_tail(self, arg: str = "") -> dict[str, Any]:
+        """Show the tail of a background job's log."""
+        jm = self.job_manager
+        job_id = str(arg or "").strip()
+        if jm is None or not job_id:
+            self.console.print("[dim]usage: /job-tail <job-id>[/]")
+            return {"status": "error", "error": "job_id is required"}
+        rec = jm.status(job_id)
+        if rec is None:
+            self.console.print(f"[red]No such job:[/] {job_id}")
+            return {"status": "error", "error": "not_found"}
+        body = jm.tail(job_id, n_lines=60) or "[dim](no output yet)[/]"
+        self.console.print(Panel(_rich_escape(body), title=f"job {job_id} [{rec.state}] — {rec.log_path}",
+                                 border_style="blue"))
+        return {"status": "ok", "job_id": job_id, "state": rec.state}
 
     def _cmd_diff(self, *_args: Any) -> None:
         try:
@@ -3232,6 +3536,22 @@ class InteractiveShell:
         session = self._require_session()
         report = learn_from_session(runtime, session)
         artifacts = write_learning_report(report, Path(self.settings.reports_dir) / "learning")
+        # M9: curator pass — surface usage-driven skill-tier recommendations (dry-run,
+        # advisory). /learn reports promotions/demotions; it never auto-rewrites the
+        # manifest (tier mutation stays an explicit, reviewable action).
+        curation = None
+        try:
+            from biobank_agent.runtime.curator import curate
+            from biobank_agent.skills import manifest as _manifest
+
+            curation = curate(
+                getattr(session.state, "records", []) or [],
+                lambda n: _manifest.exposure_of(n),
+                _manifest._MANIFEST_PATH,
+                dry_run=True,
+            )
+        except Exception:
+            curation = None
         self._record_event(
             AgentEvent.make(
                 AgentEventType.PLAN_PHASE,
@@ -3243,8 +3563,20 @@ class InteractiveShell:
                 metadata={"artifacts": artifacts, "proposals": [p.to_dict() for p in report.proposals]},
             )
         )
-        self.console.print(Panel(json.dumps(report.to_dict(), indent=2, ensure_ascii=False, default=str), title="Learning"))
-        return report.to_dict()
+        payload = report.to_dict()
+        if curation is not None:
+            payload["curation"] = {
+                "recommendations": curation["recommendations"],
+                "harness_tasks": curation["harness_tasks"],
+            }
+        self.console.print(Panel(json.dumps(payload, indent=2, ensure_ascii=False, default=str), title="Learning"))
+        recs = (curation or {}).get("recommendations") or {}
+        if recs.get("promote") or recs.get("demote"):
+            self.console.print(
+                f"[cyan]Skill curator:[/] promote={recs.get('promote')} demote={recs.get('demote')} "
+                "(advisory — edit skills/manifest.json to apply)"
+            )
+        return payload
 
     def _evolution_llm(self):
         """Build an LLMClient for autonomous patch generation (planner model)."""
@@ -3315,7 +3647,7 @@ class InteractiveShell:
         if do_apply:
             # Transactional, test-gated apply: a proposal carrying a concrete patch
             # (diff + target_path + test_commands) is applied in an isolated git
-            # worktree and committed ONLY if its tests pass; core/runtime/tests
+            # worktree and committed only if its tests pass; core/runtime/tests
             # edits go to a review branch, never auto-merged. Patch-less proposals
             # stay review-only.
             applicable = [
@@ -3520,7 +3852,12 @@ class InteractiveShell:
 
     def _build_tool_context(self, request, *, session, turn, runtime):
         legacy = self._require_legacy_agent()
-        report_dir = Path(self.settings.reports_dir) / session.session_id
+        # Reports follow the active workspace by default so a --workspace/`/cd`
+        # switch keeps inputs and outputs together (issue #4).
+        if getattr(self.settings, "reports_follow_workspace", True):
+            report_dir = Path(session.cwd) / "reports" / session.session_id
+        else:
+            report_dir = Path(self.settings.reports_dir) / session.session_id
         report_dir.mkdir(parents=True, exist_ok=True)
         ctx = legacy._build_ctx(report_dir)
         try:
@@ -3535,6 +3872,22 @@ class InteractiveShell:
             ctx.state.memory = legacy.memory
             ctx.report_dir = report_dir
             ctx.workspace_root = Path(session.cwd)
+            # Extra readable/writable roots the user opted into via /cd (e.g. the
+            # prior project dir), so cross-project work keeps earlier files reachable.
+            ctx.extra_roots = list(session.state.custom_data.get("workspace_extra_roots", []) or [])
+            ctx.job_manager = self.job_manager
+            # Lazy skill exposure: let skill_search rank deferred skills and
+            # activate them so their schemas inject on the next round of this turn.
+            ctx.tool_registry = self.tool_registry
+
+            def _activate_skills(names: list[str], _session=session) -> None:
+                active = list(_session.state.custom_data.get("active_skills", []) or [])
+                for name in names:
+                    if name and name not in active:
+                        active.append(name)
+                _session.state.custom_data["active_skills"] = active
+
+            ctx.activate_skills = _activate_skills
             ctx.permission_mode = runtime.config.approval_profile
             ctx.turn_id = turn.id
             ctx.tool_call_id = request.call_id
@@ -3575,6 +3928,39 @@ class InteractiveShell:
                 pass
 
         ctx.emit_progress = emit_progress
+
+        # Live subprocess streaming (issue #2): surface stdout/stderr lines on the
+        # active execution view as they arrive. Throttled (stderr always; stdout
+        # sampled) so a chatty command does not saturate rendering — the FULL
+        # output is always persisted to the command's log file by run_streaming.
+        _line_state = {"last": 0.0, "count": 0}
+
+        def emit_line(stream: str = "stdout", line: str = "") -> None:
+            text = str(line or "").rstrip()
+            if not text:
+                return
+            view = getattr(self, "_active_exec_view", None)
+            if view is None or not hasattr(view, "record"):
+                return
+            _line_state["count"] += 1
+            if _line_state["count"] > 2000:  # hard cap; full output is in the log
+                return
+            now = time.monotonic()
+            if stream != "stderr" and (now - _line_state["last"]) < 0.25:
+                return  # throttle stdout; always show stderr
+            _line_state["last"] = now
+            try:
+                view.record(
+                    "Output",
+                    actor=str(request.call_id),
+                    status="running",
+                    message=f"{request.handler.name}: {text[:200]}",
+                    metadata={"subagent": str(request.call_id), "stream": stream},
+                )
+            except Exception:
+                pass
+
+        ctx.emit_line = emit_line
         ctx.record_trajectory = lambda payload: None if trajectory is None else trajectory.add(
             AgentEvent.make(
                 AgentEventType.TOOL_PROGRESS,
@@ -3630,21 +4016,45 @@ class InteractiveShell:
 
     def _cmd_skills(self) -> None:
         runtime = self._require_runtime()
+        from biobank_agent.skills import manifest as _sm
+
         handlers = runtime.tool_registry.list_handlers()
-        names = [handler.name for handler in handlers]
-        grouped: dict[str, list[str]] = {}
-        for name in names:
-            grouped.setdefault(self._tool_category(str(name)), []).append(str(name))
-        table = Table(title=f"Available Tools ({len(names)})", box=box.SIMPLE)
-        table.add_column("Category", style="cyan", no_wrap=True)
-        table.add_column("Count", justify="right")
+        registry = runtime.tool_registry
+        # Group by manifest domain (fallback to the legacy heuristic), tracking the
+        # exposure tier so the scientist sees the full tree + what loads each turn.
+        grouped: dict[str, dict[str, list[str]]] = {}
+        for handler in handlers:
+            name = str(handler.name)
+            domain = _sm.domain_of(name)
+            if domain == "other":
+                domain = self._tool_category(name)
+            try:
+                exposure = registry._exposure(handler)
+            except Exception:
+                exposure = _sm.exposure_of(name)
+            grouped.setdefault(domain, {}).setdefault(exposure, []).append(name)
+        n_direct = sum(len(v.get(_sm.DIRECT, [])) for v in grouped.values())
+        table = Table(title=f"Skill Tree — {len(handlers)} tools ({n_direct} loaded each turn; rest via skill_search)", box=box.SIMPLE)
+        table.add_column("Domain", style="cyan", no_wrap=True)
+        table.add_column("Total", justify="right")
+        table.add_column("Direct", justify="right", style="green")
+        table.add_column("Deferred", justify="right", style="yellow")
+        table.add_column("Hidden", justify="right", style="dim")
         table.add_column("Examples")
-        for category in sorted(grouped):
-            examples = ", ".join(sorted(grouped[category])[:8])
-            extra = len(grouped[category]) - 8
+        for domain in sorted(grouped):
+            tiers = grouped[domain]
+            allnames = [n for names in tiers.values() for n in names]
+            examples = ", ".join(sorted(allnames)[:6])
+            extra = len(allnames) - 6
             if extra > 0:
-                examples += f" ... (+{extra})"
-            table.add_row(category, str(len(grouped[category])), examples)
+                examples += f" … (+{extra})"
+            table.add_row(
+                domain, str(len(allnames)),
+                str(len(tiers.get(_sm.DIRECT, []))),
+                str(len(tiers.get(_sm.DEFERRED, []))),
+                str(len(tiers.get(_sm.HIDDEN, []))),
+                examples,
+            )
         self.console.print(table)
         wgs = self._wgs_readiness_snapshot()
         wgs_table = Table(title="WGS Readiness", box=box.SIMPLE)
@@ -4432,8 +4842,9 @@ def _text_progress_bar(done: int, total: int, width: int = 24) -> str:
     return f"[green]{'█' * filled}[/green][dim]{'░' * (width - filled)}[/dim]"
 
 
-def run_interactive_shell(settings: Any, *, initial_task: str = "", console: Console | None = None) -> None:
-    shell = InteractiveShell(settings=settings, console=console or Console())
+def run_interactive_shell(settings: Any, *, initial_task: str = "", console: Console | None = None,
+                          workspace: str = "") -> None:
+    shell = InteractiveShell(settings=settings, console=console or Console(), workspace=workspace or "")
     shell.run(initial_task=initial_task)
 
 

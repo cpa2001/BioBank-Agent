@@ -94,6 +94,46 @@ class Settings(BaseSettings):
     # ── Output ───────────────────────────────────────────────────
     reports_dir: Path = Path("./reports")
     memory_dir: Path = Path.home() / ".biobank_agent"
+    # When true, generated reports/outputs land under the ACTIVE workspace
+    # (<cwd>/reports/<session>) so a `--workspace`/`/cd` switch keeps inputs and
+    # outputs together; when false they always go under reports_dir.
+    reports_follow_workspace: bool = True
+
+    # ── Command execution (timeouts + background jobs) ───────────
+    # Single source of truth consumed via biobank_agent.utils.exec_policy. A
+    # command timeout of 0 means "auto" (scale for known long bio tools).
+    exec_default_timeout_s: int = 120          # generic command default
+    exec_long_tool_timeout_s: int = 7200       # baseline floor for known long tools
+    exec_hard_ceiling_s: int = 86400           # clamp explicit foreground timeouts
+    exec_allow_no_timeout: bool = True         # permit uncapped BACKGROUND jobs
+    exec_background_threshold_s: int = 600      # expected duration >= this -> background
+    exec_auto_background_long_tools: bool = True  # auto-background long tools when headless
+    exec_stream_tail_chars: int = 5000          # LLM-facing stdout/stderr tail size
+    jobs_dir_name: str = ".biobank_jobs"        # background job logs under the workspace
+    # Execution backend for long jobs: auto-detects an available cluster
+    # scheduler (slurm/sge/lsf/dxrun) else local; or force one explicitly.
+    exec_backend: str = "auto"                  # auto | local | slurm | sge | lsf | dxrun
+    scheduler_cpus: int = 1
+    scheduler_mem_mb: int = 4096
+    scheduler_time_min: int = 240
+    scheduler_partition: str = ""
+
+    # ── Lazy tool exposure ──────────────────────────────────
+    # When true, only Direct-tier skills (skills/manifest.json) + native tools are
+    # offered to the model each round; Deferred skills load on demand via the
+    # skill_search tool. False ⇒ inject all tool schemas.
+    lazy_tools_enabled: bool = True
+    # Inject the hierarchical skill-tree node summaries (+ navigate_skill_tree) into the
+    # executor prompt when manifest.json carries a tree. False ⇒ flat category summaries.
+    skill_tree_enabled: bool = True
+
+    # ── Evidence Contract ───────────────────────────────────
+    # When true, a plan step that declared a verification but produced no observable
+    # artifact is marked 'unverified' (never 'done').
+    evidence_contract_enabled: bool = True
+    # Notifications for finished background jobs / paused (awaiting-input) runs.
+    notify_enabled: bool = True
+    notify_command: str = ""                    # optional shell cmd; message piped on stdin
 
     # ── Web Search ───────────────────────────────────────────────
     search_provider: str = "duckduckgo"

@@ -48,7 +48,7 @@ def _requires_confirmation(command: str, write_policy: str, confirmed: bool) -> 
         "command": {"type": "string", "description": "Shell command to run"},
         "purpose": {"type": "string", "description": "Why this command is needed", "default": ""},
         "cwd": {"type": "string", "description": "Working directory; defaults to project root", "default": ""},
-        "timeout_s": {"type": "integer", "description": "Timeout in seconds", "default": 120},
+        "timeout_s": {"type": "integer", "description": "Timeout in seconds; 0 = auto (scales for long tools like plink/gatk/bcftools)", "default": 0},
         "write_policy": {"type": "string", "description": "read_only, workspace_write, or environment_write", "default": "read_only"},
         "confirmed": {"type": "boolean", "description": "Required before mutation/install commands", "default": False},
     },
@@ -58,12 +58,14 @@ def shell_exec(
     command: str,
     purpose: str = "",
     cwd: str = "",
-    timeout_s: int = 120,
+    timeout_s: int = 0,
     write_policy: str = "read_only",
     confirmed: bool = False,
     *,
     ctx=None,
 ) -> dict:
+    from biobank_agent.utils.exec_policy import resolve_timeout
+
     command = str(command or "").strip()
     if not command:
         return {"error": "command is required"}
@@ -79,13 +81,15 @@ def shell_exec(
     workdir = Path(cwd).expanduser() if cwd else _workspace(ctx)
     if hasattr(ctx, "emit_progress"):
         ctx.emit_progress("shell", f"running: {command[:120]}", {"cwd": str(workdir), "purpose": purpose})
+    eff_timeout = max(1, int(resolve_timeout(command=command, override=timeout_s,
+                                             settings=getattr(ctx, "settings", None)) or 120))
     proc = subprocess.run(
         command,
         shell=True,
         cwd=str(workdir),
         capture_output=True,
         text=True,
-        timeout=max(1, int(timeout_s or 120)),
+        timeout=eff_timeout,
         check=False,
     )
     return {

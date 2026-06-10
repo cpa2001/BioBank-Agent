@@ -69,7 +69,7 @@ _PERSONAS = [
 _PERSONA_TAGS = ["biostatistician", "bioinformatics", "geneticist"]
 
 # Distinct provider ROLES per draft slot so each candidate resolves to a
-# DIFFERENT model (model_for_role: PLANNER=kimi, PRIMARY_EXECUTOR=deepseek,
+# different model (model_for_role: PLANNER=kimi, PRIMARY_EXECUTOR=deepseek,
 # CRITIC=glm). Cycled by slot index so num_candidates > 3 wraps deterministically.
 # This is what makes the dashboard show three distinct models instead of 3×kimi.
 _DRAFT_ROLES = [ProviderRole.PLANNER, ProviderRole.PRIMARY_EXECUTOR, ProviderRole.CRITIC]
@@ -99,6 +99,97 @@ _PLAN_SCHEMA_HINT = """Return ONLY a JSON object with this exact shape:
 }
 Make steps concrete and specific to the objective (4-9 steps typically). Use ONLY
 tool names from the provided list in tool_scope. No prose outside the JSON."""
+
+
+# ── Inspection fast-path (issue #6) ────────────────────────────────────────────
+# A pure "read first N rows / show columns / head / preview" request must NOT be
+# routed through the council, which over-plans a heavyweight genomics workflow for
+# any genomics-flavored filename (e.g. a CSV named *gwas_results*). We detect such
+# requests deterministically and answer with a 1-step read-only preview.
+
+_INSPECTION_RE = re.compile(
+    r"(first\s+\d+\s+rows?|first\s+few\s+rows?|\bhead\b|show\s+(the\s+)?columns?|"
+    r"column\s+names?|list\s+(the\s+)?columns?|\bpreview\b|\bpeek\b|read\s+the\s+first|"
+    r"print\s+(the\s+)?columns?|what\s+(are\s+the\s+)?columns?|\bdtypes?\b|schema\s+of|"
+    r"inspect\s+the\s+file|describe\s+the\s+(file|table|data)|list\s+(the\s+)?files|"
+    r"前\s*\d+\s*行|看(一下)?列名|列名|表头|预览|有哪些列|查看.*文件)",
+    re.I,
+)
+# Analysis/heavy imperatives that DISQUALIFY the fast path. Tested only against the
+# objective AFTER file paths/names are stripped, so a token inside a filename
+# (e.g. "gwas_analysis_results.csv") never blocks a genuine inspection request.
+_ANALYSIS_RE = re.compile(
+    r"(\bassociat|run\s+gwas|\bperform\b|\bcomput|calculat|analy[sz]e|\banalysis\b|\btrain\b|"
+    r"\bmodel\b|predict|classif|cluster|regress|\bpca\b|kinship|burden|annotat|enrich|pathway|"
+    r"\bqc\b|quality\s+control|variant\s+call|imputation|\bprs\b|polygenic|characteristic\s+gene|"
+    r"differential|分析|关联|建模|训练|预测|分类|聚类|回归|富集|注释|质控|变异|评分|特征基因|差异)",
+    re.I,
+)
+_PATH_RE = re.compile(
+    # absolute or relative path with at least one "/" (optionally a leading dir
+    # component, so "data/x.csv" keeps its prefix), OR a bare filename with a known
+    # data extension.
+    r"((?:[~\w.\-]+)?(?:/[\w.\-]+)+|[\w.\-]+\.(?:csv|tsv|txt|parquet|xlsx?|json|vcf|gz|h5ad))",
+    re.I,
+)
+_ROWS_RE = re.compile(r"first\s+(\d+)\s+rows?|前\s*(\d+)\s*行|head\s+(\d+)|\b(\d+)\s+rows?\b", re.I)
+
+
+def _strip_paths(text: str) -> str:
+    return _PATH_RE.sub(" ", str(text or ""))
+
+
+def extract_path(objective: str) -> str:
+    """First file path / filename referenced in the objective (or "")."""
+    match = _PATH_RE.search(str(objective or ""))
+    return match.group(0) if match else ""
+
+
+def extract_row_count(objective: str) -> int | None:
+    match = _ROWS_RE.search(str(objective or ""))
+    if not match:
+        return None
+    for group in match.groups():
+        if group:
+            try:
+                return int(group)
+            except ValueError:
+                return None
+    return None
+
+
+def is_pure_inspection_objective(objective: str) -> bool:
+    """True when the objective only wants to look at a file (read rows / show
+    columns / head / preview) with no analysis imperative. Requires a file
+    reference so vague prompts still go to the council."""
+    text = str(objective or "")
+    if not extract_path(text):
+        return False
+    prose = _strip_paths(text)  # ignore filename tokens when judging intent
+    return bool(_INSPECTION_RE.search(prose)) and not bool(_ANALYSIS_RE.search(prose))
+
+
+# Generic tabular analysis (classify / cluster / find characteristic features of a
+# delimited file). Used only as a fallback when the council fails to parse a plan,
+# so a "classify 243 traits and find each class's characteristic genes" request
+# yields a workable plan instead of an error.
+_TABULAR_ANALYSIS_RE = re.compile(
+    r"(classif|cluster|\bgroup\b|grouping|segment|categor|characteristic|signature|"
+    r"\bmarker|differential|distinguish|profile|分类|聚类|分组|归类|特征|差异|标志)",
+    re.I,
+)
+_TABULAR_EXT_RE = re.compile(r"\.(?:csv|tsv|txt|parquet|xlsx?)\b", re.I)
+
+
+def is_tabular_analysis_objective(objective: str) -> bool:
+    """True when the goal analyzes a delimited/tabular file (classify rows, find
+    characteristic features) — the shape that should get a deterministic analysis
+    fallback if the council can't produce a plan."""
+    text = str(objective or "")
+    if not _TABULAR_EXT_RE.search(text):
+        return False
+    prose = _strip_paths(text)
+    return bool(_TABULAR_ANALYSIS_RE.search(prose))
 
 
 class RuntimePlanner:
@@ -173,56 +264,285 @@ class RuntimePlanner:
         open_questions: list[str] = []
         ctx.emit_event("Preflight", status="success", message=f"{len(tools)} tools available; council planner ready")
 
+        # 0) Inspection fast-path (issue #6): a pure "read first N rows / show
+        # columns / preview <file>" request is answered with a deterministic
+        # read-only preview instead of the council, which would otherwise over-plan
+        # a heavyweight genomics workflow for a genomics-flavored filename.
+        if is_pure_inspection_objective(clean_objective):
+            ctx.emit_event("Planning", status="success",
+                           message="file-inspection request — read-only preview (council skipped)")
+            plan = self._inspection_plan(clean_objective, tools, previous=previous, refinement=refinement)
+            ctx.emit_event("Review", status="success", message="inspection plan ready for review")
+            return plan
+
         # 1) Clarification gate (before decomposition).
         context = self._clarify(ctx, clean_objective, context, clarifier, interactive, open_questions)
 
-        # 2) Planning: parallel candidate drafts.
-        ctx.emit_event("Planning", status="running", message=f"drafting {self.num_candidates} candidate plans")
-        candidate_jobs = [
-            CouncilJob(
-                role=_DRAFT_ROLES[i % len(_DRAFT_ROLES)],
-                messages=self._candidate_messages(clean_objective, context, refinement, tools, _PERSONAS[i % len(_PERSONAS)]),
-                label=f"candidate-{i + 1}",
-                stage="Planning",
-                metadata={
-                    "persona": i % len(_PERSONAS),
-                    "persona_tag": _PERSONA_TAGS[i % len(_PERSONA_TAGS)],
-                    "slot": i,
-                    "activity": "drafting",
-                },
-            )
-            for i in range(self.num_candidates)
-        ]
-        candidate_results = run_parallel(ctx, candidate_jobs)
-        nodes = self._parse_candidates(candidate_results, candidate_jobs)
-        if not nodes:
-            ctx.emit_event("Planning", status="error", message="no candidate plan parsed")
-            raise CouncilError(
-                "Council planning failed: no model produced a valid plan. "
-                "Check the planner model/credentials, then retry /plan."
-            )
-        ctx.emit_event("Planning", status="success", message=f"{len(nodes)}/{self.num_candidates} candidate plan(s) parsed")
+        # 2-5) Council pipeline. If it genuinely fails to produce a valid plan, fall
+        # back to a deterministic tabular-analysis plan for analyze-a-file goals
+        # (issue #5) instead of erroring — so "classify N traits and find each
+        # class's characteristic genes" yields a workable plan. Otherwise re-raise.
+        try:
+            # 2) Planning: parallel candidate drafts.
+            ctx.emit_event("Planning", status="running", message=f"drafting {self.num_candidates} candidate plans")
+            candidate_jobs = [
+                CouncilJob(
+                    role=_DRAFT_ROLES[i % len(_DRAFT_ROLES)],
+                    messages=self._candidate_messages(clean_objective, context, refinement, tools, _PERSONAS[i % len(_PERSONAS)]),
+                    label=f"candidate-{i + 1}",
+                    stage="Planning",
+                    metadata={
+                        "persona": i % len(_PERSONAS),
+                        "persona_tag": _PERSONA_TAGS[i % len(_PERSONA_TAGS)],
+                        "slot": i,
+                        "activity": "drafting",
+                    },
+                )
+                for i in range(self.num_candidates)
+            ]
+            candidate_results = run_parallel(ctx, candidate_jobs)
+            nodes = self._parse_candidates(candidate_results, candidate_jobs)
+            if not nodes:
+                ctx.emit_event("Planning", status="error", message="no candidate plan parsed")
+                raise CouncilError(
+                    "Council planning failed: no model produced a valid plan. "
+                    "Check the planner model/credentials, then retry /plan."
+                )
+            ctx.emit_event("Planning", status="success", message=f"{len(nodes)}/{self.num_candidates} candidate plan(s) parsed")
 
-        # 3) External council: critique each candidate in parallel (scores nodes).
-        nodes = self._critique(ctx, clean_objective, nodes)
+            # 3) External council: critique each candidate in parallel (scores nodes).
+            nodes = self._critique(ctx, clean_objective, nodes)
 
-        # 3b) Debate: bounded multi-round cross-pollination with confidence-based
-        # consensus pruning (CONCAT/EVOCHAMBER). No-op unless >=2 distinct models.
-        nodes = self._debate(ctx, clean_objective, context, refinement, tools, nodes)
+            # 3b) Debate: bounded multi-round cross-pollination with confidence-based
+            # consensus pruning (CONCAT/EVOCHAMBER). No-op unless >=2 distinct models.
+            nodes = self._debate(ctx, clean_objective, context, refinement, tools, nodes)
 
-        # 4) Merge: orchestrator synthesizes from the debate winners (or uses the
-        # single best surviving candidate).
-        merged = self._merge(ctx, clean_objective, context, refinement, tools, nodes)
+            # 4) Merge: orchestrator synthesizes from the debate winners (or uses the
+            # single best surviving candidate).
+            merged = self._merge(ctx, clean_objective, context, refinement, tools, nodes)
 
-        # 5) Validation: build + validate runtime-native PlanState.
-        ctx.emit_event("Validation", status="running", message="validating merged plan schema")
-        plan = self._plan_state_from_json(merged, clean_objective, previous=previous, refinement=refinement)
+            # 5) Validation: build + validate runtime-native PlanState.
+            ctx.emit_event("Validation", status="running", message="validating merged plan schema")
+            plan = self._plan_state_from_json(merged, clean_objective, previous=previous,
+                                              refinement=refinement, available_tools=tools)
+        except CouncilError:
+            if is_tabular_analysis_objective(clean_objective):
+                ctx.emit_event("Planning", status="success",
+                               message="council could not plan; using a deterministic tabular-analysis plan")
+                plan = self._tabular_analysis_plan(clean_objective, tools, previous=previous, refinement=refinement)
+                for question in open_questions:
+                    if question not in plan.open_questions:
+                        plan.open_questions.append(question)
+                ctx.emit_event("Review", status="success", message="tabular-analysis plan ready for review")
+                return plan
+            # M5: never hard-fail — degrade to a labeled deterministic scaffold plan so a
+            # transient council failure does not dead-end the user (issue #5). The fallback
+            # is clearly marked so a genuine model/credential outage stays visible.
+            ctx.emit_event("Planning", status="success",
+                           message="council could not plan; using a deterministic scaffold plan")
+            plan = self._scaffold_plan(clean_objective, tools, previous=previous, refinement=refinement)
+            for question in open_questions:
+                if question not in plan.open_questions:
+                    plan.open_questions.append(question)
+            ctx.emit_event("Review", status="success", message="scaffold plan ready for review")
+            return plan
         for question in open_questions:
             if question not in plan.open_questions:
                 plan.open_questions.append(question)
         self._validate_plan(plan)
         ctx.emit_event("Validation", status="success", message=f"{len(plan.steps)} steps validated")
         ctx.emit_event("Review", status="success", message="plan ready for review")
+        return plan
+
+    def _inspection_plan(
+        self,
+        objective: str,
+        tools: list[str],
+        *,
+        previous: PlanState | None = None,
+        refinement: str = "",
+    ) -> PlanState:
+        """Deterministic 1-step read-only preview plan (issue #6 fast path)."""
+        tool = "python_exec" if (not tools or "python_exec" in tools) else (
+            "shell_exec" if "shell_exec" in tools else "python_exec"
+        )
+        path = extract_path(objective)
+        rows = extract_row_count(objective) or 5
+        target = path or "the file referenced in the request"
+        name = path.rsplit("/", 1)[-1] if path else "file"
+        purpose = (
+            f"Read-only preview of {target}. Use {tool} to load the file and print "
+            f"(1) its column names / header and (2) the first {rows} rows, then give a "
+            f"brief final answer that lists the columns and the output location. Do NOT "
+            f"run any analysis, association, QC, annotation, scoring, or variant pipeline "
+            f"— this is a file-inspection task only."
+        )
+        data = {
+            "title": f"Preview {name}"[:80],
+            "summary": f"Read-only file inspection: {objective[:160]}",
+            "steps": [{
+                "id": "s1",
+                "title": "Preview file (columns + first rows)",
+                "purpose": purpose,
+                "tool_scope": [tool],
+                "file_scope": [path] if path else [],
+                "verification": ["The column names and the requested rows are printed."],
+            }],
+            "proposed_tool_scope": [tool],
+            "required_approvals": ["Read-only inspection; no file mutation expected."],
+        }
+        plan = self._plan_state_from_json(data, objective, previous=previous, refinement=refinement)
+        plan.context_gathering = [
+            "Deterministic read-only file preview; council planning skipped for a pure "
+            "inspection request (issue #6)."
+        ]
+        plan.audit_summary = "Inspection fast-path plan (no council)."
+        return plan
+
+    def _tabular_analysis_plan(
+        self,
+        objective: str,
+        tools: list[str],
+        *,
+        previous: PlanState | None = None,
+        refinement: str = "",
+    ) -> PlanState:
+        """Deterministic multi-step plan to analyze a tabular file (issue #5 fallback).
+
+        Used only when the council fails to produce a plan for an analyze-a-file
+        goal (e.g. 'classify N traits and find each class's characteristic genes').
+        Uses the generic python_exec skill (no domain dependency); the user can
+        refine it via /plan-edit."""
+        has_report = (not tools) or ("generate_report" in tools)
+        path = extract_path(objective) or "the input file"
+        steps: list[dict[str, Any]] = [
+            {
+                "id": "load",
+                "title": "Load and profile the file",
+                "purpose": (
+                    f"Use python_exec (pandas) to load {path}; print its shape, column names, "
+                    f"dtypes, head, and basic per-column summary stats so the structure is clear."
+                ),
+                "tool_scope": ["python_exec"],
+                "file_scope": [path] if extract_path(objective) else [],
+                "verification": ["Shape, columns and head are printed."],
+            },
+            {
+                "id": "analyze",
+                "title": "Perform the requested classification/analysis",
+                "purpose": (
+                    f"Use python_exec to carry out the analysis the user asked for on {path} "
+                    f"(original request: {objective[:200]}). Choose a defensible method, print the "
+                    f"resulting groups/classes with their sizes, and SAVE outputs (assignments + any "
+                    f"tables) to files under the workspace; report the output paths."
+                ),
+                "tool_scope": ["python_exec"],
+                "dependencies": ["load"],
+                "verification": ["Classes/groups and their sizes are printed; outputs saved with paths shown."],
+            },
+            {
+                "id": "characterize",
+                "title": "Find each class's characteristic features",
+                "purpose": (
+                    "Use python_exec to identify, for each class/group from the previous step, the "
+                    "characteristic/distinguishing features (e.g. top genes/markers per class) with a "
+                    "stated criterion; print a compact per-class table and save it to the workspace."
+                ),
+                "tool_scope": ["python_exec"],
+                "dependencies": ["analyze"],
+                "verification": ["A per-class characteristic-feature table is produced and saved."],
+            },
+        ]
+        if has_report:
+            steps.append({
+                "id": "report",
+                "title": "Summarize findings in a report",
+                "purpose": "Summarize the classes and their characteristic features, with method, "
+                           "assumptions and output paths, into a concise report.",
+                "tool_scope": ["generate_report"],
+                "dependencies": ["characterize"],
+                "verification": ["A report is written and its path is shown."],
+            })
+        data = {
+            "title": f"Tabular analysis: {objective[:60]}"[:80],
+            "summary": f"Deterministic tabular-file analysis (council fallback): {objective[:160]}",
+            "steps": steps,
+            "required_approvals": ["User approval before writing outputs."],
+        }
+        plan = self._plan_state_from_json(data, objective, previous=previous, refinement=refinement,
+                                          available_tools=tools)
+        plan.context_gathering = [
+            "Deterministic tabular-analysis scaffold used because council planning did not "
+            "produce a valid plan (issue #5). Refine with /plan-edit if needed."
+        ]
+        plan.audit_summary = "Tabular-analysis fallback plan (council failed)."
+        return plan
+
+    def _scaffold_plan(
+        self,
+        objective: str,
+        tools: list[str],
+        *,
+        previous: PlanState | None = None,
+        refinement: str = "",
+    ) -> PlanState:
+        """Deterministic minimal plan used when council planning fails for any goal,
+        so planning never hard-fails. A labeled gather→execute→report scaffold the
+        user can refine via /plan-edit. The degradation is surfaced (audit_summary +
+        context_gathering) so a real model/credential failure is never silently hidden."""
+        has_report = (not tools) or ("generate_report" in tools)
+        path = extract_path(objective)
+        steps: list[dict[str, Any]] = [
+            {
+                "id": "gather",
+                "title": "Understand the request and inspect inputs",
+                "purpose": (
+                    f"Restate the goal in one line and gather what is needed to act on it "
+                    f"(original request: {objective[:200]}). If a data file/path is referenced, use "
+                    f"python_exec to load and profile it (shape, columns, dtypes, head); otherwise use "
+                    f"field_search/python_exec to locate the relevant inputs."
+                ),
+                "tool_scope": ["python_exec"],
+                "file_scope": [path] if path else [],
+                "verification": ["Key inputs are identified and printed."],
+            },
+            {
+                "id": "execute",
+                "title": "Carry out the requested task",
+                "purpose": (
+                    f"Perform the task the user asked for (\"{objective[:200]}\") with a defensible "
+                    f"method. Print the key results and SAVE all outputs (tables/figures) to files under "
+                    f"the workspace; report the output paths. If the data or tooling does not match "
+                    f"expectations, call pause_and_ask rather than silently simplifying the analysis."
+                ),
+                "tool_scope": ["python_exec"],
+                "dependencies": ["gather"],
+                "verification": ["Key results are printed and outputs saved with paths shown."],
+            },
+        ]
+        if has_report:
+            steps.append({
+                "id": "report",
+                "title": "Summarize findings in a report",
+                "purpose": "Summarize the method, assumptions, key results and output paths into a concise report.",
+                "tool_scope": ["generate_report"],
+                "dependencies": ["execute"],
+                "verification": ["A report is written and its path is shown."],
+            })
+        data = {
+            "title": f"Plan: {objective[:60]}"[:80],
+            "summary": f"Deterministic scaffold plan (council fallback): {objective[:160]}",
+            "steps": steps,
+            "required_approvals": ["User approval before writing outputs."],
+        }
+        plan = self._plan_state_from_json(data, objective, previous=previous, refinement=refinement,
+                                          available_tools=tools)
+        plan.context_gathering = [
+            "Deterministic scaffold plan used because council planning did not produce a valid plan "
+            "(M5 robust-council fallback) — check the planner model/credentials if this recurs. "
+            "Refine with /plan-edit if needed."
+        ]
+        plan.audit_summary = "Scaffold fallback plan (council failed)."
         return plan
 
     # ------------------------------------------------------------ stage: clarify
@@ -697,6 +1017,42 @@ class RuntimePlanner:
         ]
 
     # ------------------------------------------------------------- parse/validate
+    @staticmethod
+    def _repair_json_object(text: str) -> dict[str, Any] | None:
+        """Best-effort salvage of a JSON object from a noisy LLM response.
+        Trims to the outermost brace pair, balances a truncated tail, and drops
+        trailing commas. Returns the parsed dict or None when unrecoverable."""
+        import json
+        import re as _re
+
+        if not text:
+            return None
+        s = str(text)
+        start = s.find("{")
+        if start == -1:
+            return None
+        end = s.rfind("}")
+        raw_candidates: list[str] = []
+        if end > start:
+            raw_candidates.append(s[start:end + 1])  # complete object, trailing prose stripped
+        raw_candidates.append(s[start:])             # truncated tail (balance below)
+        attempts: list[str] = []
+        for snippet in raw_candidates:
+            opens = snippet.count("{") - snippet.count("}")
+            if opens > 0:
+                snippet += "}" * opens
+            snippet = _re.sub(r",\s*([}\]])", r"\1", snippet)  # drop trailing commas
+            attempts.append(snippet)
+            attempts.append(snippet.replace("'", '"'))
+        for candidate in attempts:
+            try:
+                obj = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                return obj
+        return None
+
     def _parse_candidates(self, results: list[CouncilResult], jobs: list[CouncilJob]) -> list[dict[str, Any]]:
         """Parse each successful candidate into a debate NODE carrying the plan
         plus its provenance (slot / role / model / persona). Matched back to the
@@ -710,8 +1066,11 @@ class RuntimePlanner:
             try:
                 data = extract_json(result.text)
             except Exception:
-                logger.debug("candidate %s did not parse as JSON", result.label, exc_info=True)
-                continue
+                data = self._repair_json_object(result.text)  # M5: salvage malformed JSON
+                if data is None:
+                    logger.debug("candidate %s did not parse as JSON (even after repair)",
+                                 result.label, exc_info=True)
+                    continue
             steps = data.get("steps") if isinstance(data, dict) else None
             if not (isinstance(steps, list) and any(isinstance(s, dict) for s in steps)):
                 continue
@@ -731,7 +1090,8 @@ class RuntimePlanner:
             })
         return nodes
 
-    def _plan_state_from_json(self, data: dict[str, Any], objective: str, *, previous: PlanState | None, refinement: str) -> PlanState:
+    def _plan_state_from_json(self, data: dict[str, Any], objective: str, *, previous: PlanState | None,
+                              refinement: str, available_tools: list[str] | None = None) -> PlanState:
         if not isinstance(data, dict):
             raise CouncilError("planner returned a non-object plan")
         steps_raw = data.get("steps")
@@ -739,6 +1099,8 @@ class RuntimePlanner:
             raise CouncilError("planner returned no valid steps list")
         steps: list[PlanStep] = []
         seen_ids: set[str] = set()
+        dropped_tools: set[str] = set()
+        known_tools = set(available_tools or [])
         for i, item in enumerate(steps_raw):
             if not isinstance(item, dict):
                 continue
@@ -761,6 +1123,13 @@ class RuntimePlanner:
                     risks=_as_str_list(item.get("risks")),
                 )
             )
+        # Drop tool_scope entries that name tools which are not actually available
+        # (a council can hallucinate skill names) so the plan stays honest (issue #5).
+        if known_tools:
+            for step in steps:
+                kept = [t for t in step.tool_scope if t in known_tools]
+                dropped_tools.update(t for t in step.tool_scope if t not in known_tools)
+                step.tool_scope = kept
         revision = (previous.revision + 1) if previous else 1
         title = str(data.get("title") or "").strip() or objective[:80]
         plan = PlanState(
@@ -787,6 +1156,10 @@ class RuntimePlanner:
         )
         if refinement:
             plan.risks.append(f"Refinement requested by user: {refinement[:240]}")
+        if dropped_tools:
+            note = f"Planner referenced unavailable tools (ignored): {', '.join(sorted(dropped_tools))}"
+            plan.risks.append(note)
+            plan.open_questions.append(note)
         return plan
 
     @staticmethod

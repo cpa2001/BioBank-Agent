@@ -19,6 +19,7 @@ from biobank_agent.runtime.self_evolve import (
     _safe_env,
     _validate_test_command,
     apply_patch_transactionally,
+    mutation_check,
 )
 
 
@@ -92,6 +93,36 @@ def test_applied_when_tests_pass(tmp_path):
     assert (repo / "custom_skills" / "test_demo.py").exists()
     assert len(_worktrees(repo)) == 1
     assert "evolve/" not in _branches(repo)
+
+
+def test_mutation_check_flags_gaming_vectors():
+    # M8: static red flags before the worktree apply.
+    assert mutation_check("+def helper():\n+    return 1\n") == []
+    assert any("test function" in r for r in mutation_check("-def test_old():\n-    assert x == 1\n"))
+    assert any("skip" in r for r in mutation_check("+@pytest.mark.skip\n+def test_new():\n+    pass\n"))
+    assert any("assertion" in r for r in mutation_check("-    assert a\n-    assert b\n-    assert c\n"))
+
+
+def test_apply_rejects_test_deleting_mutation(tmp_path):
+    # A self-edit that deletes a test to pass the gate is rejected outright (M8),
+    # before the worktree apply even runs.
+    repo = _init_repo(tmp_path)
+    diff = (
+        "diff --git a/custom_skills/x.py b/custom_skills/x.py\n"
+        "--- a/custom_skills/x.py\n"
+        "+++ b/custom_skills/x.py\n"
+        "@@ -1,2 +1,1 @@\n"
+        "-def test_old():\n"
+        "-    assert True\n"
+        "+x = 1\n"
+    )
+    res = apply_patch_transactionally(
+        repo_root=repo, target_path="custom_skills/x.py", diff=diff,
+        test_commands=["pytest custom_skills -q"],
+    )
+    assert res.status == "rejected"
+    assert "static check" in (res.error or "")
+    assert len(_worktrees(repo)) == 1  # no worktree leaked
 
 
 def test_rolled_back_when_tests_fail(tmp_path):

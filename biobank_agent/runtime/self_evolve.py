@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -64,13 +65,13 @@ _NO_EXECUTION_FLAGS = ("--collect-only", "--collectonly", "--co")
 # the LLM API key etc.
 _SECRET_ENV_TOKENS = ("secret", "token", "key", "auth", "api", "password", "passwd", "credential")
 # pytest reads extra args from these env vars. `PYTEST_ADDOPTS=--collect-only` skips
-# every test body while exiting 0 — and `-o addopts=` on the command line does NOT
-# override the env channel (verified), so these MUST be stripped from the test env.
+# every test body while exiting 0 — and `-o addopts=` on the command line does not
+# override the env channel (verified), so these must be stripped from the test env.
 _PYTEST_ENV_STRIP = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DEBUG_TEMPROOT")
 # pytest config / hook files can subvert the gate from inside the repo: addopts in
 # pytest.ini/tox.ini/setup.cfg/pyproject.toml inject collect-only, and a conftest.py
 # can mark every collected item skipped (exit 0, zero bodies run) in ways `-o addopts=`
-# cannot stop. A patch that creates/edits any of these is NEVER auto-merged — it is
+# cannot stop. A patch that creates/edits any of these is never auto-merged — it is
 # routed to a review branch for human inspection.
 _TEST_CONFIG_BASENAMES = frozenset({
     "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml",
@@ -144,7 +145,7 @@ def _git(repo: Path, *args: str, input_text: str | None = None) -> subprocess.Co
 
 
 def _changed_paths(worktree: Path) -> list[str]:
-    """Files git ACTUALLY changed in the worktree (authoritative — catches
+    """Files git actually changed in the worktree (authoritative — catches
     rename/copy/binary/mode headers the diff text may hide). Rename lines
     ('R  old -> new') resolve to the new path."""
     out = _git(worktree, "status", "--porcelain").stdout
@@ -248,6 +249,30 @@ def _is_protected(rel: str) -> bool:
     return any(rel.startswith(p) for p in PROTECTED_PREFIXES)
 
 
+def mutation_check(diff: str, target_path: str = "") -> list[str]:
+    """Static red flags in a proposed self-edit, evaluated BEFORE the worktree apply
+    (M8 mutation gating). Returns blocking reasons (empty ⇒ no static objection).
+
+    Catches the classic self-evolution gaming vectors that a passing test run would
+    not: deleting test functions or assertions to make the gate trivially green, and
+    disabling tests via skip/xfail. These are never legitimate for an AUTONOMOUS
+    self-edit (a human can still do them on a review branch)."""
+    reasons: list[str] = []
+    lines = (diff or "").splitlines()
+    removed = [ln[1:] for ln in lines if ln.startswith("-") and not ln.startswith("---")]
+    added = [ln[1:] for ln in lines if ln.startswith("+") and not ln.startswith("+++")]
+    removed_test_defs = sum(1 for ln in removed if re.search(r"\bdef\s+test_\w+", ln))
+    removed_asserts = sum(1 for ln in removed if re.match(r"\s*assert\b", ln))
+    added_skips = sum(1 for ln in added if re.search(r"@pytest\.mark\.(skip|xfail)|pytest\.skip\(", ln))
+    if removed_test_defs:
+        reasons.append(f"removes {removed_test_defs} test function(s) — a self-edit must not delete tests to pass the gate")
+    if removed_asserts > 2:
+        reasons.append(f"removes {removed_asserts} assertion(s) — weakening test checks is not an allowed autonomous mutation")
+    if added_skips:
+        reasons.append(f"adds {added_skips} skip/xfail marker(s) — disabling tests is not an allowed autonomous mutation")
+    return reasons
+
+
 def apply_patch_transactionally(
     *,
     repo_root: str | Path,
@@ -273,6 +298,12 @@ def apply_patch_transactionally(
         reason = _validate_test_command(cmd)
         if reason:
             return EvolutionApplyResult(status="rejected", target_path=target_path, error=reason)
+    static_flags = mutation_check(diff, target_path)
+    if static_flags:
+        return EvolutionApplyResult(
+            status="rejected", target_path=target_path,
+            error="mutation rejected (static check): " + "; ".join(static_flags),
+        )
     if not (repo / ".git").exists():
         return EvolutionApplyResult(status="error", target_path=target_path, error=f"{repo} is not a git repository")
 
@@ -306,8 +337,8 @@ def apply_patch_transactionally(
 
     try:
         is_diff = diff.lstrip().startswith(("diff --git", "--- ", "+++ ", "Index:"))
-        # First-line validation of the DECLARED target(s): inside worktree, no
-        # '..', no absolute. (Authoritative check is the ACTUAL changed set below.)
+        # First-line validation of the declared target(s): inside worktree, no
+        # '..', no absolute. (Authoritative check is the actual changed set below.)
         for raw in (_diff_paths(diff) if is_diff else [target_path]):
             rel, reason = _normalize_under(worktree, raw)
             if rel is None:
@@ -330,7 +361,7 @@ def apply_patch_transactionally(
             _cleanup()
             return EvolutionApplyResult(status="error", target_path=target_path, error=f"diff --check failed: {check.stdout.strip() or check.stderr.strip()}")
 
-        # AUTHORITATIVE path check: inspect the files git ACTUALLY changed (this
+        # Authoritative path check: inspect the files git actually changed (this
         # catches rename/copy/binary headers, mode changes, and any diff that
         # writes outside its advertised target). Re-validate every one and decide
         # auto-merge from the real set.
@@ -446,6 +477,7 @@ __all__ = [
     "EvolutionApplyResult",
     "apply_patch_transactionally",
     "apply_proposal",
+    "mutation_check",
     "DEFAULT_APPLY_ALLOW_PATHS",
     "PROTECTED_PREFIXES",
 ]

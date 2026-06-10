@@ -2048,20 +2048,26 @@ def main() -> None:
         eval_cmd()
         return
 
-    # Parse optional args. The single interactive `biobank` REPL is the ONLY
+    # Parse optional args. The single interactive `biobank` REPL is the only
     # interaction mode: the former --tui (Textual) and --legacy-repl modes were
     # removed during consolidation; any leftover dashes are ignored.
     model = None
+    workspace = ""
     positional_task: list[str] = []
     skip_next = False
     for i, arg in enumerate(sys.argv[1:], 1):
         if skip_next:
-            skip_next = False  # this token was consumed as the --model value
+            skip_next = False  # this token was consumed as a flag value
             continue
         if arg.startswith("--model="):
             model = arg.split("=", 1)[1]
         elif arg == "--model" and i + 1 < len(sys.argv):
             model = sys.argv[i + 1]
+            skip_next = True
+        elif arg.startswith("--workspace=") or arg.startswith("--cwd="):
+            workspace = arg.split("=", 1)[1]
+        elif arg in ("--workspace", "--cwd") and i + 1 < len(sys.argv):
+            workspace = sys.argv[i + 1]
             skip_next = True
         elif arg.startswith("-"):
             if positional_task and positional_task[0].startswith("/"):
@@ -2091,173 +2097,15 @@ def main() -> None:
     # Final safety net: the shell loop already contains command-level interrupts,
     # but guarantee that no interrupt at any layer ever surfaces as a raw traceback.
     try:
-        run_interactive_shell(settings, initial_task=" ".join(positional_task).strip(), console=console)
+        run_interactive_shell(settings, initial_task=" ".join(positional_task).strip(), console=console,
+                              workspace=workspace)
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted. Goodbye.[/]")
     return
+    # main() returns above; the live entrypoint is the v3 InteractiveShell
+    # (run_interactive_shell).
 
-    # Create agent
-    with console.status("[bold green]Loading data layer..."):
-        agent = Agent(settings)
 
-    # Warn about deprecated env var names
-    import os as _os
-    if _os.getenv("UKB_PARQUET_DIR") and not _os.getenv("DATA_DIR"):
-        console.print(
-            "[dim yellow]Note: UKB_PARQUET_DIR is deprecated; "
-            "rename to DATA_DIR in .env (both work for now)[/]"
-        )
-
-    # Initialize plan mode with LLM and available skills
-    available_skill_names = [s["name"] for s in agent.registry.list_skills()]
-    planner = PlanMode(
-        plans_dir=settings.plans_dir,
-        llm=agent.llm,
-        available_skills=available_skill_names,
-        tool_schemas=agent.registry.tool_schemas(),
-    )
-    checkpoint = PlanCheckpoint.load(_plan_checkpoint_path(settings))
-    if checkpoint and checkpoint.restore_to_plan_mode(planner):
-        _sync_plan_execution_log(agent, planner)
-        console.print(
-            f"[yellow]Restored paused plan checkpoint:[/] {planner.goal} "
-            f"({planner.state.value}, v{planner.revision})"
-        )
-    prompt_session = _build_prompt_session(settings) if sys.stdin.isatty() and _PROMPT_TOOLKIT_AVAILABLE else None
-
-    # Token tracking
-    token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_cost_usd": 0.0}
-
-    n_subjects = None
-    try:
-        n_subjects = agent.dm.count_subjects()
-    except Exception:
-        pass
-
-    n_fields = len(agent.catalog.fields)
-    model_pool = [spec.model_id for spec in agent.orchestrator.model_pool]
-    _render_startup_dashboard(
-        settings=settings,
-        n_skills=len(agent.registry),
-        n_subjects=n_subjects,
-        n_fields=n_fields,
-        model_pool=model_pool,
-        available_model_count=len(getattr(agent, "available_models", [])),
-        external_agents=_quick_external_agent_status(),
-    )
-
-    if n_subjects is None:
-        console.print(f"[yellow]![/] Biomarker data not found at {settings.data_dir}")
-        console.print("[dim]Set DATA_DIR in .env to your parquet directory[/]")
-    if n_fields <= 0:
-        console.print(f"[yellow]![/] Field catalogue empty (check {settings.field_txt})")
-    console.print("[dim]Press Ctrl+C or type quit to exit.[/]")
-    console.print()
-
-    # REPL loop
-    while True:
-        try:
-            query = _collect_pasted_command_lines(_read_query(prompt_session, planner)).strip()
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]Goodbye.[/]")
-            break
-
-        if not query:
-            continue
-        if query.lower() in ("quit", "exit", "q"):
-            console.print("[dim]Goodbye.[/]")
-            break
-
-        # ── Slash commands ──────────────────────────────────
-        if query.startswith("/"):
-            starts_pasted_plan = _looks_like_plan_paste_start(query)
-            if query.split(None, 1)[0].lower() != "/plan":
-                setattr(planner, "_awaiting_pasted_plan_continuation", False)
-            _handle_command(query, agent, planner, token_usage)
-            if starts_pasted_plan and planner.state == PlanState.REVIEW and planner.plan:
-                setattr(planner, "_awaiting_pasted_plan_continuation", True)
-            continue
-
-        # ── Plan mode: natural language routing ────────────
-        # In REVIEW state, treat non-command input as plan refinement
-        if planner.state == PlanState.REVIEW:
-            if _absorb_pasted_plan_continuation(planner, query):
-                console.print("[dim]Added pasted continuation to the active plan goal.[/dim]")
-                PlanCheckpoint.from_plan_mode(planner).save(_plan_checkpoint_path(agent.settings))
-                continue
-            setattr(planner, "_awaiting_pasted_plan_continuation", False)
-            with console.status("[bold blue]Refining plan...[/bold blue]", spinner="dots"):
-                result = planner.refine(query)
-            console.print(f"[green]{result}[/green]\n")
-            if planner.plan:
-                from .progress import PlanProgressDisplay
-                display = PlanProgressDisplay(planner.plan, console)
-                display.show_plan_for_review(revision=planner.revision)
-            PlanCheckpoint.from_plan_mode(planner).save(_plan_checkpoint_path(agent.settings))
-            continue
-
-        # In PAUSED state, treat non-command input as re-plan instruction
-        if planner.state == PlanState.PAUSED:
-            with console.status("[bold blue]Refining plan...[/bold blue]", spinner="dots"):
-                result = planner.refine(query)
-            console.print(f"[green]{result}[/green]\n")
-            if planner.plan:
-                from .progress import PlanProgressDisplay
-                display = PlanProgressDisplay(planner.plan, console)
-                display.show_plan_for_review(revision=planner.revision)
-            PlanCheckpoint.from_plan_mode(planner).save(_plan_checkpoint_path(agent.settings))
-            console.print("[dim]Use /plan-approve to execute or /plan-resume to continue.[/dim]\n")
-            continue
-
-        # ── Run agent ───────────────────────────────────────
-        try:
-            # In plan mode, prepend plan context
-            if planner.is_active:
-                plan_context = (
-                    f"[PLAN MODE - Status: {planner.status}]\n"
-                    f"Current plan:\n{planner.get_plan_content()}\n\n"
-                    f"User says: {query}"
-                )
-                effective_query = plan_context
-            else:
-                effective_query = query
-
-            figs_before = len(agent.state.figures)
-
-            response, streamed = _stream_agent_response(agent, effective_query)
-            if not streamed:
-                with console.status("[bold green]Thinking..."):
-                    response = agent.run(effective_query)
-
-            # Update cumulative token usage
-            tu = agent.state.token_usage
-            token_usage["prompt_tokens"] = tu.prompt_tokens
-            token_usage["completion_tokens"] = tu.completion_tokens
-
-            if not streamed:
-                console.print()
-                console.print(Markdown(response))
-                console.print()
-
-            # Show new figures from this turn only
-            new_figs = agent.state.figures[figs_before:]
-            if new_figs:
-                for fig_path in new_figs[-5:]:
-                    console.print(f"[dim]Figure saved: {fig_path}[/]")
-                console.print()
-
-            # Show token usage after each turn
-            console.print(
-                f"[dim]tokens: {tu.prompt_tokens:,} in + "
-                f"{tu.completion_tokens:,} out[/]"
-            )
-
-        except KeyboardInterrupt:
-            agent.state.interrupted = True
-            console.print("\n[yellow]Interrupted.[/]")
-            agent.state.interrupted = False
-        except Exception as e:
-            console.print(f"[red]Error: {e}[/]")
 
 
 def _handle_command(

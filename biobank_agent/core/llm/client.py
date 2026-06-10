@@ -130,9 +130,9 @@ class AsyncLLMClient:
                 # The legacy generator both yields chunks and ``return``s
                 # the final LLMResponse via StopIteration.value. We feed
                 # tool-call argument deltas into the parser by patching
-                # the underlying low-level stream; for now we run in
+                # the underlying low-level stream; currently we run in
                 # post-finalize mode and let the parser see the final
-                # tool_calls only. A future patch (M1.3 follow-up) will
+                # tool_calls only. A future patch will
                 # tee the chunk-level deltas; this still produces real
                 # text streaming for TTFT, the original goal.
                 while True:

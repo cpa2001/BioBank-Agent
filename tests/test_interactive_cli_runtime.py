@@ -596,9 +596,10 @@ def test_plan_approve_executes_plan_autonomously_with_summary(tmp_path):
     assert "Execution complete" in text
     assert "Plan Execution Summary" in text
     assert "awaiting executable work" not in text  # the old static dead-end is gone
-    # context+design pre-marked done; execute+verify executed via run_turn (the
-    # fake provider converges with no tools) -> all 4 steps terminal.
-    assert all(step.status in {"done", "completed"} for step in shell.session.state.plan.steps)
+    # context+design pre-marked done; execute+verify executed via run_turn (the fake
+    # provider converges with NO tools, so under the Evidence Contract (M2) those
+    # declared-verification steps end 'unverified', not 'done') -> all 4 steps terminal.
+    assert all(step.status in {"done", "completed", "unverified"} for step in shell.session.state.plan.steps)
     assert shell.session.state.plan.status.value == "completed"
 
 
@@ -696,7 +697,9 @@ def test_runtime_tool_progress_and_action_graph_are_printed_in_cli(tmp_path):
     assert "tool:progress_call" in text
     # (Approve already executed the plan steps autonomously; this turn exercises
     # the per-turn tool-progress + action-graph rendering.)
-    assert next(step for step in shell.session.state.plan.steps if step.id == "execute").status == "done"
+    # The execute step ran via run_turn with the fake provider (no tools), so under the
+    # Evidence Contract (M2) it ends terminal as 'unverified' rather than 'done'.
+    assert next(step for step in shell.session.state.plan.steps if step.id == "execute").status in {"done", "unverified"}
     assert any(event["type"] == "tool_progress" for event in shell.session.events)
     assert any(ref.node_id == "progress_call" for ref in shell.session.action_graph_refs)
 
@@ -913,6 +916,69 @@ def test_registry_dispatch_returns_handler_result():
     registry.dispatch(" /status   ", ctx)
 
     assert calls == ["status"]
+
+
+def test_cmd_cd_switches_workspace_and_keeps_prior_readable(tmp_path):
+    shell, _ = _shell(tmp_path)
+    proj_a = tmp_path / "projA"
+    proj_a.mkdir()
+    proj_b = tmp_path / "projB"
+    proj_b.mkdir()
+    start_cwd = shell.session.cwd
+
+    res = shell._cmd_cd(str(proj_a))
+    assert res["status"] == "ok"
+    assert shell.session.cwd == str(proj_a.resolve())
+    # the previous workspace is kept as an extra readable root
+    assert start_cwd in shell.session.state.custom_data["workspace_extra_roots"]
+
+    res = shell._cmd_cd(str(proj_b))
+    assert shell.session.cwd == str(proj_b.resolve())
+    extras = shell.session.state.custom_data["workspace_extra_roots"]
+    assert str(proj_a.resolve()) in extras and start_cwd in extras
+
+    # a non-existent target is rejected and leaves the workspace unchanged
+    res = shell._cmd_cd(str(tmp_path / "does_not_exist"))
+    assert res["status"] == "error"
+    assert shell.session.cwd == str(proj_b.resolve())
+
+
+def test_cmd_cd_no_arg_reports_current_workspace(tmp_path):
+    shell, output = _shell(tmp_path)
+    res = shell._cmd_cd("")
+    assert res["status"] == "ok"
+    assert res["workspace"] == shell.session.cwd
+
+
+def test_evidence_contract_unverified_without_artifact(tmp_path):
+    import types
+    shell, _ = _shell(tmp_path)
+    step = types.SimpleNamespace(verification=["a results CSV is written under reports/"], title="t", id="s1")
+    ok, reason = shell._assess_step_evidence(step, {"tool_results": [], "text": "All done!"})
+    assert ok is False and "no" in reason.lower()
+    ok2, _ = shell._assess_step_evidence(step, {"tool_results": [("python_exec", {"path": "/x/out.csv"})], "text": ""})
+    assert ok2 is True
+    ok3, _ = shell._assess_step_evidence(step, {"tool_results": [("read", {"columns": ["a", "b"]})], "text": ""})
+    assert ok3 is True
+    ok4, _ = shell._assess_step_evidence(step, {"tool_results": [("shell", {"stdout": "x" * 60})], "text": ""})
+    assert ok4 is True
+
+
+def test_evidence_contract_exempts_steps_without_declared_verification(tmp_path):
+    import types
+    shell, _ = _shell(tmp_path)
+    step = types.SimpleNamespace(verification=[], title="reason about approach", id="s1")
+    ok, reason = shell._assess_step_evidence(step, {"tool_results": [], "text": ""})
+    assert ok is True and "no verification contract" in reason
+
+
+def test_evidence_contract_can_be_disabled(tmp_path):
+    import types
+    shell, _ = _shell(tmp_path)
+    shell.settings.evidence_contract_enabled = False
+    step = types.SimpleNamespace(verification=["must write a file"], title="t", id="s1")
+    ok, _ = shell._assess_step_evidence(step, {"tool_results": [], "text": ""})
+    assert ok is True
 
 
 def test_production_code_does_not_reference_cli_fixture_prompts():
