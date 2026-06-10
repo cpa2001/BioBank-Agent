@@ -96,12 +96,29 @@ class CompletionGate:
         # "false" is truthy and must NOT slip through as acceptance).
         goal_accepted = verdict.get("accepted") is True
         accepted = goal_accepted and not (needs_report and not report_present)
+
+        # Methodological-soundness gate (default OFF; no import or state change unless enabled).
+        # A consensus statistical/omics sin in the evidence hard-blocks acceptance; advisories warn.
+        methodology_missing: list[str] = []
+        if getattr(self.config, "methodology_gate_enabled", False) and str(evidence_summary or "").strip():
+            from biobank_agent.runtime.methodology import methodology_blocks, review_methodology
+
+            for flag in review_methodology({}, text=str(evidence_summary)):
+                issue, detail = flag.get("issue"), flag.get("detail")
+                if flag.get("severity") == "block":
+                    methodology_missing.append(str(issue))
+                    warnings.append(f"Methodology block: {issue} — {detail}")
+                else:
+                    warnings.append(f"Methodology advisory: {issue} — {detail}")
+            if methodology_missing:
+                accepted = False
+
         ctx.emit_event("Review hooks", status="success" if accepted else "error",
                        message="goal accepted" if accepted else "goal not yet accepted")
         return CompletionAssessment(
             accepted=accepted,
             reasons=str(verdict.get("reasons") or ""),
-            missing=[str(x) for x in (verdict.get("missing") or [])],
+            missing=[str(x) for x in (verdict.get("missing") or [])] + methodology_missing,
             warnings=warnings,
             needs_report=needs_report,
             report_present=report_present,

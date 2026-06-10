@@ -131,6 +131,10 @@ class Settings(BaseSettings):
     # When true, a plan step that declared a verification but produced no observable
     # artifact is marked 'unverified' (never 'done').
     evidence_contract_enabled: bool = True
+    # When true, the completion gate runs the methodology reviewer over the evidence and
+    # hard-blocks goal acceptance on a consensus statistical/omics sin. Default OFF — a
+    # deliberate, gated rollout (enable after confirming it does not over-block real goals).
+    methodology_gate_enabled: bool = False
     # Notifications for finished background jobs / paused (awaiting-input) runs.
     notify_enabled: bool = True
     notify_command: str = ""                    # optional shell cmd; message piped on stdin
