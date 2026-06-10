@@ -283,6 +283,7 @@ def apply_patch_transactionally(
     branch_prefix: str = "evolve",
     allow_paths: tuple[str, ...] = DEFAULT_APPLY_ALLOW_PATHS,
     test_timeout_s: int = 600,
+    force_review_branch: bool = False,
 ) -> EvolutionApplyResult:
     repo = Path(repo_root).resolve()
     if not diff.strip():
@@ -380,7 +381,9 @@ def apply_patch_transactionally(
         # unprotected, AND not a pytest config/hook file. The last clause closes the
         # addopts/conftest gate-subversion channels: such a patch is still verified,
         # but it lands on a review branch for human inspection instead of auto-merging.
-        auto_mergeable = all(
+        # force_review_branch (agent-synthesized/ingested skills, M12/M14) keeps a verified change on a
+        # review branch even when its paths are allow-listed — it only ever strengthens the gate.
+        auto_mergeable = (not force_review_branch) and all(
             (not _is_protected(rel)) and _in_allow(rel, allow_paths) and (not _is_test_config_path(rel))
             for rel in norm_actual
         )
@@ -461,8 +464,11 @@ def apply_patch_transactionally(
         return EvolutionApplyResult(status="error", target_path=target_path, error=str(exc), summary=summary)
 
 
-def apply_proposal(proposal, *, repo_root: str | Path, allow_paths: tuple[str, ...] = DEFAULT_APPLY_ALLOW_PATHS) -> EvolutionApplyResult:
-    """Apply an EvolutionProposal that carries a concrete patch + tests."""
+def apply_proposal(proposal, *, repo_root: str | Path, allow_paths: tuple[str, ...] = DEFAULT_APPLY_ALLOW_PATHS, force_review_branch: bool = False) -> EvolutionApplyResult:
+    """Apply an EvolutionProposal that carries a concrete patch + tests.
+
+    ``force_review_branch=True`` (agent-synthesized/ingested skills) keeps the verified change on a
+    review branch instead of auto-merging, regardless of allow-listing."""
     return apply_patch_transactionally(
         repo_root=repo_root,
         target_path=getattr(proposal, "target_path", "") or "",
@@ -470,6 +476,7 @@ def apply_proposal(proposal, *, repo_root: str | Path, allow_paths: tuple[str, .
         test_commands=list(getattr(proposal, "test_commands", []) or []),
         summary=getattr(proposal, "summary", "") or getattr(proposal, "proposal_id", ""),
         allow_paths=allow_paths,
+        force_review_branch=force_review_branch,
     )
 
 

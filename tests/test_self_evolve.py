@@ -95,6 +95,24 @@ def test_applied_when_tests_pass(tmp_path):
     assert "evolve/" not in _branches(repo)
 
 
+def test_force_review_branch_keeps_allow_listed_change_off_main(tmp_path):
+    repo = _init_repo(tmp_path)
+    # Identical to the auto-merge case, but force_review_branch (agent-synthesized skills, M12/M14)
+    # keeps the verified change on a review branch instead of fast-forwarding onto the live branch.
+    res = apply_patch_transactionally(
+        repo_root=repo,
+        target_path="custom_skills/test_demo.py",
+        diff="def test_ok():\n    assert 1 + 1 == 2\n",
+        test_commands=["pytest custom_skills/test_demo.py -q"],
+        summary="add passing demo test",
+        force_review_branch=True,
+    )
+    assert res.status == "review_branch", res.error
+    assert res.tests_passed
+    assert "evolve/" in _branches(repo)  # verified change parked for human review
+    assert not (repo / "custom_skills" / "test_demo.py").exists()  # never auto-merged onto the live tree
+
+
 def test_mutation_check_flags_gaming_vectors():
     # M8: static red flags before the worktree apply.
     assert mutation_check("+def helper():\n+    return 1\n") == []
