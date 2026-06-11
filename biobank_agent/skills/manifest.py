@@ -215,3 +215,47 @@ def generated_domains() -> dict[str, list[str]]:
 def invalidate_tree_cache() -> None:
     """The tree rides the same ``_load()`` cache; reload() invalidates it."""
     reload()
+
+
+def validate_manifest(known_skills: Iterable[str] | None = None, *, data: dict[str, Any] | None = None) -> list[str]:
+    """Return manifest inconsistencies (empty list = clean):
+
+    - a skill in BOTH the direct and hidden tiers (a contradiction),
+    - a skill filed into more than one tree node (``leaf_of`` assumes exactly one),
+    - a root or child entry referencing an undefined tree node,
+    - and, when ``known_skills`` is supplied, a tier/tree entry for a skill that is not registered.
+
+    Pure; ``data`` overrides the loaded manifest for tests. A missing manifest (the all-Direct
+    fail-safe) has nothing to validate. Useful as a /doctor check and a drift regression guard."""
+    payload = _load() if data is None else data
+    if not payload:
+        return []
+    issues: list[str] = []
+    tiers = payload.get("tiers") or {}
+    direct = set(tiers.get("direct") or [])
+    hidden = set(tiers.get("hidden") or [])
+    for name in sorted(direct & hidden):
+        issues.append(f"skill '{name}' is in both the direct and hidden tiers")
+
+    tree = payload.get("tree") or {}
+    nodes = tree.get("nodes") if isinstance(tree.get("nodes"), dict) else {}
+    filed: dict[str, str] = {}
+    for node_id, n in nodes.items():
+        for name in ((n or {}).get("skills") or []):
+            if name in filed:
+                issues.append(f"skill '{name}' is filed into multiple tree nodes ({filed[name]}, {node_id})")
+            else:
+                filed[name] = node_id
+    for root in (tree.get("root") or []):
+        if root not in nodes:
+            issues.append(f"root node '{root}' is not defined in tree nodes")
+    for node_id, n in nodes.items():
+        for child in ((n or {}).get("children") or []):
+            if child not in nodes:
+                issues.append(f"node '{node_id}' references a missing child node '{child}'")
+
+    if known_skills is not None:
+        known = set(known_skills)
+        for name in sorted((direct | hidden | set(filed)) - known):
+            issues.append(f"manifest references unregistered skill '{name}'")
+    return issues

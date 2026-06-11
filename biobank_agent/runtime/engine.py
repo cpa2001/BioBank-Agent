@@ -202,9 +202,17 @@ class ProviderRouter:
     def resolve(self, role: ProviderRole | str) -> Any:
         model = self.model_for_role(role)
         provider = self.providers.get(model)
-        if provider is None:
-            raise KeyError(f"no provider registered for model {model!r}")
-        return provider
+        if provider is not None:
+            return provider
+        # Degrade gracefully instead of crashing a turn or council job on a misconfigured
+        # role->model: prefer the primary model's provider, then any registered provider.
+        # Raise only when nothing is registered at all (a genuine setup error).
+        primary = self.providers.get(self.config.primary_model)
+        if primary is not None:
+            return primary
+        if self.providers:
+            return next(iter(self.providers.values()))
+        raise KeyError(f"no provider registered for model {model!r} and no fallback is available")
 
 
 class FakeProvider:
