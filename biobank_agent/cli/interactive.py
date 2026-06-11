@@ -34,7 +34,7 @@ from rich.tree import Tree
 from biobank_agent import __version__
 from biobank_agent.cli.commands import CommandContext
 from biobank_agent.cli.commands.registry import SlashCommandRegistry
-from biobank_agent.cli.render import render_result_payload
+from biobank_agent.cli.render import render_result_payload, render_run_tree
 from biobank_agent.core.events import AgentEvent, AgentEventType
 from biobank_agent.core.memory.action_graph import ActionGraph
 from biobank_agent.core.tools.registry import ToolRegistry
@@ -55,6 +55,8 @@ from biobank_agent.runtime import (
     ToolCall,
 )
 from biobank_agent.runtime.audit import RuntimeAuditReport, audit_session, write_audit_report
+from biobank_agent.runtime.run_eval import default_evaluators, evaluate_run_tree
+from biobank_agent.runtime.run_tree import build_run_tree, summarize_run_tree
 from biobank_agent.runtime.evolution import LearningReport, learn_from_session, reject_persistent_apply, write_learning_report
 from biobank_agent.runtime.completion import CompletionGate
 from biobank_agent.runtime.council import CouncilError
@@ -496,6 +498,7 @@ class InteractiveShell:
             "subagents": self._cmd_subagents,
             "review": self._cmd_review,
             "audit": self._cmd_audit,
+            "trace": self._cmd_trace,
             "harness": self._cmd_harness,
             "learn": self._cmd_learn,
             "verify": self._cmd_verify,
@@ -3478,6 +3481,43 @@ class InteractiveShell:
         self.console.print(Panel(report.to_json(indent=2), title="Audit"))
         self._render_action_graph(session=audited, limit=12)
         return report.to_dict()
+
+    def _cmd_trace(self, arg: str = "") -> None:
+        session = self._require_session()
+        runtime = self._require_runtime()
+        target = arg.strip() or session.session_id
+        try:
+            traced = runtime.load_session(target)
+        except Exception:
+            traced = session
+        events = [AgentEvent.from_dict(ev) for ev in traced.events if isinstance(ev, dict)]
+        tree = build_run_tree(events, session_id=traced.session_id)
+        summary = summarize_run_tree(tree)
+        report = evaluate_run_tree(tree, default_evaluators())
+        self.console.print(render_run_tree(tree))
+        self.console.print(
+            Panel(
+                json.dumps(
+                    {"summary": summary, "online_eval": report.to_dict()},
+                    indent=2,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                title="Trace",
+            )
+        )
+        self._record_event(
+            AgentEvent.make(
+                AgentEventType.PLAN_PHASE,
+                session_id=traced.session_id,
+                phase="Trace",
+                actor="biobank",
+                status="success",
+                message=f"run-tree trace: {summary.get('tool_calls', 0)} tool call(s)",
+                metadata={"summary": summary, "online_eval": report.to_dict()},
+            )
+        )
+        return {"summary": summary, "online_eval": report.to_dict()}
 
     def _cmd_replay(self, arg: str = "") -> None:
         runtime = self._require_runtime()

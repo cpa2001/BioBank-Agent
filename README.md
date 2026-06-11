@@ -20,7 +20,7 @@ Biobank Agent is an LLM-powered scientific workflow agent for population-scale b
 The current repository is a v3 runtime-oriented build with:
 
 - **107 registered skills** discovered from `biobank_agent.skills`, including cohort analysis, modelling, WGS/VCF workflows, literature research, report writing, external review, and self-evolution support.
-- **75 slash commands** in the v3 command registry, including `/plan`, `/plan-diagnose`, `/plan-retry`, `/plan-use`, `/research`, `/doctor`, `/tools`, `/resume`, `/audit`, `/harness`, `/replay`, `/learn`, and `/evolve`.
+- **76 slash commands** in the v3 command registry, including `/plan`, `/plan-diagnose`, `/plan-retry`, `/plan-use`, `/research`, `/doctor`, `/tools`, `/resume`, `/audit`, `/trace`, `/harness`, `/replay`, `/learn`, and `/evolve`.
 - **Runtime-backed sessions** with event logs, action graph references, plan state, trajectory replay, audit reports, and resume support.
 - **VirtualCell/WGS support** for local VCF discovery, WGS dependency checks, exploratory VCF QC, PCA, kinship, association, burden testing, annotation, pathway enrichment, and WGS report polishing.
 - **OpenAI-compatible providers** configured through `.env`, with multi-model planning and review routes controlled by settings.

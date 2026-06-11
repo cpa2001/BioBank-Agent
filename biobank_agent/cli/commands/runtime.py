@@ -65,6 +65,10 @@ def _audit(ctx: CommandContext, arg: str):
     return _call(ctx, "audit", arg)
 
 
+def _trace(ctx: CommandContext, arg: str):
+    return _call(ctx, "trace", arg)
+
+
 def _harness(ctx: CommandContext, arg: str):
     return _call(ctx, "harness", arg)
 
@@ -123,6 +127,7 @@ def commands() -> list[RegisteredCommand]:
         RegisteredCommand("/review", "/review [focus]", "Run or inspect review hooks", _review),
         RegisteredCommand("/doctor", "/doctor", "Run read-only readiness diagnostics", _doctor),
         RegisteredCommand("/audit", "/audit [session-id]", "Summarize runtime trajectory and action graph evidence", _audit),
+        RegisteredCommand("/trace", "/trace [session-id]", "Render the session run-tree (spans + online-eval scores)", _trace),
         RegisteredCommand("/harness", "/harness <task.json>", "Run a versioned runtime harness task through the interactive shell path", _harness),
         RegisteredCommand("/learn", "/learn [--write]", "Mine the active trajectory for review-only improvement proposals", _learn),
         RegisteredCommand("/evolve", "/evolve [--write|--apply]", "Review controlled self-evolution proposals; persistent apply is approval-gated", _evolve),

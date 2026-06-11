@@ -17,11 +17,18 @@ from typing import Any, Iterable
 
 from biobank_agent.core.events import AgentEvent, AgentEventType
 
-# Span lifecycle: an opener event starts a span, its matching closer ends it (keyed by id).
-_TOOL_OPEN = AgentEventType.TOOL_STARTED
+# Span lifecycle: an opener starts a span, a matching closer (keyed by tool_call_id) ends it.
+# TWO taxonomies are folded so the tree is correct whether it is built from the live scheduler
+# bus (TOOL_STARTED/TOOL_RESULT/TOOL_ERROR) or from a SAVED session — the engine persists
+# TOOL_CALL_STARTED/TOOL_CALL_COMPLETED into session.events, not the bus events.
+_TOOL_OPENERS = {AgentEventType.TOOL_STARTED, AgentEventType.TOOL_CALL_STARTED}
 _TOOL_CLOSERS = {AgentEventType.TOOL_RESULT: "ok", AgentEventType.TOOL_ERROR: "error"}
+_TOOL_CALL_DONE = AgentEventType.TOOL_CALL_COMPLETED         # status comes from payload["state"]
+_TOOL_CLOSER_TYPES = set(_TOOL_CLOSERS) | {_TOOL_CALL_DONE}
+_OK_TOOL_STATES = {"done", "ok", "completed", "success"}     # ToolState.DONE -> ok, else error
 _LLM_OPEN = AgentEventType.MODEL_REQUEST_STARTED
 _LLM_CLOSERS = {AgentEventType.MESSAGE_COMPLETE: "ok", AgentEventType.MODEL_DELTA: "ok"}
+_TURN_DONE = {AgentEventType.USER_TURN_COMPLETED, AgentEventType.TURN_FINISHED}
 
 SESSION = "session"
 TURN = "turn"
@@ -87,6 +94,15 @@ def _tool_name(ev: AgentEvent) -> str:
     return str(p.get("name") or p.get("tool") or p.get("skill") or ev.tool_call_id or "tool")
 
 
+def _tool_close_status(etype: AgentEventType, payload: dict[str, Any] | None) -> str:
+    """ok/error for a tool closer. The bus closers encode it in the event type; the persisted
+    ``TOOL_CALL_COMPLETED`` encodes it in ``payload['state']`` (a ToolState value)."""
+    if etype is _TOOL_CALL_DONE:
+        state = str((payload or {}).get("state") or "").lower()
+        return OK if state in _OK_TOOL_STATES else ERROR
+    return _TOOL_CLOSERS.get(etype, OK)
+
+
 def build_run_tree(events: Iterable[AgentEvent], *, session_id: str = "session") -> RunNode:
     """Group events into session → turn → (phase | tool | llm) spans.
 
@@ -118,13 +134,13 @@ def build_run_tree(events: Iterable[AgentEvent], *, session_id: str = "session")
         touch(turn, ts)
         touch(root, ts)
 
-        if etype is _TOOL_OPEN:
+        if etype in _TOOL_OPENERS:
             key = ev.tool_call_id or f"{ev.turn_id}:{_tool_name(ev)}:{len(turn.children)}"
             span = RunNode(id=key, name=_tool_name(ev), kind=TOOL, start=ts, status=RUNNING,
                            attributes={"tool_call_id": ev.tool_call_id})
             turn.add(span)
             open_tools[key] = span
-        elif etype in _TOOL_CLOSERS:
+        elif etype in _TOOL_CLOSER_TYPES:
             key = ev.tool_call_id or ""
             span = open_tools.pop(key, None)
             if span is None and not key:
@@ -132,7 +148,7 @@ def build_run_tree(events: Iterable[AgentEvent], *, session_id: str = "session")
                 span = next((c for c in reversed(turn.children) if c.kind == TOOL and c.status == RUNNING), None)
             if span is not None:
                 span.end = ts
-                span.status = _TOOL_CLOSERS[etype]
+                span.status = _tool_close_status(etype, ev.payload)
         elif etype is _LLM_OPEN:
             key = ev.tool_call_id or f"{ev.turn_id}:llm:{len(turn.children)}"
             span = RunNode(id=key, name=str(ev.model_id or "llm"), kind=LLM, start=ts, status=RUNNING,
@@ -147,6 +163,14 @@ def build_run_tree(events: Iterable[AgentEvent], *, session_id: str = "session")
                 if etype is AgentEventType.MESSAGE_COMPLETE:
                     span.status = OK
                     open_llms.pop(span.id, None)
+        elif etype in _TURN_DONE and open_llms:
+            # Saved sessions omit MESSAGE_COMPLETE — close any LLM span still open at turn end
+            # (keep a streamed end if MODEL_DELTA already set one; otherwise bound it here).
+            for span in list(open_llms.values()):
+                if span.end is None:
+                    span.end = ts
+                span.status = OK
+            open_llms.clear()
         elif etype is AgentEventType.PLAN_PHASE:
             phase_name = str((ev.payload or {}).get("phase") or (ev.payload or {}).get("name") or "phase")
             status = str((ev.payload or {}).get("status") or OK)

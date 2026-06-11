@@ -18,6 +18,7 @@ from rich import box
 from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 
 # Result-dict keys that carry an output file path worth surfacing — printing the
 # absolute path is the whole point of issue #7 ("where did my results go?").
@@ -170,3 +171,37 @@ def render_result_payload(
     if len(dump) > max_chars:
         dump = dump[:max_chars] + " …(truncated)"
     return Text(dump, style="dim")
+
+
+# ── Run-tree rendering (M15 /trace) ──────────────────────────────────────────
+# Duck-typed over runtime.run_tree.RunNode (name/kind/status/duration/children) so
+# this stays a pure Rich helper with no runtime import — same ethos as the payload
+# renderer above.
+
+_STATUS_GLYPH = {"ok": "[green]✓[/]", "error": "[red]✗[/]", "running": "[yellow]…[/]"}
+
+
+def _span_label(node: Any) -> str:
+    glyph = _STATUS_GLYPH.get(str(getattr(node, "status", "") or ""), "[dim]·[/]")
+    name = str(getattr(node, "name", "") or "?")
+    kind = str(getattr(node, "kind", "") or "")
+    duration = getattr(node, "duration", None)
+    dur = f" [dim]{duration:.2f}s[/]" if isinstance(duration, (int, float)) else ""
+    return f"{glyph} {name} [dim]({kind})[/]{dur}"
+
+
+def render_run_tree(root: Any) -> Tree:
+    """Render a run tree (runtime.run_tree.RunNode) as a Rich ``Tree``.
+
+    Each node shows a status glyph, span name, kind and wall-clock duration. Pure and
+    bounded by the tree the caller passes in, so it is unit-testable in isolation."""
+    tree = Tree(_span_label(root))
+
+    def _attach(parent: Tree, node: Any) -> None:
+        branch = parent.add(_span_label(node))
+        for child in getattr(node, "children", None) or []:
+            _attach(branch, child)
+
+    for child in getattr(root, "children", None) or []:
+        _attach(tree, child)
+    return tree

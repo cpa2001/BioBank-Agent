@@ -9,10 +9,11 @@ evaluators (methodology-gate respected, evidence linked, ...) by composing more 
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable
 
-from biobank_agent.runtime.run_tree import ERROR, OK, TOOL, RunNode, summarize_run_tree
+from biobank_agent.runtime.run_tree import ERROR, OK, PHASE, TOOL, RunNode, summarize_run_tree
 
 
 @dataclass
@@ -81,6 +82,30 @@ def latency_budget(max_seconds: float) -> Evaluator:
     return _eval
 
 
+def no_repeated_tool_failures(max_repeats: int = 2) -> Evaluator:
+    """Flag a stuck retry loop: a single tool name that ends in ``error`` more than
+    ``max_repeats`` times (default >2, i.e. a 3rd identical failure)."""
+    def _eval(root: RunNode) -> list[EvalResult]:
+        fails = Counter(n.name for n in root.walk() if n.kind == TOOL and n.status == ERROR)
+        offenders = sorted(name for name, count in fails.items() if count > max_repeats)
+        passed = not offenders
+        note = "no stuck tool loops" if passed else (
+            f"repeated failures (>{max_repeats}x): " + ", ".join(offenders))
+        return [EvalResult("no_repeated_tool_failures", 1.0 if passed else 0.0, passed, note)]
+    return _eval
+
+
+def phase_errors_free() -> Evaluator:
+    """No ``phase`` span anywhere in the tree ended in ``error``."""
+    def _eval(root: RunNode) -> list[EvalResult]:
+        bad = [n for n in root.walk() if n.kind == PHASE and n.status == ERROR]
+        passed = not bad
+        note = "no phase errors" if passed else (
+            f"{len(bad)} failed phase(s): " + ", ".join(sorted({n.name for n in bad}))[:200])
+        return [EvalResult("phase_errors_free", 1.0 if passed else 0.0, passed, note)]
+    return _eval
+
+
 def evaluate_run_tree(root: RunNode, evaluators: list[Evaluator]) -> RunEvalReport:
     """Apply each evaluator and collect results (order-preserving). Pure."""
     report = RunEvalReport()
@@ -94,4 +119,5 @@ def default_evaluators() -> list[Evaluator]:
 
 
 __all__ = ["EvalResult", "Evaluator", "RunEvalReport", "evaluate_run_tree",
-           "tool_success_rate", "error_free", "latency_budget", "default_evaluators"]
+           "tool_success_rate", "error_free", "latency_budget", "default_evaluators",
+           "no_repeated_tool_failures", "phase_errors_free"]

@@ -47,6 +47,8 @@ class RuntimeAuditReport:
     replay_status: dict[str, Any] = field(default_factory=dict)
     safety_warnings: list[str] = field(default_factory=list)
     event_type_counts: dict[str, int] = field(default_factory=dict)
+    run_tree_summary: dict[str, Any] = field(default_factory=dict)
+    online_eval: dict[str, Any] = field(default_factory=dict)
 
     @property
     def status(self) -> str:
@@ -102,6 +104,22 @@ class RuntimeAuditReport:
         for item in (body.get("timeline") or [])[:40]:
             lines.append(f"- `{item.get('type')}` {item.get('summary', '')}")
         return "\n".join(lines).rstrip() + "\n"
+
+
+def _run_tree_eval(session: AgentSession) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fold ``session.events`` into a run tree (M15) and grade it with the default online
+    evaluators. Read-side and defensive: a malformed event stream degrades to empty dicts
+    rather than breaking the audit."""
+    try:
+        from biobank_agent.core.events import AgentEvent
+        from biobank_agent.runtime.run_eval import default_evaluators, evaluate_run_tree
+        from biobank_agent.runtime.run_tree import build_run_tree, summarize_run_tree
+
+        events = [AgentEvent.from_dict(ev) for ev in session.events if isinstance(ev, dict)]
+        tree = build_run_tree(events, session_id=session.session_id)
+        return summarize_run_tree(tree), evaluate_run_tree(tree, default_evaluators()).to_dict()
+    except Exception as exc:  # pragma: no cover - audit must never break on bad data
+        return {}, {"error": str(exc)[:200]}
 
 
 def audit_session(
@@ -239,6 +257,7 @@ def audit_session(
         ],
     }
 
+    run_tree_summary, online_eval = _run_tree_eval(session)
     action_graph_refs = [ref.to_dict() for ref in session.action_graph_refs]
     return RuntimeAuditReport(
         session_id=session.session_id,
@@ -271,6 +290,8 @@ def audit_session(
         replay_status=replay,
         safety_warnings=list(dict.fromkeys(safety_warnings)),
         event_type_counts=event_counts,
+        run_tree_summary=run_tree_summary,
+        online_eval=online_eval,
     )
 
 
