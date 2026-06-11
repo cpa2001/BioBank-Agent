@@ -1,0 +1,21 @@
+{
+  "name": "biobank-agent-local",
+  "owner": {
+    "name": "CUHK AIH Group"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for Biobank Agent planning, status checks, and execution review.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "biobank-agent",
+      "description": "Use Biobank Agent from Claude Code for biobank workflow planning and review.",
+      "version": "0.1.0",
+      "author": {
+        "name": "CHEN Pengan"
+      },
+      "source": "./plugins/biobank-agent-claude"
+    }
+  ]
+}

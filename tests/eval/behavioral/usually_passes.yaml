@@ -1,0 +1,75 @@
+suite: behavioral_usually_passes
+policy: usually
+cases:
+  - id: broad_metabolic_showcase_soft_route
+    kind: planner_score
+    pass_threshold: 0.7
+    query: >
+      I only have a broad research question: can UKB support a compelling study
+      of metabolic health trajectories, Type 2 Diabetes risk prediction, and
+      potentially actionable cardiometabolic biomarkers?
+    skill_groups:
+      project_awareness:
+        - project_doc
+        - ukb_data_inventory
+      literature:
+        - deep_research
+        - read_paper
+      field_discovery:
+        - field_search
+      data_path:
+        - bank_data_probe
+      cohort:
+        - cohort_summary
+        - cohort_card
+      trajectory:
+        - trajectory_tokenize
+      modelling:
+        - train_model
+      diagnostics:
+        - evaluate_model
+        - calibration
+        - feature_importance
+      guardrails:
+        - statistical_review
+        - safety_check
+        - world_model_audit
+      reporting:
+        - generate_report
+    min_required_skills: 10
+    required_report_args:
+      format: dual
+
+  - id: paper_reproduction_soft_route
+    kind: planner_score
+    pass_threshold: 0.7
+    query: >
+      Reproduce the closest feasible UKB-only slice of DOI
+      10.1038/s41588-024-01898-1. Read the paper or local fixture, convert it
+      to a StudySpec, build a reviewable plan, compare local model metrics and
+      figure artifacts with paper targets, run statistical_review, safety_check
+      and world_model_audit, and generate a dual report that states exact
+      limitations.
+    skill_groups:
+      paper_access:
+        - read_paper
+        - replicate_paper
+      field_discovery:
+        - field_search
+      modelling:
+        - train_model
+      diagnostics:
+        - evaluate_model
+        - calibration
+        - feature_importance
+      replication_compare:
+        - paper_replication_compare
+      guardrails:
+        - statistical_review
+        - safety_check
+        - world_model_audit
+      reporting:
+        - generate_report
+    min_required_skills: 9
+    required_report_args:
+      format: dual

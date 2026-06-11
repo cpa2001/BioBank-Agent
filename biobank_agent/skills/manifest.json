@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "_comment": "Skill-tree metadata overlay. exposure = how a skill enters LLM context: 'direct' (always injected), 'deferred' (found on demand via skill_search), 'hidden' (runtime/curator-only, not offered to the model). Native workspace tools (shell/read/write/edit/grep/apply_patch/test/run_job/skill_search/...) default to 'direct'. Any @skill not listed here defaults to 'deferred'. Editing this file re-tiers skills without moving any file. trust: core (maintainer) | curated | agent (self-created).",
+  "tiers": {
+    "direct": [
+      "python_exec", "shell_exec", "field_search", "prevalence", "cohort_summary",
+      "statistical_review", "critical_thinking", "safety_check", "think",
+      "generate_report", "pause_and_ask", "deep_research", "smart_plot"
+    ],
+    "hidden": [
+      "trajectory_profile_match", "trajectory_tokenize", "record_macro", "replay_pipeline",
+      "create_skill", "agent_workflow_evolver", "analyze_workflow_patterns",
+      "workflow_gap_detector", "world_model_audit", "recall_session", "track_error",
+      "list_errors", "suggest_error_fix", "suggest_optimal_pipeline", "environment_repair",
+      "clarification_policy", "goal_intent_classifier", "list_pipelines",
+      "jh_variant_discovery", "atac_expression_coupling", "scatac_accessibility_differential",
+      "scatac_peak_overlap", "scrna_expression_differential", "spatial_cell_interaction",
+      "spatial_celltype_localization", "spatial_hair_summary", "h5ad_sample_summary",
+      "singlecell_modality_summary", "virtualcell_data_inventory", "virtualcell_multimodal_link",
+      "regulatory_variant_annotation", "tf_binding_disruption", "multiomics_mechanism_prioritization"
+    ]
+  },
+  "domains": {
+    "execution": ["python_exec", "shell_exec"],
+    "cohort_data": ["field_search", "ukb_data_inventory", "ukb_field_resolve", "ukb_materialize_fields", "bank_data_probe", "bank_data_readiness", "cohort_summary", "cohort_card", "cohort_phenotype_summary", "phenotype_harmonize", "missing_data", "prevalence"],
+    "genomics": ["vcf_qc", "vcf_annotation", "vcf_association", "vcf_burden_test", "vcf_kinship", "vcf_pca", "vcf_phenotype_comparison", "vcf_cohort_stats", "vcf_sample_list", "vcf_variant_query", "gwas_proxy", "genetic_target_hypothesis", "target_annotation_context", "target_enrichment", "pathway_enrichment", "wgs_environment_check"],
+    "statistics": ["phewas", "survival", "comorbidity", "correlation", "biomarker_dist", "min_sample", "calibration"],
+    "modeling": ["train_model", "train_phenotype_model", "predict", "evaluate_model", "feature_importance", "embedding"],
+    "methodology": ["statistical_review", "critical_thinking", "safety_check"],
+    "literature": ["deep_research", "literature_qa", "fetch_paper", "read_paper", "read_pdf", "web_search", "web_fetch", "hypothesis", "brainstorm", "discover", "replicate_paper", "paper_replication_compare"],
+    "reporting": ["generate_report", "smart_plot", "academic_report_polisher", "nature_writer", "project_doc"],
+    "multiomics": ["jh_variant_discovery", "atac_expression_coupling", "scatac_accessibility_differential", "scatac_peak_overlap", "scrna_expression_differential", "spatial_cell_interaction", "spatial_celltype_localization", "spatial_hair_summary", "h5ad_sample_summary", "singlecell_modality_summary", "virtualcell_data_inventory", "virtualcell_multimodal_link", "regulatory_variant_annotation", "tf_binding_disruption", "multiomics_mechanism_prioritization"],
+    "meta": ["trajectory_profile_match", "trajectory_tokenize", "record_macro", "replay_pipeline", "create_skill", "agent_workflow_evolver", "analyze_workflow_patterns", "workflow_gap_detector", "world_model_audit", "recall_session", "track_error", "list_errors", "suggest_error_fix", "suggest_optimal_pipeline", "environment_repair", "clarification_policy", "goal_intent_classifier", "list_pipelines", "pause_and_ask", "think"]
+  },
+  "summaries": {
+    "cohort_data": "cohort & UKB data access — field lookup, cohort build, phenotype/missingness, prevalence",
+    "genomics": "genomics / variants — VCF QC, annotation, association, burden, kinship, PCA, pathway enrichment",
+    "statistics": "statistics — PheWAS, survival, comorbidity, correlation, power/sample-size, calibration",
+    "modeling": "predictive modeling — train/evaluate/predict, feature importance, embeddings",
+    "literature": "literature & hypotheses — deep research, paper read/QA, web search, replication",
+    "reporting": "reporting & narrative — report generation, plots, academic/Nature-style write-up",
+    "multiomics": "single-cell / spatial / multi-omics mechanism (specialized; VirtualCell)"
+  },
+  "tree": {
+    "_comment": "Hierarchical navigation tree. Source of truth for domain_of() when present; absent/malformed -> manifest falls back to the flat 'domains' block above. Each node: {parent, domain (legacy domain for back-compat generation), summary, children, skills}. Real single-cell/spatial/somatic leaves start empty; new skills are filed into them. The current descriptive pandas-only multiomics skills live in 'multiomics_preview' (a data-not-ready glance tier).",
+    "root": ["genomics_germline", "genomics_somatic", "singlecell", "spatial", "genetics_x_cell", "cohort_data", "statistics", "modeling", "methodology", "literature", "reporting", "execution", "multiomics_preview", "meta"],
+    "nodes": {
+      "execution": {"parent": null, "domain": "execution", "summary": "code & shell execution", "children": [], "skills": ["python_exec", "shell_exec"]},
+      "cohort_data": {"parent": null, "domain": "cohort_data", "summary": "cohort & UKB data access — field lookup, cohort build, phenotype/missingness, prevalence", "children": [], "skills": ["field_search", "ukb_data_inventory", "ukb_field_resolve", "ukb_materialize_fields", "bank_data_probe", "bank_data_readiness", "cohort_summary", "cohort_card", "cohort_phenotype_summary", "phenotype_harmonize", "missing_data", "prevalence"]},
+      "genomics_germline": {"parent": null, "domain": "genomics", "summary": "germline genomics / variants — VCF QC/association/burden/kinship/PCA, post-GWAS targets", "children": ["vcf_core", "statgen_postgwas"], "skills": []},
+      "vcf_core": {"parent": "genomics_germline", "domain": "genomics", "summary": "VCF QC, annotation, association, burden, kinship, PCA, queries", "children": [], "skills": ["vcf_qc", "vcf_annotation", "vcf_association", "vcf_burden_test", "vcf_kinship", "vcf_pca", "vcf_phenotype_comparison", "vcf_cohort_stats", "vcf_sample_list", "vcf_variant_query", "wgs_environment_check"]},
+      "statgen_postgwas": {"parent": "genomics_germline", "domain": "genomics", "summary": "post-GWAS — proxies, target hypotheses, annotation, enrichment, pathways", "children": [], "skills": ["gwas_proxy", "genetic_target_hypothesis", "target_annotation_context", "target_enrichment", "pathway_enrichment"]},
+      "genomics_somatic": {"parent": null, "domain": "genomics", "summary": "somatic / cancer WGS — mutations, signatures, drivers, selection", "children": [], "skills": []},
+      "singlecell": {"parent": null, "domain": "multiomics", "summary": "single-cell RNA/ATAC — QC, clustering, annotation, DE, dynamics, regulation", "children": ["sc_core", "sc_dynamics", "sc_regulation"], "skills": []},
+      "sc_core": {"parent": "singlecell", "domain": "multiomics", "summary": "scRNA/scATAC QC → cluster → annotate → differential expression", "children": [], "skills": []},
+      "sc_dynamics": {"parent": "singlecell", "domain": "multiomics", "summary": "trajectory / RNA velocity / pseudotime", "children": [], "skills": []},
+      "sc_regulation": {"parent": "singlecell", "domain": "multiomics", "summary": "gene-regulatory networks / SCENIC / TF activity", "children": [], "skills": []},
+      "spatial": {"parent": null, "domain": "multiomics", "summary": "spatial transcriptomics — domains, programs, deconvolution, niches", "children": ["spatial_core", "spatial_composition"], "skills": []},
+      "spatial_core": {"parent": "spatial", "domain": "multiomics", "summary": "spatial domains, spatially-variable genes, gene programs", "children": [], "skills": []},
+      "spatial_composition": {"parent": "spatial", "domain": "multiomics", "summary": "cell-type deconvolution, niches, co-localization", "children": [], "skills": []},
+      "genetics_x_cell": {"parent": null, "domain": "multiomics", "summary": "GWAS × single-cell integration — trait-to-cell-type, disease relevance", "children": [], "skills": []},
+      "statistics": {"parent": null, "domain": "statistics", "summary": "statistics — PheWAS, survival, comorbidity, correlation, power/sample-size, calibration", "children": [], "skills": ["phewas", "survival", "comorbidity", "correlation", "biomarker_dist", "min_sample", "calibration"]},
+      "modeling": {"parent": null, "domain": "modeling", "summary": "predictive modeling — train/evaluate/predict, feature importance, embeddings", "children": [], "skills": ["train_model", "train_phenotype_model", "predict", "evaluate_model", "feature_importance", "embedding"]},
+      "methodology": {"parent": null, "domain": "methodology", "summary": "methodology & review — statistical review, critical thinking, safety", "children": ["method_contracts"], "skills": ["statistical_review", "critical_thinking", "safety_check"]},
+      "method_contracts": {"parent": "methodology", "domain": "methodology", "summary": "per-method scientific pre/post-condition contracts", "children": [], "skills": []},
+      "literature": {"parent": null, "domain": "literature", "summary": "literature & hypotheses — deep research, paper read/QA, web search, replication", "children": [], "skills": ["deep_research", "literature_qa", "fetch_paper", "read_paper", "read_pdf", "web_search", "web_fetch", "hypothesis", "brainstorm", "discover", "replicate_paper", "paper_replication_compare"]},
+      "reporting": {"parent": null, "domain": "reporting", "summary": "reporting & narrative — report generation, plots, academic/Nature-style write-up", "children": [], "skills": ["generate_report", "smart_plot", "academic_report_polisher", "nature_writer", "project_doc"]},
+      "multiomics_preview": {"parent": null, "domain": "multiomics", "summary": "single-cell / spatial PREVIEW glances on preprocessed tables (data-not-ready; real engines arrive when wired)", "children": [], "skills": ["jh_variant_discovery", "atac_expression_coupling", "scatac_accessibility_differential", "scatac_peak_overlap", "scrna_expression_differential", "spatial_cell_interaction", "spatial_celltype_localization", "spatial_hair_summary", "h5ad_sample_summary", "singlecell_modality_summary", "virtualcell_data_inventory", "virtualcell_multimodal_link", "regulatory_variant_annotation", "tf_binding_disruption", "multiomics_mechanism_prioritization"]},
+      "meta": {"parent": null, "domain": "meta", "summary": "trajectory / meta / self — macros, evolution, errors, sessions", "children": [], "skills": ["trajectory_profile_match", "trajectory_tokenize", "record_macro", "replay_pipeline", "create_skill", "agent_workflow_evolver", "analyze_workflow_patterns", "workflow_gap_detector", "world_model_audit", "recall_session", "track_error", "list_errors", "suggest_error_fix", "suggest_optimal_pipeline", "environment_repair", "clarification_policy", "goal_intent_classifier", "list_pipelines", "pause_and_ask", "think", "label"]}
+    }
+  },
+  "pinned": [],
+  "trust": {}
+}

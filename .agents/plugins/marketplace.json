@@ -1,0 +1,20 @@
+{
+  "name": "biobank-agent-local",
+  "interface": {
+    "displayName": "Biobank Agent Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "biobank-agent",
+      "source": {
+        "source": "local",
+        "path": "./plugins/biobank-agent"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "AI & Agents"
+    }
+  ]
+}

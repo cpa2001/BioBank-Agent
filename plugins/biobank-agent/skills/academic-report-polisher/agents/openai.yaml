@@ -1,0 +1,4 @@
+interface:
+  display_name: "Academic Report Polisher"
+  short_description: "Polish academic reports well"
+  default_prompt: "Polish this report into a concise academic report with clear study logic, methods, results, conclusions, and figures placed near the relevant text."

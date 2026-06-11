@@ -1,0 +1,21 @@
+Run a concise UKB-only E11 Type 2 Diabetes workflow. Search available fields first, summarize cohort counts, run statistical_review, safety_check, and world_model_audit, then generate_report with format="dual". Keep it short but produce final report paths.
+
+---
+
+Train the best feasible UKB-only predictive model for E11 Type 2 Diabetes using routine biomarkers. Start with field discovery and cohort_summary, assess missingness, use train_model with model_type="auto", compare reasonable candidate models, run evaluate_model, calibration, feature_importance, and smart_plot if useful. If performance is weak, explain what you tried and what should be improved. Finish with a technical plus Nature-style dual report.
+
+---
+
+Build a longitudinal HealthFormer-style trajectory forecast over time for UKB diabetes progression. Use UKB only, choose feasible endpoint and fields, search repeated BMI/HbA1c/glucose/blood pressure measurements, tokenize trajectory data if available, audit whether any forecast claim is supported, fall back to a tabular prediction model if trajectory rows are insufficient, and finish with a technical plus Nature-style dual report.
+
+---
+
+Reproduce the closest feasible UKB-only slice of the MILTON-style disease prediction paper with DOI 10.1038/s41588-024-01898-1. If the exact paper features are unavailable, choose a defensible E11 Type 2 Diabetes biomarker prediction approximation. Read or fetch the paper when possible, do related deep research, map paper methods to local UKB fields, train an auto-selected model, evaluate calibration and feature importance, compare what is and is not replicated, and produce a technical plus Nature-style dual report.
+
+---
+
+Run an adaptive UKB-only E11 and obesity cardiometabolic analysis. I want a reusable final "analysis readiness card" that summarizes fields found, cohort counts, missingness, model readiness, guardrail status, and report paths. If no existing skill can create this readiness card cleanly, create a small custom skill in custom_skills, hot-load it, use it in the plan, and then generate a dual report. If a step fails because data or arguments are missing, repair the plan by adding prerequisite discovery/cohort/model steps rather than stopping.
+
+---
+
+I only have a broad research question: can UKB support a compelling study of metabolic health trajectories, Type 2 Diabetes risk prediction, and potentially actionable cardiometabolic biomarkers?

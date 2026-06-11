@@ -1,0 +1,112 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+sdist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local data and reference material (not source)
+data/
+reference/
+
+# Testing & Coverage
+.pytest_cache/
+.tox/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+tmp_runtime_redaction/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+.pytype/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project secrets
+.env
+
+# Generated runtime artifacts (not source)
+reports/
+reports_backup/
+plans/
+papers/
+custom_skills/
+external_skills/
+brainstorm/
+data_insights/
+docs/deep_research/
+
+# Local AI-tool session data (keep repo-shipped plugin manifests tracked).
+.agents/*
+!.agents/plugins/
+!.agents/plugins/marketplace.json
+.claude-plugin/*
+!.claude-plugin/marketplace.json
+.claude/
+.codex/
+plugins/*
+!plugins/biobank-agent/
+!plugins/biobank-agent/**
+!plugins/biobank-agent-claude/
+!plugins/biobank-agent-claude/**
+
+# Serialized models
+*.pkl
+*.joblib
+
+# ML training artifacts
+catboost_info/
+
+# Logs
+*.log
+
+# Audit / scratch artifacts that must never land in the source tree
+AUDIT_*.md
+AUDIT_*.txt
+*_AUDIT*.md
+*_AUDIT*.txt
+FINDINGS_*.md
+VERIFICATION_*.md
+VERIFICATION_*.txt
+HARDCODING_*.md
+HARDCODING_*.txt
+FIXES_*.md
+REPOSITORY_*.md
+DELIVERABLES*.md
+DEPLOYMENT_*.txt
+FINAL_*.txt
+PHASE_*.md
+PHASE_*.txt
+README_AUDIT*.md
+IMPLEMENTATION_*.md
+
+# Local agent-development helper files (kept locally for IDE-side agent use only)
+AGENTS.md
+CLAUDE.md
+docs/biobank_agent_2_codex_absorption.md
+docs/codex_feature_parity_matrix.md
+docs/biobank_agent_2_product_spec.md

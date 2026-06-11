@@ -1,0 +1,50 @@
+# China Kadoorie Biobank configuration.
+# Schema-first placeholder: concrete table names can be overridden by deployment env.
+
+bank_id: ckb
+display_name: China Kadoorie Biobank
+description: "large prospective Chinese population cohort with long-term follow-up, regional diversity, lifestyle and environmental exposure data, and linked disease and mortality outcomes"
+caveats: "population, region, exposure and healthcare-system structure differ from UKB/HPP; cross-cohort non-replication must separate biology from measurement and coding shifts"
+coding_system: ICD10
+
+patient_id_column: participant_id
+diagnoses_code_column: diag_icd10
+deaths_code_column: cause_icd10
+field_column_pattern: "{field_id}"
+default_instance: 0
+default_array: 0
+
+biomarker_parquet_name: "ckb_biomarkers.parquet"
+diagnoses_parquet_name: "ckb_diagnoses.parquet"
+deaths_parquet_name: "ckb_deaths.parquet"
+catalog_fields_file: "ckb_field.txt"
+catalog_categories_file: "ckb_category.txt"
+
+feature_groups:
+  blood_biochemistry:
+    ckb_glucose: Glucose
+    ckb_hba1c: Glycated haemoglobin (HbA1c)
+    ckb_ldl: LDL cholesterol
+    ckb_hdl: HDL cholesterol
+    ckb_total_cholesterol: Total cholesterol
+    ckb_triglycerides: Triglycerides
+    ckb_creatinine: Creatinine
+    ckb_crp: C-reactive protein
+
+  anthropometric:
+    ckb_bmi: Body mass index (BMI)
+    ckb_weight: Weight
+    ckb_waist: Waist circumference
+    ckb_hip: Hip circumference
+
+  blood_pressure:
+    ckb_sbp: Systolic blood pressure
+    ckb_dbp: Diastolic blood pressure
+    ckb_pulse: Pulse rate
+
+  exposure_lifestyle:
+    ckb_smoking: Smoking status
+    ckb_alcohol: Alcohol intake
+    ckb_physical_activity: Physical activity
+    ckb_diet: Dietary pattern
+    ckb_air_pollution: Ambient air pollution exposure
