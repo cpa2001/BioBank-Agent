@@ -3549,6 +3549,7 @@ class InteractiveShell:
                 lambda n: _manifest.exposure_of(n),
                 _manifest._MANIFEST_PATH,
                 dry_run=True,
+                trust_of=_manifest.trust_of,
             )
         except Exception:
             curation = None

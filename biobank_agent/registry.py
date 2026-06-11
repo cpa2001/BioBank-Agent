@@ -329,12 +329,26 @@ def discover_custom_skills(custom_dir: Path) -> int:
     """
     import sys
 
+    from biobank_agent.skills.generator import SkillGenerator
+
     if not custom_dir.exists():
         return 0
 
     before = len(_registry)
     for py_file in sorted(custom_dir.glob("*.py")):
         if py_file.name.startswith("_"):
+            continue
+        # Load-time safety gate: a custom/ingested module's body and decorators run with full
+        # privileges on exec_module, so enforce the same AST whitelist used at generation time
+        # BEFORE executing it. An unsafe file is skipped (never exec'd), not fatal — boot proceeds.
+        try:
+            source = py_file.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.warning("Cannot read custom skill %s: %s", py_file.name, e)
+            continue
+        is_safe, reason = SkillGenerator.validate_code(source)
+        if not is_safe:
+            logger.warning("Refused unsafe custom skill %s: %s", py_file.name, reason)
             continue
         module_name = f"custom_skills.{py_file.stem}"
         spec = importlib.util.spec_from_file_location(module_name, py_file)

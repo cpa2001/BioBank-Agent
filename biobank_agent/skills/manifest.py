@@ -30,6 +30,9 @@ DIRECT = "direct"
 DEFERRED = "deferred"
 HIDDEN = "hidden"
 
+INTERNAL = "internal"
+EXTERNAL = "external"
+
 
 @functools.lru_cache(maxsize=1)
 def _load() -> dict[str, Any]:
@@ -90,6 +93,16 @@ def domain_of(name: str) -> str:
 
 def is_pinned(name: str) -> bool:
     return name in set(_load().get("pinned") or [])
+
+
+def trust_of(name: str, *, default: str = INTERNAL) -> str:
+    """Trust provenance of a skill: ``internal`` (first-party or locally generated) or
+    ``external`` (ingested from a third-party corpus, e.g. a GitHub skill pack). External
+    skills never auto-promote into the Direct tier — they stay deferred until a human enables
+    the corpus (see ``runtime.curator.recommend_curation``'s ``trust_of`` exclusion)."""
+    trust = _load().get("trust") or {}
+    value = trust.get(name)
+    return str(value) if value else default
 
 
 def category_summaries() -> dict[str, str]:

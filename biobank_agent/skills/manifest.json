@@ -71,5 +71,6 @@
       "meta": {"parent": null, "domain": "meta", "summary": "trajectory / meta / self — macros, evolution, errors, sessions, external agents", "children": [], "skills": ["trajectory_profile_match", "trajectory_tokenize", "record_macro", "replay_pipeline", "create_skill", "agent_workflow_evolver", "analyze_workflow_patterns", "workflow_gap_detector", "world_model_audit", "recall_session", "track_error", "list_errors", "suggest_error_fix", "suggest_optimal_pipeline", "environment_repair", "clarification_policy", "goal_intent_classifier", "git_clean_push", "list_pipelines", "external_agent_status", "codex_plan", "codex_check_execution", "claude_plan", "claude_check_execution", "gemini_plan", "gemini_check_execution", "pause_and_ask", "think", "label"]}
     }
   },
-  "pinned": []
+  "pinned": [],
+  "trust": {}
 }

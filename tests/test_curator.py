@@ -52,6 +52,17 @@ def test_pinned_skill_is_not_demoted():
     assert "smart_plot" not in recs["demote"]
 
 
+def test_external_skill_is_not_auto_promoted():
+    usage = collect_usage(_records())
+    # vcf_pca is deferred + 6/6 success -> normally a promote candidate.
+    base = recommend_curation(usage, _exposure, min_calls=5, trust_of=lambda n: "internal")
+    assert "vcf_pca" in base["promote"]
+    # Tagging it external (ingested corpus) blocks the usage-only auto-promotion.
+    gated = recommend_curation(usage, _exposure, min_calls=5,
+                               trust_of=lambda n: "external" if n == "vcf_pca" else "internal")
+    assert "vcf_pca" not in gated["promote"]
+
+
 def test_apply_curation_mutates_manifest(tmp_path):
     mpath = tmp_path / "manifest.json"
     mpath.write_text(json.dumps({"tiers": {"direct": ["smart_plot", "think"], "hidden": ["secret_skill"]}}), encoding="utf-8")

@@ -1,10 +1,15 @@
 """AST-based skill code generation with safety validation.
 
 Provides tools for generating new biobank analysis skills with strict safety checks:
-- Imports are whitelisted (numpy, pandas, scipy, sklearn, xgboost, etc.)
-- Forbidden calls are blocked (exec, eval, compile, __import__, open, system)
-- Private attribute access is prevented
-- Generated code is linted and returned for manual review
+- Imports are whitelisted (numpy, pandas, scipy, sklearn, xgboost, ...); the @skill
+  decorator and the gated ``shell_exec`` seam are allowed by exact name only.
+- Forbidden calls are blocked in both bare-name (exec, eval, open, system) and
+  attribute (subprocess.run, os.system) form.
+- Private attribute access is prevented.
+- Generated code is linted and returned for manual review.
+
+These rules are the same invariant enforced at apply time (create_skill) and at load time
+(``discover_custom_skills`` runs ``validate_code`` before ``exec_module``).
 """
 
 import ast
@@ -22,7 +27,17 @@ class SkillGenerator:
         "numpy", "np", "pandas", "pd", "scipy", "sklearn",
         "xgboost", "xgb", "lightgbm", "lgb", "catboost",
         "json", "math", "re", "time", "datetime", "pathlib",
-        "logging", "collections", "itertools", "functools",
+        "logging", "collections", "itertools", "functools", "typing",
+    }
+
+    # Exact ``from <module> import <name>`` allowances for modules outside ALLOWED_IMPORTS
+    # whose specific names a skill legitimately needs. Two only: the @skill decorator that
+    # every skill must import, and the gated shell-out seam — the one sanctioned way to run
+    # heavy bioinformatics tools (scanpy/plink/...) is to shell out via ``shell_exec``, never
+    # to import them or raw ``subprocess`` in-process. Importing any other name still fails.
+    EXACT_FROM_IMPORTS = {
+        "biobank_agent.registry": {"skill"},
+        "biobank_agent.skills.local_exec": {"shell_exec"},
     }
     
     # Whitelist of safe builtins
@@ -34,13 +49,19 @@ class SkillGenerator:
         "callable", "hasattr", "getattr", "setattr", "dir",
     }
     
-    # Forbidden function/class calls
+    # Forbidden function/class calls (bare-name form, e.g. ``exec(...)``, ``open(...)``)
     FORBIDDEN_CALLS = {
         "exec", "eval", "compile", "__import__",
         "open", "input", "file",
         "system", "popen", "call", "run",
     }
-    
+
+    # Forbidden attribute-form callees (e.g. ``subprocess.run(...)``, ``os.system(...)``).
+    # The bare-name FORBIDDEN_CALLS check never sees these — ``node.func`` is an Attribute,
+    # not a Name — so a skill that obtained such a module would slip through. The shell-out
+    # seam is invoked as a bare name (``shell_exec(...)``), so no exception is needed here.
+    FORBIDDEN_CALL_ATTRS = {"run", "call", "system", "popen", "open"}
+
     # Forbidden attributes (anything starting with _)
     FORBIDDEN_ATTRIBUTES = {"_", "__"}
     
@@ -74,16 +95,26 @@ class SkillGenerator:
                         return False, f"Forbidden import: {alias.name}"
             
             elif isinstance(node, ast.ImportFrom):
-                module = node.module
-                if module and module.split('.')[0] not in SkillGenerator.ALLOWED_IMPORTS:
+                module = node.module or ""
+                if module.split('.')[0] in SkillGenerator.ALLOWED_IMPORTS:
+                    pass
+                elif module in SkillGenerator.EXACT_FROM_IMPORTS:
+                    allowed = SkillGenerator.EXACT_FROM_IMPORTS[module]
+                    for alias in node.names:
+                        if alias.name not in allowed:
+                            return False, f"Forbidden import: from {module} import {alias.name}"
+                else:
                     return False, f"Forbidden import: from {module}"
-            
+
             # Check function calls
             elif isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name):
                     func_name = node.func.id
                     if func_name in SkillGenerator.FORBIDDEN_CALLS:
                         return False, f"Forbidden call: {func_name}()"
+                elif isinstance(node.func, ast.Attribute):
+                    if node.func.attr in SkillGenerator.FORBIDDEN_CALL_ATTRS:
+                        return False, f"Forbidden call: .{node.func.attr}()"
             
             # Check attribute access
             elif isinstance(node, ast.Attribute):
@@ -212,10 +243,17 @@ def {name}({param_names}, *, ctx=None) -> dict:
                         errors.append(f"Line {node.lineno}: Forbidden import '{alias.name}'")
             
             elif isinstance(node, ast.ImportFrom):
-                module = node.module
-                if module and module.split('.')[0] not in SkillGenerator.ALLOWED_IMPORTS:
+                module = node.module or ""
+                if module.split('.')[0] in SkillGenerator.ALLOWED_IMPORTS:
+                    pass
+                elif module in SkillGenerator.EXACT_FROM_IMPORTS:
+                    allowed = SkillGenerator.EXACT_FROM_IMPORTS[module]
+                    for alias in node.names:
+                        if alias.name not in allowed:
+                            errors.append(f"Line {node.lineno}: Forbidden import 'from {module} import {alias.name}'")
+                else:
                     errors.append(f"Line {node.lineno}: Forbidden import 'from {module}'")
-            
+
             elif isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name):
                     func_name = node.func.id
@@ -229,6 +267,9 @@ def {name}({param_names}, *, ctx=None) -> dict:
                             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                                 if arg.value.startswith("_"):
                                     errors.append(f"Line {node.lineno}: Private attribute access via getattr()")
+                elif isinstance(node.func, ast.Attribute):
+                    if node.func.attr in SkillGenerator.FORBIDDEN_CALL_ATTRS:
+                        errors.append(f"Line {node.lineno}: Forbidden call '.{node.func.attr}()'")
             
             elif isinstance(node, ast.Attribute):
                 attr = node.attr

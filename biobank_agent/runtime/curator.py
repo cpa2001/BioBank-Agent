@@ -78,11 +78,13 @@ def recommend_curation(
     promote_success_rate: float = 0.8,
     demote_success_rate: float = 0.4,
     pinned: Callable[[str], bool] | None = None,
+    trust_of: Callable[[str], str] | None = None,
 ) -> dict[str, list[str]]:
     """Decide tier changes from usage (pure). A ``deferred`` skill used >= ``min_calls``
     times at >= ``promote_success_rate`` is promoted to ``direct``; a ``direct`` skill used
     >= ``min_calls`` times but below ``demote_success_rate`` is demoted to ``deferred``.
-    Pinned skills are never demoted."""
+    Pinned skills are never demoted. ``external`` (third-party-ingested) skills are never
+    auto-promoted on usage alone — they require an explicit human enable per corpus."""
     promote: list[str] = []
     demote: list[str] = []
     for skill, st in usage.items():
@@ -90,6 +92,8 @@ def recommend_curation(
         if st.calls < min_calls:
             continue
         if tier == "deferred" and st.success_rate >= promote_success_rate:
+            if trust_of and trust_of(skill) == "external":
+                continue
             promote.append(skill)
         elif tier == "direct" and st.success_rate < demote_success_rate:
             if not (pinned and pinned(skill)):

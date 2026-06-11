@@ -379,27 +379,24 @@ def test_git_clean_push_helpers_and_dry_run(monkeypatch):
     assert result["has_uncommitted_changes"] is True
 
 
-def test_git_clean_push_run_and_scan_failure_paths(monkeypatch):
-    class Completed:
-        returncode = 7
-        stdout = "out"
-        stderr = "err"
-
+def test_git_clean_push_run_routes_through_shell_exec(monkeypatch):
     calls = []
 
-    def fake_subprocess_run(cmd, **kwargs):
-        calls.append((cmd, kwargs))
-        return Completed()
+    def fake_shell_exec(command, cwd="", timeout_s=0, write_policy="read_only", confirmed=False, **kwargs):
+        calls.append({"command": command, "cwd": cwd, "timeout_s": timeout_s,
+                      "write_policy": write_policy, "confirmed": confirmed})
+        return {"status": "success", "returncode": 7, "stdout": "out", "stderr": "err"}
 
-    monkeypatch.setattr(git_mod.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(git_mod, "shell_exec", fake_shell_exec)
 
     rc, out = git_mod._run("git status", cwd="/repo", timeout=3)
 
     assert rc == 7
     assert out == "out\nerr"
-    assert calls[0][0] == "git status"
-    assert calls[0][1]["cwd"] == "/repo"
-    assert calls[0][1]["timeout"] == 3
+    assert calls[0]["command"] == "git status"
+    assert calls[0]["cwd"] == "/repo"
+    assert calls[0]["timeout_s"] == 3
+    assert calls[0]["confirmed"] is True  # git mutations run through the gate with confirmation pre-granted
 
     monkeypatch.setattr(git_mod, "_run", lambda *args, **kwargs: (1, "git failed"))
     assert git_mod._find_ai_commits("/repo") == []
