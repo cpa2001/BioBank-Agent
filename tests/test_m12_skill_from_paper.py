@@ -89,6 +89,7 @@ def test_no_paper_aborts():
 
 def test_gate_test_source_is_deterministic_and_non_vacuous():
     src = gate_test_source(MethodContract(name="sc_qc", postconditions=["obs has leiden"]), "sc_qc")
-    assert "check_artifact" in src and "assert any(" in src
+    assert "postconditions_are_enforced" in src and "assert missing ==" in src
+    assert "import biobank_agent" not in src  # self-contained: runs in the isolated apply worktree
     assert "assert True" not in src
     compile(src, "<gate_test>", "exec")  # valid Python

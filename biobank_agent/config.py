@@ -180,6 +180,11 @@ class Settings(BaseSettings):
     # debate. Default OFF; kept only if it beats symmetric on the council A/B set.
     adversarial_council_enabled: bool = False
 
+    # ── Paper → skill synthesis (M12) ────────────────────────────
+    # Turn a method paper into a tree-filed skill through the methodology pre-gate, the
+    # load-safety validator, and a REVIEW-BRANCH apply (never auto-merged). Default OFF.
+    skill_synthesis_enabled: bool = False
+
     # ── Agent ────────────────────────────────────────────────────
     max_tool_rounds: int = 30
     context_window: int = 180_000

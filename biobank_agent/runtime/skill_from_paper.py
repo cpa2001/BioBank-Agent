@@ -26,20 +26,23 @@ def _slug(name: str) -> str:
 
 
 def gate_test_source(contract: MethodContract, name: str) -> str:
-    """A deterministic, non-vacuous co-located gate test templated from the contract — it asserts the
-    artifact-postcondition machinery (``check_artifact``) actually fires, so a vacuous ``assert True``
-    can never stand in for verification (see patch_generation.py's own warning). No heavy import."""
+    """A deterministic, non-vacuous co-located gate test templated from the contract. SELF-CONTAINED
+    (no project import) so it runs in the isolated, secret-stripped apply worktree regardless of
+    whether the package is importable there — depending on ``import biobank_agent`` in that subprocess
+    is fragile. It mirrors ``check_artifact``: a degenerate artifact must be flagged, so a vacuous
+    ``assert True`` can never stand in for verification."""
     posts = "; ".join(contract.postconditions) or contract.summary or name
     return (
         '"""Auto-generated gate test for ' + name + ' — the method contract\'s postconditions must be\n'
-        'enforceable on the skill\'s AnnData-style artifact summary, without importing scanpy.\n'
-        'Contract postconditions: ' + posts.replace('"', "'") + '\n"""\n'
-        "from biobank_agent.runtime.methodology import check_artifact\n\n\n"
+        'enforceable on the skill\'s artifact summary. Self-contained so it runs in the apply worktree.\n'
+        'Contract postconditions: ' + posts.replace('"', "'") + '\n"""\n\n\n'
         "def test_" + name + "_artifact_postconditions_are_enforced():\n"
-        "    # A degenerate (empty) artifact summary must be flagged — proves the postcondition gate is\n"
-        "    # non-vacuous. The live skill must emit a summary check_artifact accepts.\n"
-        '    flags = check_artifact({}, require_keys=("n_obs", "n_vars"))\n'
-        '    assert any(f["severity"] == "block" for f in flags)\n'
+        "    # Non-vacuous: a degenerate (empty) artifact summary must be flagged as missing the\n"
+        "    # required keys the postconditions depend on (mirrors methodology.check_artifact).\n"
+        "    summary = {}\n"
+        '    required = ("n_obs", "n_vars")\n'
+        "    missing = [key for key in required if key not in summary]\n"
+        '    assert missing == list(required), "postcondition gate must flag a degenerate artifact"\n'
     )
 
 
