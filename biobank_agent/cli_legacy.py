@@ -973,137 +973,6 @@ def _collect_research_setup(agent: Agent, goal: str) -> tuple[str, list[dict], d
     }
 
 
-def _extract_external_planner_questions(records: list[dict], max_questions: int = 3) -> list[dict]:
-    """Extract explicit blocking user questions from external planner output."""
-    questions: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    heading_re = re.compile(r"^\s*(?:#+\s*)?blocking\s+questions?\s*:?\s*(.*)$", re.IGNORECASE)
-    item_re = re.compile(r"^\s*(?:[-*]\s*|\d+[\.)]\s*)(.+)$")
-    next_section_re = re.compile(r"^\s*(?:#+\s*)?[A-Z][A-Za-z0-9 /_-]{2,}:\s*$")
-
-    for record in records or []:
-        if not isinstance(record, dict) or str(record.get("status", "")).lower() != "success":
-            continue
-        agent_name = str(record.get("agent") or "external")
-        text = str(record.get("stdout") or record.get("summary") or "")
-        in_section = False
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            heading = heading_re.match(line)
-            if heading:
-                tail = heading.group(1).strip()
-                in_section = True
-                if tail and tail.lower().strip(".") not in {"none", "no", "n/a", "not needed"}:
-                    candidate = item_re.sub(r"\1", tail).strip()
-                    if "?" in candidate:
-                        key = (agent_name, candidate.lower())
-                        if key not in seen:
-                            questions.append({"agent": agent_name, "question": candidate})
-                            seen.add(key)
-                continue
-            if not in_section:
-                continue
-            if next_section_re.match(line) and "?" not in line:
-                break
-            candidate_match = item_re.match(line)
-            candidate = (candidate_match.group(1) if candidate_match else line).strip()
-            normalized = candidate.lower().strip(".")
-            if normalized in {"none", "no", "n/a", "not needed", "no blocking questions"}:
-                break
-            if "?" not in candidate:
-                continue
-            key = (agent_name, candidate.lower())
-            if key in seen:
-                continue
-            questions.append({"agent": agent_name, "question": candidate})
-            seen.add(key)
-            if len(questions) >= max_questions:
-                return questions
-    return questions[:max_questions]
-
-
-def _auto_answer_external_planner_question(question: str, goal: str) -> str:
-    """Answer external-planner questions only when the current goal is explicit."""
-    q = str(question or "").lower()
-    g = str(goal or "").lower()
-    ukb_only = "ukb-only" in g or "ukb only" in g or "this benchmark is ukb-only" in g
-    if ukb_only and any(term in q for term in ("hpp", "ckb", "rap", "bank", "biobank")):
-        return "This run is UKB-only. Treat HPP, CKB and RAP as future ports, not active execution targets."
-    if ("raw" in q or "csv" in q or "material" in q) and ("raw csv" in g or "full ukb" in g):
-        return (
-            "Yes. Inspect the full UKB raw CSV inventory and materialize needed UKB fields when "
-            "the current parquet subset is incomplete."
-        )
-    if "trajectory" in q and ("feasible fallback" in g or "fallback" in g):
-        return (
-            "Use the feasible-fallback trajectory policy: attempt tokenization, avoid unsupported "
-            "temporal claims, and fall back to valid tabular/discrimination analysis when needed."
-        )
-    return ""
-
-
-def _collect_external_planner_clarifications(questions: list[dict], goal: str = "") -> tuple[str, list[dict]]:
-    """Ask the user for unresolved questions raised by external planners."""
-    if not questions:
-        return "", []
-
-    answers: list[dict] = []
-    for idx, item in enumerate(questions, start=1):
-        agent_name = str(item.get("agent") or "external")
-        question = str(item.get("question") or "").strip()
-        if not question:
-            continue
-        auto_answer = _auto_answer_external_planner_question(question, goal)
-        if auto_answer:
-            console.print(f"[dim]Auto-answering {agent_name} planner question from the current task context.[/dim]")
-            answers.append({
-                "id": f"external_planner_{idx}",
-                "agent": agent_name,
-                "question": question,
-                "answer": auto_answer,
-                "label": "Auto from task context",
-            })
-            continue
-        default_answer = (
-            "Use Biobank Agent's safest conservative assumption, proceed only with "
-            "schema-valid UKB-only analysis, and document the uncertainty explicitly."
-        )
-        console.print()
-        console.print(Panel(
-            "\n".join([
-                f"[bold]{question}[/bold]",
-                "",
-                "[dim]Type an answer to pass back into the planning council.[/dim]",
-                "[dim]Press Enter to let Biobank Agent use the conservative default.[/dim]",
-            ]),
-            title=f"External Planner Question: {agent_name}",
-            border_style="yellow",
-        ))
-        raw = ""
-        if _stdin_is_interactive():
-            raw = console.input("[bold yellow]Answer[/] > ").strip()
-        else:
-            console.print("[dim]Non-interactive mode: using conservative default answer.[/dim]")
-        answer = raw or default_answer
-        answers.append({
-            "id": f"external_planner_{idx}",
-            "agent": agent_name,
-            "question": question,
-            "answer": answer,
-            "label": "User answer" if raw else "Conservative default",
-        })
-
-    if not answers:
-        return "", []
-    text = "\n".join(
-        f"- {item['agent']} asked: {item['question']} Answer: {item['answer']}"
-        for item in answers
-    )
-    return text, answers
-
-
 def _render_startup_dashboard(
     settings,
     n_skills: int,
@@ -1180,11 +1049,6 @@ def _render_startup_dashboard(
         )
     )
     console.print()
-
-
-def _quick_external_agent_status() -> dict[str, dict]:
-    """No external CLI agents are wired into the runtime; always empty."""
-    return {}
 
 
 def rebuild_parquet_cmd() -> None:
@@ -2170,60 +2034,6 @@ def _cmd_plan(agent: Agent, planner: PlanMode, arg: str) -> None:
 
         if planner.plan:
             planner.capture_base_plan_snapshot()
-            if _should_run_external_planning_council(agent.settings, clarified_goal):
-                event_sink("External council", "biobank", "running", "consulting optional Codex/Claude/Gemini planners")
-                council_records = _collect_external_planning_council(agent, clarified_goal, event_sink=event_sink)
-            else:
-                council_records = []
-                event_sink("External council", "biobank", "skipped", "not requested for this plan")
-            external_questions = _extract_external_planner_questions(council_records)
-            if external_questions:
-                event_sink(
-                    "Clarification",
-                    "external council",
-                    "warning",
-                    f"{len(external_questions)} external planner question(s)",
-                )
-                dashboard.stop()
-                external_text, external_answers = _collect_external_planner_clarifications(
-                    external_questions,
-                    clarified_goal,
-                )
-                dashboard.start()
-                if external_answers:
-                    clarified_goal = (
-                        f"{clarified_goal.rstrip()}\n\n"
-                        f"External planner clarifications:\n{external_text}"
-                    ).strip()
-                    all_answers = [*clarification_answers, *external_answers]
-                    event_sink(
-                        "Clarification",
-                        "user",
-                        "success",
-                        f"{len(external_answers)} external planner answer(s) recorded",
-                    )
-                    event_sink("Planning", "biobank", "running", "replanning with external planner clarifications")
-                    result = planner.start(clarified_goal)
-                    planner.record_clarification_answers(all_answers)
-                    planner.capture_base_plan_snapshot()
-                    event_sink("Planning", "biobank", "success", result)
-                    if _should_run_external_planning_council(agent.settings, clarified_goal):
-                        event_sink(
-                            "External council",
-                            "biobank",
-                            "running",
-                            "rerunning external planners with clarification answers",
-                        )
-                        council_records = _collect_external_planning_council(agent, clarified_goal, event_sink=event_sink)
-            if council_records:
-                planner.attach_planning_council(council_records)
-                event_sink("Merge", "biobank", "running", "merging schema-safe external advice")
-                merge_result = planner.merge_external_plans()
-                event_sink("Merge", "biobank", "success", merge_result)
-                PlanCheckpoint.from_plan_mode(planner).save(_plan_checkpoint_path(agent.settings))
-            else:
-                event_sink("External council", "biobank", "skipped", "no external advice attached")
-
             planner.validate_current_plan()
             if planner.validation_issues:
                 event_sink("Validation", "biobank", "failed", f"{len(planner.validation_issues)} schema issue(s)")
@@ -2581,20 +2391,6 @@ def _execute_plan(agent: Agent, planner: PlanMode, token_usage: dict) -> None:
                     console.print(f"[yellow]- {warning}[/yellow]")
             else:
                 console.print("\n[bold green]✓ Plan execution complete.[/bold green]")
-            selected_reviewers = _review_hook_selection(agent, report_dir)
-            if selected_reviewers:
-                review_records = _run_external_review_hooks(
-                    agent,
-                    selected_reviewers,
-                    focus=planner.goal or "post-run plan execution review",
-                    report_dir=report_dir,
-                )
-                _run_review_repair_loop(
-                    agent,
-                    review_records,
-                    focus=planner.goal or "post-run plan execution review",
-                    report_dir=report_dir,
-                )
             console.print("[dim]Ask follow-up questions or start a new /plan.[/dim]\n")
 
     except KeyboardInterrupt:
@@ -3009,11 +2805,6 @@ def _settings_float(settings: Any, name: str, default: float) -> float:
         return default
 
 
-def _configured_external_agents(settings: Any, name: str, default: str = "") -> list[str]:
-    """External CLI agents are no longer wired into the planner."""
-    return []
-
-
 def _should_run_external_planning_council(settings: Any, goal: str) -> bool:
     """External planning councils have been removed; always returns False."""
     return False
@@ -3025,38 +2816,6 @@ def _stdin_is_interactive() -> bool:
         return bool(isatty and isatty())
     except Exception:
         return False
-
-
-def _collect_external_planning_council(
-    agent: Agent,
-    task: str,
-    event_sink: Callable[[str, str, str, str, dict | None], None] | None = None,
-) -> list[dict]:
-    """External planning councils have been removed; always returns no records."""
-    if event_sink:
-        event_sink("External council", "biobank", "skipped", "external planning council removed", {})
-    return []
-
-
-def _run_external_agent_skill(agent: Agent, skill_name: str, args: dict) -> None:
-    """External agent skills have been removed; this is a no-op."""
-    return None
-
-
-def _review_hook_selection(agent: Agent, report_dir: Path) -> list[str]:
-    """External review hooks have been removed; always returns no agents."""
-    return []
-
-
-def _run_external_review_hooks(
-    agent: Agent,
-    agents: list[str],
-    *,
-    focus: str = "",
-    report_dir: Path | None = None,
-) -> list[dict]:
-    """External review hooks have been removed; always returns no records."""
-    return []
 
 
 def _review_output_text(record: dict) -> str:

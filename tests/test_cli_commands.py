@@ -461,21 +461,6 @@ class TestSlashCommands:
         assert "Refusing to skip required step" in output
         assert "Skipped s2" in output
 
-    def test_collect_external_planning_council_returns_empty(self, mock_agent):
-        from biobank_agent.cli import _collect_external_planning_council
-
-        events: list[tuple[str, str, str, str]] = []
-        records = _collect_external_planning_council(
-            mock_agent,
-            "task",
-            event_sink=lambda phase, actor, status, message, metadata=None: events.append(
-                (phase, actor, status, message)
-            ),
-        )
-
-        assert records == []
-        assert any(actor == "biobank" and status == "skipped" for _phase, actor, status, _msg in events)
-
     def test_research_setup_defaults_for_short_grand_challenge(self, mock_agent, monkeypatch):
         from biobank_agent import cli
 
@@ -947,15 +932,6 @@ class TestCliHelperBranches:
         }
         cli._show_routing_status(agent)
         cli._show_evidence(agent, " c1 ")
-
-        no_build_ctx = SimpleNamespace(**agent.__dict__)
-        no_build_ctx.settings.reports_dir = tmp_path / "missing-parent" / "reports"
-        no_build_ctx.registry = SimpleNamespace(
-            execute=MagicMock(side_effect=[RuntimeError("external down"), "plain result", {"status": "error", "stderr": "stderr", "command_display": "cmd"}])
-        )
-        cli._run_external_agent_skill(no_build_ctx, "x", {})
-        cli._run_external_agent_skill(no_build_ctx, "x", {})
-        cli._run_external_agent_skill(no_build_ctx, "x", {})
 
         cli._show_cost({"prompt_tokens": 1000, "completion_tokens": 2000}, agent)
         agent.settings.llm_model = "gpt-4.1"
@@ -2115,16 +2091,6 @@ class TestCliRemainingBranches:
             available_models=["fallback"],
         )
         cli._show_available_llm_models(fallback_models)
-
-        external_agent = SimpleNamespace(
-            settings=SimpleNamespace(reports_dir=tmp_path / "reports-file"),
-            state=SimpleNamespace(),
-            memory=None,
-            _build_ctx=MagicMock(side_effect=RuntimeError("ctx failed")),
-            registry=SimpleNamespace(execute=MagicMock(return_value={"status": "success", "stdout": "ok"})),
-        )
-        external_agent.settings.reports_dir.write_text("file", encoding="utf-8")
-        cli._run_external_agent_skill(external_agent, "codex_plan", {"task": "x"})
 
         pass_debate_agent = populated_cli_agent(tmp_path)
         pass_debate_agent.orchestrator.debate.return_value = SimpleNamespace(text="safe debate", safety_status="PASS")
