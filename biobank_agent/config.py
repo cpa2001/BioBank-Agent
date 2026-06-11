@@ -167,6 +167,14 @@ class Settings(BaseSettings):
     # ── Custom Skills ────────────────────────────────────────────
     custom_skills_dir: Path = Path("./custom_skills")
 
+    # ── External skill ingestion (M14) ───────────────────────────
+    # Opt-in: pull community skill libraries from GitHub. Default OFF. v1 ingests
+    # SKILL.md metadata as deferred KNOWLEDGE skills only (no third-party code runs);
+    # ingested skills are tagged trust='external' and never auto-promote.
+    external_skill_ingestion_enabled: bool = False
+    external_skills_dir: Path = Path("./external_skills")
+    enabled_external_corpora: list[str] = Field(default_factory=list)
+
     # ── Agent ────────────────────────────────────────────────────
     max_tool_rounds: int = 30
     context_window: int = 180_000

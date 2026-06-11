@@ -20,7 +20,7 @@ import functools
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +95,32 @@ def is_pinned(name: str) -> bool:
     return name in set(_load().get("pinned") or [])
 
 
+# Runtime overlay for skills ingested this session (M14). Kept separate from the tracked
+# manifest.json so a vendored/ingested corpus doesn't dirty version control; rehydrated at
+# boot from each corpus's SKILL_PACKAGE.json sidecar.
+_external_trust: dict[str, str] = {}
+
+
+def register_external_trust(names: Iterable[str], value: str = EXTERNAL) -> None:
+    """Tag ingested skills as ``external`` at runtime (consulted by ``trust_of`` and thus by
+    the curator's auto-promotion exclusion), without writing to the tracked manifest."""
+    for n in names:
+        if n:
+            _external_trust[str(n)] = value
+
+
+def clear_external_trust() -> None:
+    _external_trust.clear()
+
+
 def trust_of(name: str, *, default: str = INTERNAL) -> str:
     """Trust provenance of a skill: ``internal`` (first-party or locally generated) or
     ``external`` (ingested from a third-party corpus, e.g. a GitHub skill pack). External
     skills never auto-promote into the Direct tier — they stay deferred until a human enables
-    the corpus (see ``runtime.curator.recommend_curation``'s ``trust_of`` exclusion)."""
+    the corpus (see ``runtime.curator.recommend_curation``'s ``trust_of`` exclusion). The
+    runtime overlay wins over the manifest so an ingested skill is external immediately."""
+    if name in _external_trust:
+        return _external_trust[name]
     trust = _load().get("trust") or {}
     value = trust.get(name)
     return str(value) if value else default
