@@ -2,6 +2,156 @@
 
 All notable changes to Biobank Agent are documented here.
 
+## [v3.1-rc] — 2026-06-11
+
+The v3.1 release candidate ships the **capability-acquisition layer** on top of
+the v3 trustworthy-instrument foundation: a hierarchical skill tree, omics-aware
+methodology gates, demand-driven paper→skill synthesis, knowledge-only external
+skill ingestion, an online-eval run-tree, and an adversarial-game planning
+council. Every milestone landed behind a default-OFF flag where it could change
+agent behavior, with a red/green test pass per milestone.
+
+### Milestones
+
+- **里程碑0 — Audit & backlog.** Fresh five-agent read-only audit of the v3
+  tree, corrected two over-claims (MCP CLI is wired, `yolo` approval is
+  by-design), and pinned the M10–M16 wired-vs-dormant matrix that drove the
+  rest of the release. Backlog captured in
+  `plans/M0_AUDIT_AND_BACKLOG.md`.
+
+- **里程碑1 — Doc / source consistency + cleanliness.** Bumped the package to
+  `3.1.0-rc1` (`pyproject.toml`, `biobank_agent.__version__`), synchronised
+  README skill (105→107) and command (71→75) counts against the live
+  registries, reconciled the `AGENTS.md` ↔ `CLAUDE.md` root-cleanliness
+  policies, untracked `catboost_info/` and added it to `.gitignore`, and
+  introduced `tests/test_doc_consistency.py` so future drift fails CI.
+
+- **里程碑2 / 3 — Manifest validation, provider fallback, harness edges.**
+  `skills/manifest.py:validate_manifest` now detects tier overlap, multi-node
+  skill placement, dangling tree refs, and unregistered skills (a `/doctor` +
+  drift guard). `engine.ProviderRouter.resolve` degrades gracefully on a
+  misconfigured role→model so a bad planner / critic model can no longer crash
+  a turn. Coverage extended to council A/B and run-eval edge cases.
+
+- **里程碑4 — Bio-research safety guardrails.** Made the M11 methodology gate
+  reachable (`RuntimeConfig.methodology_gate_enabled` mirrored from `Settings`)
+  and expanded the reviewer with five conservative families:
+  `causal_overreach`, `phenotype_encoding_mismatch`,
+  `missingness_or_selection_bias`, `uncontrolled_confounding`,
+  `covariate_leakage`. Default-OFF; when enabled, a consensus block hard-fails
+  goal acceptance.
+
+- **里程碑5 / M12 — Live `synthesize_skill_from_paper` skill.** Wired the
+  paper→contract→review-branch orchestration as a demand-driven `@skill`,
+  gated on `skill_synthesis_enabled` (default OFF). Path: M11 methodology
+  pre-gate → M13 load-safety validator → 2-file review-branch apply via
+  `apply_proposal` (never auto-merged) → `classify_skill` into the tree.
+
+- **里程碑6 — Run-tree online eval (M15) surfaced.** Folded
+  `runtime/run_tree.py` and `runtime/run_eval.py` into `audit_session()`; added
+  the `/trace` slash command (`cli/commands/runtime.py`,
+  `cli/render.render_run_tree`); folded both `TOOL_STARTED/TOOL_RESULT` and the
+  persisted `TOOL_CALL_STARTED/TOOL_CALL_COMPLETED` taxonomies into
+  `build_run_tree` so the tree is non-empty on real sessions.
+
+- **里程碑7 — Adversarial council wired into the live planner.**
+  `runtime/adversarial_council.py` (proposer / red-team / referee) and the A/B
+  harness in `runtime/council_ab.py` are now reachable from
+  `RuntimePlanner.build_plan` behind `adversarial_council_enabled`
+  (default OFF). The asymmetric game uses three distinct council models;
+  `run_parallel` bounds hung providers; the byte-identical fallback to the
+  symmetric debate is preserved when the flag is off.
+
+### Capability-acquisition core (M10–M16)
+
+These commits underpin the milestones above and are documented here for
+release-note completeness.
+
+- **M10 — Hierarchical skill tree.** Additive `tree` block in
+  `skills/manifest.json` (22 nodes, every skill placed once),
+  `skills/skill_tree.py` with `navigate_tree` + `classify_skill`,
+  registry subtree filter, `navigate_skill_tree` native tool, and a tree-aware
+  executor prompt behind `skill_tree_enabled`. Output is byte-identical when
+  no tree is present.
+
+- **M11 — Method-contract reviewer wired into the completion gate.**
+  `runtime/methodology.py:review_methodology` extended with single-cell /
+  spatial sin checks (`pseudoreplicated_de`, `velocity_without_splicing`,
+  `batch_confounded_clustering`, `spatial_enrichment_no_null`,
+  `coloc_unharmonized_alleles`) gated on an omics-context guard, plus
+  `check_artifact` for AnnData-style postcondition validation without
+  importing scanpy. Wired into `CompletionGate.assess` over `evidence_summary`
+  text under `methodology_gate_enabled` (default OFF).
+
+- **M12 — Skill-from-paper orchestration.** `runtime/skill_from_paper.py`
+  wires paper-read → `MethodContract` extraction → M11 pre-gate →
+  `EvolutionProposal{target_path,diff,test_commands}` → `apply_proposal` with
+  `force_review_branch=True`. `runtime/self_evolve.py:apply_patch_transactionally`
+  gained `force_review_branch` so allow-listed paths
+  (`custom_skills/`) can still be forced onto a review branch in code, never
+  by category metadata.
+
+- **M13 — Load-time skill-execution safety gate + trust provenance.**
+  `SkillGenerator.validate_code` is now enforced at LOAD time in
+  `discover_custom_skills` (skips files using forbidden imports / calls
+  before `exec_module`); `validate_load_safety` blocks module-scope
+  `shell_exec` and read-sink obfuscations
+  (call-of-call, `Path.read_text/read_bytes`, `pd.read_pickle`).
+  `manifest.json` gained a `trust` map; `curator.recommend_curation` excludes
+  `trust='external'` from auto-promotion.
+
+- **M14 — External GitHub skill ingestion (knowledge-only).**
+  `runtime/skill_ingest.py` parses each upstream `SKILL.md` and registers it
+  as a deferred, `trust='external'` knowledge skill — third-party CODE is
+  never written to disk or executed. `skills/ingest_skills.py:ingest_github_skills`
+  validates the repo URL pattern, `shlex.quote`s it for the gated
+  `shell_exec` seam, and requires an immutable commit SHA.
+  `external_skill_ingestion_enabled` is OFF by default; raw `.py` ingestion is
+  deferred to M14.2 behind a hash-pinned script-adapter runner.
+
+- **M15 — Online-eval run-tree.** `run_tree.py` is a pure fold over
+  `session.events` (turn → phase / tool / llm spans, latency, success rate);
+  `run_eval.py` adds `tool_success_rate`, `error_free`, `latency_budget`,
+  `no_repeated_tool_failures`, and `phase_errors_free` evaluators.
+
+- **M16 — Adversarial-game council core.** `adversarial_council.py` adds the
+  proposer / red-team / referee asymmetric game; `council_ab.py:ab_compare`
+  scores it against the symmetric debate over an objectives set, returning
+  a tally for the empirical keep-or-drop gate.
+
+### Added / fixed (engine quality)
+
+- `RuntimeConfig.from_settings` now mirrors `methodology_gate_enabled` and
+  `adversarial_council_enabled` so flags configured via `.env` actually reach
+  the runtime (both were unreachable before).
+- `gate_test_source()` is self-contained (no `biobank_agent` import) so M12 /
+  M14 gate tests pass inside the secret-stripped, isolated apply worktree.
+- Doc-consistency test suite (`tests/test_doc_consistency.py`) pins
+  README↔registry counts and the `pyproject.toml` ↔ package version.
+
+### Repository hygiene
+
+- `catboost_info/`, `tmp_runtime_redaction/`, `papers/`, `.codex/`, and the
+  generated runtime artifacts (`reports/`, `plans/`, …) are now consistently
+  gitignored; the v3.1-rc release tree was scrubbed of all non-source
+  artifacts.
+- Repo-shipped plugin bundles (`plugins/biobank-agent/`,
+  `plugins/biobank-agent-claude/`) and their marketplace manifests
+  (`.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json`) are
+  the only AI-tool integration surfaces tracked in source.
+
+### Default-OFF flags introduced in v3.1-rc
+
+| Flag | Purpose |
+| --- | --- |
+| `methodology_gate_enabled` | Hard-block goal acceptance on omics / statistical sins (M11 / 里程碑4). |
+| `skill_synthesis_enabled` | Activate the live `synthesize_skill_from_paper` skill (里程碑5). |
+| `external_skill_ingestion_enabled` | Pull community SKILL.md corpora as knowledge-only skills (M14). |
+| `adversarial_council_enabled` | Route planning through the proposer / red-team / referee game (里程碑7). |
+
+All four flags default to OFF so v3.1-rc's behavior on existing flows is
+byte-identical to v3.0.
+
 ## [Unreleased] — Agent autonomy, robustness & self-evolution
 
 Driven by real-environment end-to-end testing of the live `biobank` CLI against
