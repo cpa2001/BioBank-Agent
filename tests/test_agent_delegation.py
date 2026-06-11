@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 from biobank_agent.runtime.agent_delegation import (
     _first_diff_path,
@@ -96,10 +97,44 @@ def test_applies_to_review_branch_only():
     assert "added" in seen["diff"]
 
 
-def test_requires_test_commands_to_apply():
+def test_requires_test_commands_before_spawning_agent():
+    spawned = {"n": 0}
+
+    def spy_producer(task, spec, repo_root, timeout_s):
+        spawned["n"] += 1
+        return True, _DIFF, ""
+
     out = delegate_and_apply("do x", agent="codex", repo_root=".", test_commands=[], enabled=True,
-                             producer=_with_diff, apply_fn=_must_not_apply)
+                             producer=spy_producer, apply_fn=_must_not_apply)
     assert out["status"] == "needs_tests"
+    assert spawned["n"] == 0  # the external agent must NOT be spawned when tests are missing
+
+
+def test_non_list_test_commands_rejected_before_spawn():
+    spawned = {"n": 0}
+
+    def spy_producer(task, spec, repo_root, timeout_s):
+        spawned["n"] += 1
+        return True, _DIFF, ""
+
+    # A bare int (or any non-list/str) yields no real command -> reject before spawning.
+    out = delegate_and_apply("do x", agent="codex", repo_root=".", test_commands=5, enabled=True,
+                             producer=spy_producer, apply_fn=_must_not_apply)
+    assert out["status"] == "needs_tests" and spawned["n"] == 0
+
+
+def test_string_test_commands_treated_as_one_command_not_chars():
+    seen = {}
+
+    def fake_apply(*, repo_root, target_path, diff, test_commands, summary, force_review_branch):
+        seen["test_commands"] = test_commands
+        return type("R", (), {"status": "review_branch", "target_path": target_path, "branch": "b", "error": ""})()
+
+    # A string must be treated as a single command, not iterated into per-character "commands".
+    out = delegate_and_apply("do x", agent="codex", repo_root=".", test_commands="pytest -q",
+                             enabled=True, producer=_with_diff, apply_fn=fake_apply)
+    assert out["status"] == "review_branch"
+    assert seen["test_commands"] == ["pytest -q"]
 
 
 def test_no_changes_short_circuits_before_apply():
@@ -112,6 +147,45 @@ def test_failure_short_circuits_before_apply():
     out = delegate_and_apply("do x", agent="codex", repo_root=".", test_commands=["pytest -q"],
                              enabled=True, producer=_fail, apply_fn=_must_not_apply)
     assert out["status"] == "failed" and "crashed" in out["error"]
+
+
+def test_delegate_skill_is_gated_off_by_default():
+    from biobank_agent.skills.delegate_to_coding_agent import delegate_to_coding_agent
+
+    # No external_agent_delegation_enabled on settings -> the skill is a no-op, never invokes anything.
+    ctx = SimpleNamespace(settings=SimpleNamespace(), workspace_root=".")
+    out = delegate_to_coding_agent("add a docstring", ctx=ctx)
+    assert out["status"] == "disabled"
+
+
+def test_delegate_skill_is_classified_high_risk_in_tool_safety_layer():
+    from biobank_agent.core.tools.protocol import Capability
+    from biobank_agent.core.tools.registry import infer_legacy_capabilities, infer_legacy_is_mutating
+
+    caps = infer_legacy_capabilities("delegate_to_coding_agent")
+    # Spawns a third-party CLI and applies its code: must be shell-exec + reviewer-spawning + mutating,
+    # not the permissive READ_DATA/WRITE_REPORTS default.
+    assert Capability.SHELL_EXEC in caps and Capability.CALL_REVIEWER in caps
+    assert infer_legacy_is_mutating("delegate_to_coding_agent") is True
+
+
+def test_delegate_skill_has_manifest_and_audit_metadata():
+    from biobank_agent.core.tools.protocol import SafetyClass
+    from biobank_agent.core.tools.registry import ToolRegistry
+    from biobank_agent.registry import autodiscover_skills
+    from biobank_agent.skills import manifest
+
+    # Manifest: deferred (NOT hidden) so the agent tool loop can discover + invoke it via skill_search;
+    # filed under the meta domain for audit/trace classification. Safety is the flag + approval + gate.
+    assert manifest.exposure_of("delegate_to_coding_agent") == manifest.DEFERRED
+    assert manifest.domain_of("delegate_to_coding_agent") == "meta"
+
+    # Audit metadata: the wrapped ToolSpec is self-modification, not the legacy READ default.
+    autodiscover_skills()
+    reg = ToolRegistry()
+    reg.hydrate_from_legacy()
+    handler = reg.get("delegate_to_coding_agent")
+    assert handler is not None and handler.spec().safety_class == SafetyClass.SELF_MODIFICATION
 
 
 # ── isolation invariant: real temp git repo + an in-process fake agent ───────

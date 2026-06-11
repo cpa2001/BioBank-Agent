@@ -17,8 +17,10 @@ from biobank_agent.registry import SkillRegistry, get_registry as _get_legacy_re
 from .native import build_native_tools
 
 from .protocol import (
+    ActionClass,
     Capability,
     LegacySkillToolHandler,
+    SafetyClass,
     ToolContext,
     ToolHandler,
     ToolSpec,
@@ -45,6 +47,10 @@ _LEGACY_CAP_OVERRIDES: dict[str, frozenset[Capability]] = {
         {Capability.WRITE_REPORTS, Capability.MUTATE_MEMORY}
     ),
     "record_macro": frozenset({Capability.MUTATE_MEMORY}),
+    # External coding-agent delegation: spawns a third-party CLI and applies its code edits.
+    "delegate_to_coding_agent": frozenset(
+        {Capability.SHELL_EXEC, Capability.CALL_REVIEWER, Capability.NETWORK}
+    ),
     # Disclosure-sensitive skills (must surface DisclosedResult).
     "phewas": frozenset({Capability.READ_DATA, Capability.EXPORT_AGGREGATE, Capability.WRITE_REPORTS}),
     "prevalence": frozenset({Capability.READ_DATA, Capability.EXPORT_AGGREGATE}),
@@ -60,6 +66,7 @@ _MUTATING_LEGACY_SKILLS: frozenset[str] = frozenset({
     "remember_model_config",
     "save_pipeline",
     "track_error",
+    "delegate_to_coding_agent",  # applies external-agent code edits to a review branch
 })
 
 
@@ -100,6 +107,11 @@ class ToolRegistry:
                 required=list(params_node.get("required", [])),
             )
             caps = infer_legacy_capabilities(name)
+            # A shell-out / self-modifying skill must not be audit-classified as a benign READ;
+            # surface its real risk in the ToolSpec metadata (audit + trajectory records read this).
+            if Capability.SHELL_EXEC in caps:
+                spec.safety_class = SafetyClass.SELF_MODIFICATION
+                spec.action_classes = (ActionClass.SELF_MODIFICATION,)
 
             def _make_invoker(skill_name=name):
                 # Closure that defers to legacy execute() so reload /

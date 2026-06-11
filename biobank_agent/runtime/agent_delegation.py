@@ -164,6 +164,18 @@ def delegate_and_apply(
     if not enabled:
         return {"status": "disabled",
                 "message": "Set external_agent_delegation_enabled to delegate to an external coding agent."}
+    # Validate the verification step BEFORE spawning the agent: a change we cannot verify can never be
+    # applied, so there is no reason to pay to run the external CLI. Accept a single string or a list,
+    # and reject anything that yields no real command (None, "", a bare int, all-whitespace) — a bare
+    # string must NOT be iterated into per-character "commands".
+    if isinstance(test_commands, str):
+        test_commands = [test_commands]
+    if not isinstance(test_commands, (list, tuple)):
+        test_commands = []
+    tests = [str(c).strip() for c in test_commands if str(c).strip()]
+    if not tests:
+        return {"status": "needs_tests", "agent": agent,
+                "message": "supply test_commands (a list of shell commands) to verify the change before apply"}
     result = delegate_coding_task(
         task, agent=agent, repo_root=repo_root, timeout_s=timeout_s, producer=producer, spec_overrides=spec_overrides
     )
@@ -171,11 +183,6 @@ def delegate_and_apply(
         return {"status": "failed", "agent": agent, "error": result.error}
     if not (result.diff or "").strip():
         return {"status": "no_changes", "agent": agent, "message": result.text or "agent produced no changes"}
-    tests = [str(c) for c in (test_commands or []) if str(c).strip()]
-    if not tests:
-        return {"status": "needs_tests", "agent": agent,
-                "message": "supply test_commands so the delegated change can be verified before apply",
-                "diff_preview": result.diff[:2000]}
     if apply_fn is None:
         from biobank_agent.runtime.self_evolve import apply_patch_transactionally
 

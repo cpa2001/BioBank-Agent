@@ -187,6 +187,11 @@ class Settings(BaseSettings):
     # load-safety validator, and a REVIEW-BRANCH apply (never auto-merged). Default OFF.
     skill_synthesis_enabled: bool = False
 
+    # ── External coding-agent task delegation ───────────────────
+    # Opt-in: hand a coding subtask to codex/claude-code; the agent runs in an isolated worktree and
+    # its diff lands on a REVIEW BRANCH only (never auto-merged). Default OFF.
+    external_agent_delegation_enabled: bool = False
+
     # ── Agent ────────────────────────────────────────────────────
     max_tool_rounds: int = 30
     context_window: int = 180_000
