@@ -175,6 +175,11 @@ class Settings(BaseSettings):
     external_skills_dir: Path = Path("./external_skills")
     enabled_external_corpora: list[str] = Field(default_factory=list)
 
+    # ── Adversarial-game council (M16) ───────────────────────────
+    # Route planning through the proposer/red-team/referee game instead of the symmetric
+    # debate. Default OFF; kept only if it beats symmetric on the council A/B set.
+    adversarial_council_enabled: bool = False
+
     # ── Agent ────────────────────────────────────────────────────
     max_tool_rounds: int = 30
     context_window: int = 180_000
