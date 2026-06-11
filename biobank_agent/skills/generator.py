@@ -60,7 +60,16 @@ class SkillGenerator:
     # The bare-name FORBIDDEN_CALLS check never sees these — ``node.func`` is an Attribute,
     # not a Name — so a skill that obtained such a module would slip through. The shell-out
     # seam is invoked as a bare name (``shell_exec(...)``), so no exception is needed here.
-    FORBIDDEN_CALL_ATTRS = {"run", "call", "system", "popen", "open"}
+    # ``read_text``/``read_bytes`` are pathlib file reads; ``read_pickle`` is a pandas
+    # code-execution sink. (``pd.read_csv``-style reads remain reachable — see validate_code's
+    # docstring on the validator's boundary.)
+    FORBIDDEN_CALL_ATTRS = {"run", "call", "system", "popen", "open",
+                            "read_text", "read_bytes", "read_pickle"}
+
+    # The shell-out seam is allowed (the sanctioned lane for heavy tools) but only at RUNTIME
+    # — inside a skill's function body. A call at module scope would run on ``exec_module``
+    # (import time), which is an arbitrary-execution vector for any merged/ingested module.
+    MODULE_SCOPE_FORBIDDEN_CALLS = {"shell_exec"}
 
     # Forbidden attributes (anything starting with _)
     FORBIDDEN_ATTRIBUTES = {"_", "__"}
@@ -115,6 +124,10 @@ class SkillGenerator:
                 elif isinstance(node.func, ast.Attribute):
                     if node.func.attr in SkillGenerator.FORBIDDEN_CALL_ATTRS:
                         return False, f"Forbidden call: .{node.func.attr}()"
+                elif isinstance(node.func, ast.Call):
+                    # Calling the result of a call — e.g. getattr(o, 'open')(...) — is the
+                    # standard way to reach a forbidden callable past the name/attr checks.
+                    return False, "Forbidden call: result of a call is not directly callable"
             
             # Check attribute access
             elif isinstance(node, ast.Attribute):
@@ -124,7 +137,33 @@ class SkillGenerator:
         
         logger.info("Code validation passed")
         return True, "OK"
-    
+
+    @staticmethod
+    def validate_load_safety(code: str) -> Tuple[bool, str]:
+        """Extra checks for a FULL module about to be exec'd at load time.
+
+        ``validate_code`` governs what a skill may *reference* and runs on fragments too;
+        this governs what may *execute at import*. A skill file should only DEFINE things at
+        module scope (imports, constants, the @skill function) — it must not invoke the
+        shell-out seam at module scope, which would run on ``exec_module`` (an arbitrary-
+        execution vector for any merged or ingested module). The seam is fine inside the
+        skill's function body, where it runs only when the skill is actually called.
+
+        This is a load-time speed bump, not a sandbox: an allowed ``pandas``/``numpy`` import
+        can still read files (e.g. ``pd.read_csv``). The decisive controls are knowledge-only
+        external ingestion (M14), the review-branch apply gate (M12), and ``trust='external'``
+        never auto-promoting (M13).
+        """
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as e:
+            return False, f"Syntax error: {e}"
+        visitor = _ModuleScopeCallVisitor()
+        visitor.visit(tree)
+        if visitor.violation:
+            return False, visitor.violation
+        return True, "OK"
+
     @staticmethod
     def template(
         name: str,
@@ -270,10 +309,40 @@ def {name}({param_names}, *, ctx=None) -> dict:
                 elif isinstance(node.func, ast.Attribute):
                     if node.func.attr in SkillGenerator.FORBIDDEN_CALL_ATTRS:
                         errors.append(f"Line {node.lineno}: Forbidden call '.{node.func.attr}()'")
+                elif isinstance(node.func, ast.Call):
+                    errors.append(f"Line {node.lineno}: Forbidden call 'result of a call is not directly callable'")
             
             elif isinstance(node, ast.Attribute):
                 attr = node.attr
                 if attr.startswith("_"):
                     errors.append(f"Line {node.lineno}: Private attribute access '.{attr}'")
-        
+
         return errors
+
+
+class _ModuleScopeCallVisitor(ast.NodeVisitor):
+    """Flag invocations of the shell-out seam that would execute at import (module scope).
+
+    Scope-aware (``ast.walk`` is not): the visitor only counts ``def``/``lambda`` bodies as
+    non-module scope, so a seam call there is fine, while one at module level — including in a
+    decorator, a module-level ``if``/``for``, or a comprehension — is flagged.
+    """
+
+    def __init__(self) -> None:
+        self._func_depth = 0
+        self.violation = ""
+
+    def _visit_scope(self, node: ast.AST) -> None:
+        self._func_depth += 1
+        self.generic_visit(node)
+        self._func_depth -= 1
+
+    visit_FunctionDef = _visit_scope
+    visit_AsyncFunctionDef = _visit_scope
+    visit_Lambda = _visit_scope
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if (self._func_depth == 0 and isinstance(node.func, ast.Name)
+                and node.func.id in SkillGenerator.MODULE_SCOPE_FORBIDDEN_CALLS and not self.violation):
+            self.violation = f"Forbidden module-scope call: {node.func.id}() runs at import time"
+        self.generic_visit(node)

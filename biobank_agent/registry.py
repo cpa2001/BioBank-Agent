@@ -347,6 +347,10 @@ def discover_custom_skills(custom_dir: Path) -> int:
             logger.warning("Cannot read custom skill %s: %s", py_file.name, e)
             continue
         is_safe, reason = SkillGenerator.validate_code(source)
+        if is_safe:
+            # The whole file runs on exec_module — also forbid invoking the shell-out seam
+            # at module scope, which would execute at import rather than when the skill is called.
+            is_safe, reason = SkillGenerator.validate_load_safety(source)
         if not is_safe:
             logger.warning("Refused unsafe custom skill %s: %s", py_file.name, reason)
             continue
