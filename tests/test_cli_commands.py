@@ -289,7 +289,8 @@ class TestSlashCommands:
         assert "Configuration" in output
         assert "/export [format]" in output
         assert "/models-available" in output
-        assert "/external-agents" in output
+        assert "/mcp-list" in output
+        assert "/external-agents" not in output
         assert "[bold]" not in output
         assert "[/]" not in output
 
@@ -460,84 +461,10 @@ class TestSlashCommands:
         assert "Refusing to skip required step" in output
         assert "Skipped s2" in output
 
-    def test_collect_external_planning_council_records_codex_and_unavailable_claude(self, mock_agent, cli_capture_console):
+    def test_collect_external_planning_council_returns_empty(self, mock_agent):
         from biobank_agent.cli import _collect_external_planning_council
 
-        mock_agent.settings.plan_external_council_enabled = True
-        mock_agent.settings.plan_external_council_timeout_s = 12
-        mock_agent.registry.execute.side_effect = [
-            {
-                "agents": {
-                    "codex": {"available": True, "version": "codex test"},
-                    "claude": {
-                        "available": False,
-                        "error": "auth required",
-                        "remediation": "Run claude auth login",
-                    },
-                }
-            },
-            {
-                "agent": "codex",
-                "status": "success",
-                "available": True,
-                "elapsed_s": 1.2,
-                "stdout": "Add model training, calibration, report quality gates.",
-            },
-        ]
-
-        records = _collect_external_planning_council(mock_agent, "design a prediction study")
-
-        assert records == [
-            {
-                "agent": "codex",
-                "status": "success",
-                "available": True,
-                "elapsed_s": 1.2,
-                "summary": "Add model training, calibration, report quality gates.",
-                "stdout": "Add model training, calibration, report quality gates.",
-                "stderr": "",
-                "error": "",
-                "command_display": "",
-                "prompt_hash": "",
-            },
-            {
-                "agent": "claude",
-                "status": "unavailable",
-                "available": False,
-                "error": "auth required",
-                "summary": "Run claude auth login",
-                "remediation": "Run claude auth login",
-                "command_display": "",
-            },
-            {
-                "agent": "gemini",
-                "status": "unavailable",
-                "available": False,
-                "error": "External planner unavailable",
-                "summary": "",
-                "remediation": "",
-                "command_display": "",
-            },
-        ]
-        assert mock_agent.registry.execute.call_args_list[0].args[:2] == (
-            "external_agent_status",
-            {"agent": "all"},
-        )
-        assert mock_agent.registry.execute.call_args_list[1].args[:2] == (
-            "codex_plan",
-            {"task": "design a prediction study", "timeout_s": 12},
-        )
-        assert "Planning council: 1/3" in cli_capture_console.getvalue()
-
-    def test_collect_external_planning_council_emits_events(self, mock_agent):
-        from biobank_agent.cli import _collect_external_planning_council
-
-        mock_agent.settings.plan_external_council_enabled = True
-        mock_agent.registry.execute.side_effect = [
-            {"agents": {"codex": {"available": False, "error": "missing"}, "claude": {"available": False}}},
-        ]
-        events = []
-
+        events: list[tuple[str, str, str, str]] = []
         records = _collect_external_planning_council(
             mock_agent,
             "task",
@@ -546,66 +473,13 @@ class TestSlashCommands:
             ),
         )
 
-        assert len(records) == 3
-        assert ("External council", "biobank", "running", "checking codex/claude/gemini availability") in events
-        assert any(event[1] == "codex" and event[2] == "skipped" for event in events)
-
-    def test_extract_external_planner_blocking_questions(self):
-        from biobank_agent.cli import _extract_external_planner_questions
-
-        records = [
-            {
-                "agent": "gemini",
-                "status": "success",
-                "stdout": "\n".join([
-                    "BLOCKING QUESTIONS:",
-                    "1. Should the diabetes endpoint be incident-only or ever-diagnosed?",
-                    "2. May the planner use raw UKB CSV columns if parquet coverage is incomplete?",
-                    "",
-                    "Plan:",
-                    "- continue",
-                ]),
-            },
-            {"agent": "codex", "status": "success", "stdout": "BLOCKING QUESTIONS: none\n- plan"},
-        ]
-
-        questions = _extract_external_planner_questions(records)
-
-        assert questions == [
-            {
-                "agent": "gemini",
-                "question": "Should the diabetes endpoint be incident-only or ever-diagnosed?",
-            },
-            {
-                "agent": "gemini",
-                "question": "May the planner use raw UKB CSV columns if parquet coverage is incomplete?",
-            },
-        ]
-
-    def test_external_planner_questions_are_auto_answered_from_explicit_goal(self):
-        from biobank_agent.cli import _collect_external_planner_clarifications
-
-        text, answers = _collect_external_planner_clarifications(
-            [
-                {"agent": "codex", "question": "Should HPP or CKB be included in this bank workflow?"},
-                {"agent": "gemini", "question": "May raw CSV fields be materialized if parquet is incomplete?"},
-            ],
-            "This benchmark is UKB-only and should inspect the full UKB raw CSV inventory.",
-        )
-
-        assert "UKB-only" in text
-        assert "raw CSV" in text
-        assert [item["label"] for item in answers] == ["Auto from task context", "Auto from task context"]
+        assert records == []
+        assert any(actor == "biobank" and status == "skipped" for _phase, actor, status, _msg in events)
 
     def test_research_setup_defaults_for_short_grand_challenge(self, mock_agent, monkeypatch):
         from biobank_agent import cli
 
         monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
-        monkeypatch.setattr(cli, "_quick_external_agent_status", lambda: {
-            "codex": {"available": True},
-            "claude": {"available": False},
-            "gemini": {"available": True},
-        })
         goal = (
             "I only have a broad research question: can UKB support a compelling study of metabolic health "
             "trajectories, Type 2 Diabetes risk prediction, and potentially actionable cardiometabolic biomarkers?"
@@ -615,12 +489,14 @@ class TestSlashCommands:
 
         assert "Autonomous research setup" in clarified
         assert "Use UKB as the active execution dataset" in clarified
-        assert "Use external planning council with: codex, gemini" in clarified
         assert "available skills, and the current UKB data inventory" in clarified
-        assert meta["external_agents"] == "codex,gemini"
+        assert meta == {
+            "dataset_scope": "ukb",
+            "trajectory_policy": "fallback",
+            "model_policy": "auto",
+        }
         assert [item["id"] for item in answers] == [
             "research_setup_dataset",
-            "research_setup_external_council",
             "research_setup_trajectory_policy",
             "research_setup_model_policy",
         ]
@@ -629,11 +505,6 @@ class TestSlashCommands:
         from biobank_agent import cli
 
         monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
-        monkeypatch.setattr(cli, "_quick_external_agent_status", lambda: {
-            "codex": {"available": True},
-            "claude": {"available": True},
-            "gemini": {"available": True},
-        })
         goal = (
             "Can biobank data support a compelling study of metabolic health trajectories, "
             "T2D risk prediction, and actionable cardiometabolic biomarkers?"
@@ -643,21 +514,15 @@ class TestSlashCommands:
 
         assert cli._is_broad_metabolic_showcase_goal(goal) is True
         assert "Autonomous research setup" in clarified
-        assert "Use external planning council with: codex, claude, gemini" in clarified
-        assert meta["external_council_requested"] is True
-        assert len(answers) == 4
+        assert meta["dataset_scope"] == "ukb"
+        assert len(answers) == 3
 
-    def test_research_setup_interactive_uses_three_separate_questions(self, mock_agent, monkeypatch):
+    def test_research_setup_interactive_uses_two_separate_questions(self, mock_agent, monkeypatch):
         from biobank_agent import cli
 
         monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
-        monkeypatch.setattr(cli, "_quick_external_agent_status", lambda: {
-            "codex": {"available": True},
-            "claude": {"available": True},
-            "gemini": {"available": True},
-        })
         entered_prompts = []
-        choices = iter(["", "1,3", "3"])
+        choices = iter(["", "3"])
 
         def fake_input(prompt):
             entered_prompts.append(prompt)
@@ -671,15 +536,12 @@ class TestSlashCommands:
 
         clarified, answers, meta = cli._collect_research_setup(mock_agent, goal)
 
-        assert len(entered_prompts) == 3
+        assert len(entered_prompts) == 2
         assert all("Choice" in prompt for prompt in entered_prompts)
-        assert "Use external planning council with: codex, gemini" in clarified
         assert "Prefer an interpretable model baseline" in clarified
-        assert meta["external_agents"] == "codex,gemini"
         assert meta["model_policy"] == "interpretable"
         assert [item["question"] for item in answers] == [
             "Which data sources are active for this benchmark?",
-            "Should external planning agents be used?",
             "How should incomplete trajectory support be handled?",
             "How should model choice be handled?",
         ]
@@ -690,12 +552,6 @@ class TestSlashCommands:
         from biobank_agent.planner import LongHorizonPlan, PlanState, PlanStep
 
         monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
-        monkeypatch.setattr(cli, "_quick_external_agent_status", lambda: {
-            "codex": {"available": True},
-            "claude": {"available": False},
-            "gemini": {"available": True},
-        })
-        mock_agent.settings.plan_external_council_enabled = False
         mock_agent.settings.plan_research_setup_enabled = True
         mock_planner.state = PlanState.INACTIVE
         mock_planner.is_active = False
@@ -714,9 +570,7 @@ class TestSlashCommands:
         started_goal = mock_planner.start.call_args.args[0]
         assert started_goal.startswith(goal)
         assert "Autonomous research setup" in started_goal
-        assert "planning council" in started_goal
         mock_planner.record_clarification_answers.assert_called()
-        assert mock_agent.settings.plan_external_council_agents == "codex,gemini"
 
     def test_unknown_command(self, mock_agent, mock_planner):
         from biobank_agent.cli import _handle_command
@@ -759,86 +613,6 @@ class TestSlashCommands:
         from biobank_agent.cli import _handle_command
         _handle_command("/evidence c1", mock_agent, mock_planner, {})
         mock_agent.memory.explain_claim.assert_called_once_with("c1", limit=10)
-
-    def test_external_agents_status(self, mock_agent, mock_planner, cli_capture_console):
-        from biobank_agent.cli import _handle_command
-        mock_agent.registry.execute.return_value = {
-            "agents": {
-                "codex": {"available": True, "version": "codex-cli test"},
-                "claude": {
-                    "available": False,
-                    "version": "Claude Code test",
-                    "error": "auth required",
-                    "remediation": "Run `claude auth login`",
-                },
-            }
-        }
-        _handle_command("/external-agents", mock_agent, mock_planner, {})
-        mock_agent.registry.execute.assert_called_with(
-            "external_agent_status",
-            {"agent": "all"},
-            ctx=mock_agent._build_ctx.return_value,
-        )
-        assert "claude auth login" in cli_capture_console.getvalue()
-
-    def test_codex_plan_command(self, mock_agent, mock_planner):
-        from biobank_agent.cli import _handle_command
-        mock_agent.registry.execute.return_value = {
-            "agent": "codex",
-            "task_kind": "plan",
-            "status": "success",
-            "stdout": "plan",
-        }
-        _handle_command("/codex-plan design workflow", mock_agent, mock_planner, {})
-        mock_agent.registry.execute.assert_called_with(
-            "codex_plan",
-            {"task": "design workflow"},
-            ctx=mock_agent._build_ctx.return_value,
-        )
-
-    def test_claude_check_command(self, mock_agent, mock_planner):
-        from biobank_agent.cli import _handle_command
-        mock_agent.registry.execute.return_value = {
-            "agent": "claude",
-            "task_kind": "review",
-            "status": "success",
-            "stdout": "review",
-        }
-        _handle_command("/claude-check report quality", mock_agent, mock_planner, {})
-        mock_agent.registry.execute.assert_called_with(
-            "claude_check_execution",
-            {"focus": "report quality"},
-            ctx=mock_agent._build_ctx.return_value,
-        )
-
-    def test_gemini_plan_and_check_commands(self, mock_agent, mock_planner):
-        from biobank_agent.cli import _handle_command
-
-        mock_agent.registry.execute.return_value = {
-            "agent": "gemini",
-            "task_kind": "plan",
-            "status": "success",
-            "stdout": "plan",
-        }
-        _handle_command("/gemini-plan design workflow", mock_agent, mock_planner, {})
-        mock_agent.registry.execute.assert_called_with(
-            "gemini_plan",
-            {"task": "design workflow"},
-            ctx=mock_agent._build_ctx.return_value,
-        )
-
-        mock_agent.registry.execute.return_value = {
-            "agent": "gemini",
-            "task_kind": "review",
-            "status": "success",
-            "stdout": "review",
-        }
-        _handle_command("/gemini-check report quality", mock_agent, mock_planner, {})
-        mock_agent.registry.execute.assert_called_with(
-            "gemini_check_execution",
-            {"focus": "report quality"},
-            ctx=mock_agent._build_ctx.return_value,
-        )
 
     def test_review_repair_loop_writes_artifacts_and_reruns_safe_steps(self, tmp_path):
         from biobank_agent.cli import _run_review_repair_loop
@@ -891,10 +665,6 @@ class TestSlashCommands:
         _handle_command("/plan-exit", mock_agent, mock_planner, {})
         _handle_command("/plans", mock_agent, mock_planner, {})
         _handle_command("/evidence", mock_agent, mock_planner, {})
-        _handle_command("/codex-plan", mock_agent, mock_planner, {})
-        _handle_command("/claude-plan", mock_agent, mock_planner, {})
-        _handle_command("/codex-check", mock_agent, mock_planner, {})
-        _handle_command("/claude-plan draft review", mock_agent, mock_planner, {})
         _handle_command("/record", mock_agent, mock_planner, {})
         _handle_command("/strategy auto", mock_agent, mock_planner, {})
         _handle_command("/strategy ensemble", mock_agent, mock_planner, {})
@@ -903,8 +673,6 @@ class TestSlashCommands:
 
         output = cli_capture_console.getvalue()
         assert "Usage: /evidence" in output
-        assert "Usage: /codex-plan" in output
-        assert "Usage: /claude-plan" in output
         assert "Strategy set to auto" in output
         assert "Unknown strategy" in output
 
@@ -1217,7 +985,6 @@ class TestCliHelperBranches:
         output = cli_capture_console.getvalue()
         assert "Session Status" in output
         assert "no linked evidence" in output
-        assert "External agent command failed" in output
         assert "Relay Models" in output
         assert "No models returned" in output
         assert "Debate requires" in output

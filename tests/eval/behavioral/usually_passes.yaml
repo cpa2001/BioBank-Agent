@@ -36,10 +36,6 @@ cases:
         - world_model_audit
       reporting:
         - generate_report
-      external_planning:
-        - codex_plan
-        - claude_plan
-        - gemini_plan
     min_required_skills: 10
     required_report_args:
       format: dual

@@ -16,7 +16,6 @@ Train the best feasible UKB-only predictive model for E11 Type 2 Diabetes using 
 /plan Train the best feasible UKB-only predictive model for E11 Type 2 Diabetes using routine biomarkers. Start with field discovery and cohort_summary, assess missingness, use train_model with model_type="auto", compare reasonable candidate models, run evaluate_model, calibration, feature_importance, and smart_plot if useful. If performance is weak, explain what you tried and what should be improved. Finish with a technical plus Nature-style dual report.
 /plan-approve
 /status
-/codex-check model selection, calibration, feature importance, leakage risk, and report quality
 ```
 
 ## Expected Tool Path

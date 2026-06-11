@@ -345,7 +345,7 @@ class FakeReviewRegistry:
     def execute(self, skill, args, ctx=None):
         self.calls.append((skill, args, ctx))
         return {
-            "agent": "codex" if skill.startswith("codex") else "claude",
+            "skill": skill,
             "task_kind": "review",
             "status": "success",
             "stdout": f"ALLOW: {skill} reviewed",
@@ -353,7 +353,7 @@ class FakeReviewRegistry:
         }
 
 
-def test_eval_harness_review_loop_runs_codex_primary_and_optional_claude(tmp_path):
+def test_eval_harness_review_loop_runs_primary_and_optional_secondary(tmp_path):
     registry = FakeReviewRegistry()
     agent = SimpleNamespace(
         registry=registry,
@@ -373,16 +373,14 @@ def test_eval_harness_review_loop_runs_codex_primary_and_optional_claude(tmp_pat
     )
 
     assert result.review_loop["status"] == "completed"
-    assert result.review_loop["primary_reviewer"] == "codex-gpt-5.5-xhigh"
-    assert result.review_loop["reviewer_specs"][0]["model_family"] == "gpt-5.5"
-    assert result.review_loop["reviewer_specs"][0]["reasoning_effort"] == "xhigh"
+    assert result.review_loop["primary_reviewer"] == "report_review_primary"
     assert result.review_loop["old_report_overwrite_ready"] is True
     assert [v["verdict"] for v in result.review_loop["role_verdicts"]] == ["ALLOW"] * 3
     assert result.review_loop["artifact_checklist"]["executive_findings_upfront"]["passed"] is True
-    assert [call[0] for call in registry.calls] == ["codex_check_execution", "claude_check_execution"]
+    assert [call[0] for call in registry.calls] == ["report_review_primary", "report_review_secondary"]
     assert registry.calls[0][1]["timeout_s"] == 12
     assert "report_quality" in registry.calls[0][1]["context"]
-    assert result.review_loop["reviews"][0]["stdout"] == "ALLOW: codex_check_execution reviewed"
+    assert result.review_loop["reviews"][0]["stdout"] == "ALLOW: report_review_primary reviewed"
     assert result.review_loop["reviews"][0]["verdict"] == "ALLOW"
     assert result.gate_passed is True
 
@@ -394,20 +392,17 @@ def test_eval_harness_review_loop_skips_without_registry():
     result = EvalHarness().run(benchmark, SimpleNamespace(), review_loop=True)
 
     assert result.review_loop["status"] == "skipped"
-    assert result.review_loop["reviews"][0]["skill"] == "codex_check_execution"
+    assert result.review_loop["reviews"][0]["skill"] == "report_review_primary"
     assert result.review_loop["reviews"][0]["error"] == "agent registry unavailable"
     assert result.gate_passed is False
 
 
-def test_report_review_helper_exposes_codex_primary_and_optional_claude_metadata():
-    specs = reviewer_specs("codex", include_claude=True)
+def test_report_review_helper_exposes_primary_and_optional_secondary_metadata():
+    specs = reviewer_specs("report_review_primary", include_claude=True)
 
-    assert specs[0]["reviewer"] == "codex-gpt-5.5-xhigh"
+    assert specs[0]["reviewer"] == "report_review_primary"
     assert specs[0]["role"] == "primary_engineer_reviewer"
-    assert specs[0]["provider"] == "openai"
-    assert specs[0]["model_family"] == "gpt-5.5"
-    assert specs[0]["reasoning_effort"] == "xhigh"
-    assert specs[1]["reviewer"] == "claude"
+    assert specs[1]["reviewer"] == "report_review_secondary"
     assert specs[1]["optional"] is True
 
 

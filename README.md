@@ -19,8 +19,8 @@ Biobank Agent is an LLM-powered scientific workflow agent for population-scale b
 
 The current repository is a v3 runtime-oriented build with:
 
-- **108 registered skills** discovered from `biobank_agent.skills`, including cohort analysis, modelling, WGS/VCF workflows, literature research, report writing, external review, paper→skill synthesis, and self-evolution support.
-- **76 slash commands** in the v3 command registry, including `/plan`, `/plan-diagnose`, `/plan-retry`, `/plan-use`, `/research`, `/doctor`, `/tools`, `/resume`, `/audit`, `/trace`, `/harness`, `/replay`, `/learn`, and `/evolve`.
+- **100 registered skills** discovered from `biobank_agent.skills`, including cohort analysis, modelling, WGS/VCF workflows, literature research, report writing, paper→skill synthesis, and self-evolution support.
+- **69 slash commands** in the v3 command registry, including `/plan`, `/plan-diagnose`, `/plan-retry`, `/plan-use`, `/research`, `/doctor`, `/tools`, `/resume`, `/audit`, `/trace`, `/harness`, `/replay`, `/learn`, and `/evolve`.
 - **Runtime-backed sessions** with event logs, action graph references, plan state, trajectory replay, audit reports, and resume support.
 - **VirtualCell/WGS support** for local VCF discovery, WGS dependency checks, exploratory VCF QC, PCA, kinship, association, burden testing, annotation, pathway enrichment, and WGS report polishing.
 - **OpenAI-compatible providers** configured through `.env`, with multi-model planning and review routes controlled by settings.
@@ -210,7 +210,7 @@ Recommended reading order:
 3. [Documentation Index](docs/README.md) - all guides, architecture docs, examples, data references, and related works.
 4. [Architecture Overview](docs/architecture/OVERVIEW.md) - system modules and runtime design.
 5. [Custom Skills](docs/guides/CUSTOM_SKILLS.md) - write new `@skill` tools.
-6. [Plugin Integration](docs/guides/PLUGIN_INTEGRATION.md) - external agent and plugin integration.
+6. [Plugin Integration](docs/guides/PLUGIN_INTEGRATION.md) - install and use the repo-shipped plugin bundles.
 
 ## Development and Tests
 
@@ -238,13 +238,13 @@ Run the full suite when preparing a release:
 python -m pytest tests/ -q
 ```
 
-Before committing, keep the repository root clean:
+Before committing, keep the tracked tree clean:
 
 ```bash
-ls *.md *.txt 2>/dev/null | grep -v -E '^(README|CHANGELOG|AGENTS|CLAUDE)\.md$'
+git ls-files | grep -E '^[^/]+\.(md|txt)$' | grep -vE '^(README|CHANGELOG|LICENSE)' || echo OK
 ```
 
-The command should print nothing.
+The command should print `OK`.
 
 ## Safety and Data Governance
 

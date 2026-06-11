@@ -20,7 +20,7 @@ This directory contains user guides, architecture notes, data references, exampl
 | [guides/QUICK_START.md](guides/QUICK_START.md) | Getting started with installation, configuration, API smoke test, and first CLI checks. |
 | [guides/END_TO_END_TUTORIAL.md](guides/END_TO_END_TUTORIAL.md) | Full Agent + WGS workflow tutorial for real interactive use. |
 | [guides/CUSTOM_SKILLS.md](guides/CUSTOM_SKILLS.md) | How to write new `@skill` tools. |
-| [guides/PLUGIN_INTEGRATION.md](guides/PLUGIN_INTEGRATION.md) | External agent and plugin integration. |
+| [guides/PLUGIN_INTEGRATION.md](guides/PLUGIN_INTEGRATION.md) | Install and use the repo-shipped plugin bundles. |
 | [guides/CLI_COMMAND_PLUGINS.md](guides/CLI_COMMAND_PLUGINS.md) | Add third-party slash commands through the v3 command registry. |
 | [guides/OBSERVABILITY.md](guides/OBSERVABILITY.md) | Local telemetry and OpenTelemetry/Jaeger runbook. |
 | [architecture/OVERVIEW.md](architecture/OVERVIEW.md) | System architecture and runtime design. |

@@ -180,7 +180,7 @@ class _LineExecutionView:
 
 # Synthetic final row appended to every clarification menu. Selecting it (or
 # pressing Tab on any option) opens a free-text prompt so the user can type a
-# custom answer / correct an option — the Claude-Code "Type something" UX.
+# custom answer / correct an option (inline "type something" UX).
 _CUSTOM_ANSWER_LABEL = "Type a custom answer / 以上都不是"
 
 
@@ -539,11 +539,6 @@ class InteractiveShell:
             "models_pool": self._cmd_models_pool,
             "models_available": self._cmd_models_available,
             "strategy": self._cmd_strategy,
-            "external_agents": lambda arg="all": self._cmd_external_agent_skill(
-                "external_agent_status",
-                {"agent": arg or "all"},
-            ),
-            "external_agent_skill": self._cmd_external_agent_skill,
             "replay": lambda arg="": self._cmd_replay(arg),
             "evolve": lambda arg="": self._cmd_evolve(arg),
             "record": self._cmd_record,
@@ -1892,9 +1887,9 @@ class InteractiveShell:
         skipped/cancelled.
 
         A final "Type a custom answer" row (and Tab on any option) opens a
-        free-text prompt so the user can supply or correct an answer — the
-        Claude-Code "Type something" UX. The typed text is forwarded verbatim to
-        the planner (which records it as ``Q: ... A: ...``)."""
+        free-text prompt so the user can supply or correct an answer (inline
+        "type something" UX). The typed text is forwarded verbatim to the
+        planner (which records it as ``Q: ... A: ...``)."""
         options = [opt for opt in (question.get("options") or []) if isinstance(opt, dict) and opt.get("label")]
         if not options:
             return None
@@ -4291,24 +4286,24 @@ class InteractiveShell:
         self._require_runtime().save_session(session)
         return self.handle_message(arg)
 
-    def _cmd_external_agent_skill(self, skill_name: str, args: Any) -> dict[str, Any]:
+    def _cmd_invoke_tool(self, skill_name: str, args: Any) -> dict[str, Any]:
         session = self._require_session()
         runtime = self._require_runtime()
         payload = dict(args or {}) if isinstance(args, dict) else {"value": args}
-        session.state.custom_data.setdefault("external_agent_requests", []).append({"skill": skill_name, "args": payload})
+        session.state.custom_data.setdefault("tool_invocation_requests", []).append({"skill": skill_name, "args": payload})
         runtime.save_session(session)
         outcome = runtime.invoke_tool(
             session,
             skill_name,
             payload,
             turn_id=session.state.active_turn_id,
-            call_id=f"external:{skill_name}:{uuid.uuid4().hex[:8]}",
+            call_id=f"tool:{skill_name}:{uuid.uuid4().hex[:8]}",
             context_factory=lambda req: self._build_tool_context_for_command(req, session=session, runtime=runtime),
         )
         result = outcome.result if isinstance(outcome.result, dict) else {"output": outcome.result}
         if outcome.error and "error" not in result:
             result = {**result, "error": outcome.error}
-        self.console.print(Panel(json.dumps(result, indent=2, ensure_ascii=False, default=str), title=f"External agent: {skill_name}"))
+        self.console.print(Panel(json.dumps(result, indent=2, ensure_ascii=False, default=str), title=f"Tool: {skill_name}"))
         return {
             "skill": skill_name,
             "status": outcome.state.value,
@@ -4325,7 +4320,7 @@ class InteractiveShell:
         if not arg:
             self.console.print("[yellow]Usage: /replicate <paper_path_or_text>[/]")
             return {"status": "missing_source"}
-        result = self._cmd_external_agent_skill("replicate_paper", {"source": arg, "source_type": "auto"})
+        result = self._cmd_invoke_tool("replicate_paper", {"source": arg, "source_type": "auto"})
         return result
 
     def _cmd_strategy(self, arg: str = "") -> dict[str, Any]:

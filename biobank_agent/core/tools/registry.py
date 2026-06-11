@@ -40,13 +40,6 @@ _LEGACY_CAP_OVERRIDES: dict[str, frozenset[Capability]] = {
     "literature_qa": frozenset({Capability.READ_DATA, Capability.NETWORK, Capability.WRITE_REPORTS}),
     "web_search": frozenset({Capability.NETWORK}),
     "web_fetch": frozenset({Capability.NETWORK}),
-    "external_agent_status": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
-    "codex_plan": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
-    "codex_check_execution": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
-    "claude_plan": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
-    "claude_check_execution": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
-    "gemini_plan": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
-    "gemini_check_execution": frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
     # Memory-mutating skills
     "create_skill": frozenset(
         {Capability.WRITE_REPORTS, Capability.MUTATE_MEMORY}

@@ -15,7 +15,6 @@ Create a research landscape and gap-analysis report for UKB cardiometabolic prog
 ```text
 /plan Create a research landscape and gap-analysis report for UKB cardiometabolic progression and Type 2 Diabetes prediction. Review current literature, identify common biomarkers and modelling approaches, cross-reference what UKB fields are available locally, run a small E11 cohort feasibility analysis, generate at least one useful figure if possible, and finish with a dual report that proposes the strongest next study design without overstating causality.
 /plan-approve
-/codex-check literature breadth, UKB feasibility, next-study design, and report quality
 ```
 
 ## Expected Tool Path

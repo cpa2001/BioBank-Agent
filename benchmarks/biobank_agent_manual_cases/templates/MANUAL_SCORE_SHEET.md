@@ -4,7 +4,7 @@ Case ID:
 Tester:
 Date:
 Agent model:
-External agents available:
+Notes:
 
 ## Artifacts
 

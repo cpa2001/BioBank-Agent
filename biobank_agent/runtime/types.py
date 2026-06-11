@@ -77,10 +77,11 @@ class RuntimeConfig:
     debate_rounds: int = 2
     consensus_threshold: float = 0.85
     debate_confidence_floor: float = 0.45
-    # M16: route /plan through the asymmetric proposer/red-team/referee council instead of
-    # the symmetric debate. Default off; flipped on once it wins the council_ab A/B gate.
+    # Route /plan through the alternative proposer/critic/referee planning pipeline
+    # instead of the symmetric debate. Default off; flipped on once it wins the
+    # council_ab A/B gate.
     adversarial_council_enabled: bool = False
-    # M11/里程碑4: hard-block goal acceptance on consensus methodology sins in the evidence.
+    # Hard-block goal acceptance on consensus methodology sins in the evidence.
     # Default off (advisory-grade heuristics); enabling makes the completion gate enforce.
     methodology_gate_enabled: bool = False
     schema_version: int = SCHEMA_VERSION

@@ -338,11 +338,10 @@ Run the BankAdapter data-path gate:
 PYTHONDONTWRITEBYTECODE=1 pytest -q tests/core/test_bank_data_path.py tests/core/test_m3_domain.py --capture=no -p no:cacheprovider
 ```
 
-Run the readiness live case:
+Run the readiness live case using the local benchmark runner:
 
 ```bash
-python /Users/chenpengan/.codex/skills/biobank-agent-live-test/scripts/run_live_test.py \
-  --repo /Users/chenpengan/Projects/CUHK/UKB_agent \
+python scripts/run_live_test.py \
   --workers 1 --timeout-min 20 \
   --case-dir benchmarks/biobank_agent_manual_cases/cases/short_04_bank_readiness_probe.md \
   --output-root reports/biobank_live_tests/bank_readiness_probe \

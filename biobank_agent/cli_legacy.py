@@ -307,14 +307,7 @@ HELP_SECTIONS = [
         ("/plan-exit", "Exit plan mode"),
         ("/plans", "List all saved plans (diagnostic)"),
     ]),
-    ("External Agents", [
-        ("/external-agents", "Check local Codex, Claude Code, and Gemini CLI availability"),
-        ("/codex-plan <task>", "Ask local Codex for a read-only plan"),
-        ("/codex-check [focus]", "Ask local Codex to review current execution/code"),
-        ("/claude-plan <task>", "Ask local Claude Code for a read-only plan"),
-        ("/claude-check [focus]", "Ask local Claude Code to review current execution/code"),
-        ("/gemini-plan <task>", "Ask local Gemini CLI for a read-only plan"),
-        ("/gemini-check [focus]", "Ask local Gemini CLI to review current execution/code"),
+    ("MCP", [
         ("/mcp-list", "List configured MCP servers and loaded MCP tools"),
         ("/mcp-start", "Start configured STDIO MCP servers and register remote tools"),
         ("/mcp-health [--repair]", "Probe MCP servers and optionally reconnect unhealthy ones"),
@@ -869,21 +862,11 @@ def _is_broad_metabolic_showcase_goal(goal: str) -> bool:
     )
 
 
-def _research_setup_default_agents() -> list[str]:
-    statuses = _quick_external_agent_status()
-    return [
-        name for name in ("codex", "claude", "gemini")
-        if bool((statuses.get(name) or {}).get("available"))
-    ]
-
-
 def _collect_research_setup(agent: Agent, goal: str) -> tuple[str, list[dict], dict[str, Any]]:
     """Collect benchmark-grade research setup without forcing a long user prompt."""
     if not _is_broad_metabolic_showcase_goal(goal):
         return goal, [], {}
 
-    available_agents = set(_research_setup_default_agents())
-    selected_agents = [name for name in ("codex", "claude", "gemini") if name in available_agents]
     trajectory_policy = "fallback"
     model_policy = "auto"
     dataset_scope = "ukb"
@@ -907,29 +890,7 @@ def _collect_research_setup(agent: Agent, goal: str) -> tuple[str, list[dict], d
                 "",
                 "[dim]Press Enter for option 1. Future ports are recorded as scope notes, not active execution targets.[/dim]",
             ]),
-            title="Research Setup 1/3: Data Scope",
-            border_style="cyan",
-        ))
-
-    def render_external_panel() -> None:
-        labels = {"codex": "OpenAI Codex", "claude": "Anthropic Claude Code", "gemini": "Google Gemini CLI"}
-        rows = []
-        for idx, name in enumerate(("codex", "claude", "gemini"), start=1):
-            checked = "[x]" if name in selected_agents else "[ ]"
-            status = "available" if name in available_agents else "not ready"
-            disabled = "" if name in available_agents else " [dim](disabled)[/dim]"
-            rows.append(f"{idx}. {checked} {labels[name]} ({status}){disabled}")
-        console.print()
-        console.print(Panel(
-            "\n".join([
-                "[bold]Which external planners should review the plan before execution?[/bold]",
-                "",
-                *rows,
-                "4. [ ] Biobank Agent only — skip external council",
-                "",
-                "[dim]Press Enter to use every available planner. Type numbers such as 1,3 to select a subset, or 4 to skip.[/dim]",
-            ]),
-            title="Research Setup 2/3: External Planning Council",
+            title="Research Setup 1/2: Data Scope",
             border_style="cyan",
         ))
 
@@ -945,7 +906,7 @@ def _collect_research_setup(agent: Agent, goal: str) -> tuple[str, list[dict], d
                 "",
                 "[dim]Press Enter for option 1. Choose 2 only when tabular fallback should be avoided.[/dim]",
             ]),
-            title="Research Setup 3/3: Analysis Strategy",
+            title="Research Setup 2/2: Analysis Strategy",
             border_style="cyan",
         ))
 
@@ -954,23 +915,6 @@ def _collect_research_setup(agent: Agent, goal: str) -> tuple[str, list[dict], d
         dataset_choice = _read_setup_choice()
         if dataset_choice and "1" not in _parse_numbers(dataset_choice):
             console.print("[yellow]Only UKB is execution-ready. HPP, CKB and UKB-RAP will remain future-port scope notes.[/yellow]")
-
-        render_external_panel()
-        external_choice = _parse_numbers(_read_setup_choice())
-        if external_choice:
-            if "4" in external_choice:
-                selected_agents = []
-            else:
-                by_number = {"1": "codex", "2": "claude", "3": "gemini"}
-                requested_agents = [
-                    by_number[number]
-                    for number in ("1", "2", "3")
-                    if number in external_choice and by_number[number] in available_agents
-                ]
-                if requested_agents:
-                    selected_agents = requested_agents
-                else:
-                    console.print("[yellow]No selected external planner is currently available; keeping the default available council.[/yellow]")
 
         render_policy_panel()
         policy_choice = _parse_numbers(_read_setup_choice())
@@ -981,11 +925,6 @@ def _collect_research_setup(agent: Agent, goal: str) -> tuple[str, list[dict], d
     else:
         console.print("[dim]Non-interactive mode: accepting default Research Setup for broad UKB showcase.[/dim]")
 
-    external_text = (
-        f"Use external planning council with: {', '.join(selected_agents)}."
-        if selected_agents else
-        "Do not run an external planning council for this plan."
-    )
     trajectory_text = (
         "Attempt trajectory feasibility first, then fall back to governed tabular prediction if tokens are sparse."
         if trajectory_policy == "fallback" else
@@ -1002,12 +941,6 @@ def _collect_research_setup(agent: Agent, goal: str) -> tuple[str, list[dict], d
             "question": "Which data sources are active for this benchmark?",
             "label": "UKB only",
             "answer": "Use UKB as the active execution dataset. Treat HPP, CKB and UKB-RAP as future ports only.",
-        },
-        {
-            "id": "research_setup_external_council",
-            "question": "Should external planning agents be used?",
-            "label": "External council" if selected_agents else "Biobank only",
-            "answer": external_text,
         },
         {
             "id": "research_setup_trajectory_policy",
@@ -1035,8 +968,6 @@ def _collect_research_setup(agent: Agent, goal: str) -> tuple[str, list[dict], d
     clarified_goal = f"{goal.rstrip()}\n\n{autonomous_policy}".strip()
     return clarified_goal, answers, {
         "dataset_scope": dataset_scope,
-        "external_agents": ",".join(selected_agents),
-        "external_council_requested": bool(selected_agents),
         "trajectory_policy": trajectory_policy,
         "model_policy": model_policy,
     }
@@ -1180,18 +1111,8 @@ def _render_startup_dashboard(
     n_fields: int,
     model_pool: list[str] | None = None,
     available_model_count: int = 0,
-    external_agents: dict[str, dict] | None = None,
 ) -> None:
     """Render a modern startup dashboard."""
-    def external_profile(name: str) -> str:
-        try:
-            from .external_agents import ExternalAgentRunner
-
-            model, effort = ExternalAgentRunner()._resolve_model_and_effort(name)
-        except Exception:
-            return ""
-        return f"{model} / {effort}" if model and effort else (model or effort)
-
     model_pool = model_pool or [settings.llm_model]
     model_pool_preview = ", ".join(model_pool[:3])
     if len(model_pool) > 3:
@@ -1206,23 +1127,6 @@ def _render_startup_dashboard(
     left.add_row(f"[#7dd3fc]Routing[/]: [#e2e8f0]{'auto multi-agent' if settings.multi_model_enabled else 'single model'}[/]")
     left.add_row(f"[#7dd3fc]Active pool[/]: [#e2e8f0]{model_pool_preview}[/]")
     left.add_row(f"[#7dd3fc]Data[/]: [#a78bfa]{settings.data_dir}[/]")
-    external_agents = external_agents or {}
-    if external_agents:
-        external_bits = []
-        labels = {"codex": "OpenAI Codex", "claude": "Anthropic Claude Code", "gemini": "Google Gemini CLI"}
-        for name in ("codex", "claude", "gemini"):
-            payload = external_agents.get(name, {}) or {}
-            available = bool(payload.get("available"))
-            label = labels.get(name, name)
-            color = "#34d399" if available else "#f59e0b"
-            state = "available" if available else "not ready"
-            profile = external_profile(name)
-            detail = f"{state} - {profile}" if profile else state
-            external_bits.append(f"[{color}]{label}: {detail}[/]")
-        left.add_row("")
-        left.add_row("[#7dd3fc]External Intelligence[/]:")
-        for bit in external_bits:
-            left.add_row(f"  {bit}")
 
     right = Table.grid(padding=(0, 1))
     right.add_row("[bold #fb7185]Quick Start[/]")
@@ -1230,7 +1134,7 @@ def _render_startup_dashboard(
     right.add_row("[#94a3b8]type [bold]/[/] + [bold]Tab[/] for autocomplete")
     right.add_row("[#94a3b8]/status[/] session state")
     right.add_row("[#94a3b8]/skills[/] analysis tools")
-    right.add_row("[#94a3b8]/external-agents[/] external planner/reviewer status")
+    right.add_row("[#94a3b8]/mcp-list[/] MCP server inventory")
     right.add_row("[#94a3b8]/models-available[/] relay model catalog")
     if available_model_count > 0:
         right.add_row(f"[#94a3b8]relay models discovered:[/] [bold]{available_model_count}[/]")
@@ -1279,41 +1183,8 @@ def _render_startup_dashboard(
 
 
 def _quick_external_agent_status() -> dict[str, dict]:
-    """Fast startup-only external plugin status without auth probes."""
-    import os
-    import shutil
-    import subprocess
-
-    binaries = {
-        "codex": ("BIOBANK_CODEX_BIN", "codex"),
-        "claude": ("BIOBANK_CLAUDE_BIN", "claude"),
-        "gemini": ("BIOBANK_GEMINI_BIN", "gemini"),
-    }
-    statuses: dict[str, dict] = {}
-    for name, (env_name, default_binary) in binaries.items():
-        binary = os.getenv(env_name, default_binary)
-        path = shutil.which(binary) or ""
-        payload = {"agent": name, "binary": binary, "path": path, "available": bool(path), "version": ""}
-        if path:
-            try:
-                proc = subprocess.run(
-                    [binary, "--version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=1.5,
-                    check=False,
-                )
-                payload["available"] = proc.returncode == 0
-                payload["version"] = ((proc.stdout or proc.stderr).strip().splitlines() or [""])[0]
-                if proc.returncode != 0:
-                    payload["error"] = (proc.stderr or proc.stdout).strip()
-            except Exception as exc:
-                payload["available"] = False
-                payload["error"] = str(exc)
-        else:
-            payload["error"] = f"Binary not found on PATH: {binary}"
-        statuses[name] = payload
-    return statuses
+    """No external CLI agents are wired into the runtime; always empty."""
+    return {}
 
 
 def rebuild_parquet_cmd() -> None:
@@ -2176,12 +2047,6 @@ def _build_registered_command_actions(
         "models_pool": lambda: _show_model_pool(agent),
         "models_available": lambda: _show_available_llm_models(agent),
         "strategy": lambda value: _set_strategy(agent, value),
-        "external_agents": lambda value: _run_external_agent_skill(
-            agent,
-            "external_agent_status",
-            {"agent": value or "all"},
-        ),
-        "external_agent_skill": lambda skill_name, args: _run_external_agent_skill(agent, skill_name, args),
         "mcp_list": lambda: _show_mcp_status(agent),
         "mcp_start": lambda: _start_mcp(agent),
         "mcp_health": lambda value="": _mcp_health(agent, str(value or "")),
@@ -2285,12 +2150,6 @@ def _cmd_plan(agent: Agent, planner: PlanMode, arg: str) -> None:
             dashboard.start()
             if setup_answers:
                 clarification_answers.extend(setup_answers)
-                selected_agents = str(research_setup_meta.get("external_agents", "") or "")
-                if selected_agents:
-                    try:
-                        setattr(agent.settings, "plan_external_council_agents", selected_agents)
-                    except Exception:
-                        pass
                 event_sink(
                     "Research setup",
                     "user",
@@ -2529,14 +2388,7 @@ def _handle_plan_option(agent: Agent, planner: PlanMode, choice: str, token_usag
         return
 
     if normalized == "B":
-        focus = planner.pause_reason or "paused plan needs repair"
-        _run_external_review_hooks(
-            agent,
-            _configured_external_agents(agent.settings, "plan_review_hook_agents", "codex,claude,gemini"),
-            focus=focus,
-            report_dir=None,
-        )
-        console.print("[dim]Use the review output as feedback, or type repair instructions directly.[/dim]\n")
+        console.print("[dim]External review hooks have been removed. Type repair instructions directly.[/dim]\n")
         return
 
     if normalized == "C":
@@ -3109,10 +2961,10 @@ def _load_replication_plan_for_review(
     PlanProgressDisplay(planner.plan, console).show_plan_for_review(revision=planner.revision)
 
 
-def _external_agent_ctx(agent: Agent, report_dir: Path | None = None):
-    """Build a skill context for CLI-triggered external-agent calls."""
+def _tool_ctx(agent: Agent, report_dir: Path | None = None):
+    """Build a skill context for CLI-triggered tool calls (MCP and others)."""
     if report_dir is None:
-        report_dir = getattr(agent.settings, "reports_dir", Path("./reports")) / "external_agents"
+        report_dir = getattr(agent.settings, "reports_dir", Path("./reports")) / "tools"
     try:
         report_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -3157,45 +3009,14 @@ def _settings_float(settings: Any, name: str, default: float) -> float:
         return default
 
 
-def _configured_external_agents(settings: Any, name: str, default: str = "codex,claude,gemini") -> list[str]:
-    aliases = {"claude_code": "claude", "claude-code": "claude"}
-    agents: list[str] = []
-    for raw in _settings_str(settings, name, default).split(","):
-        normalized = aliases.get(raw.strip().lower(), raw.strip().lower())
-        if normalized in {"codex", "claude", "gemini"} and normalized not in agents:
-            agents.append(normalized)
-    return agents or [agent for agent in default.split(",") if agent]
+def _configured_external_agents(settings: Any, name: str, default: str = "") -> list[str]:
+    """External CLI agents are no longer wired into the planner."""
+    return []
 
 
 def _should_run_external_planning_council(settings: Any, goal: str) -> bool:
-    """Gate slow external planning hooks to explicit requests by default."""
-    if not _settings_bool(settings, "plan_external_council_enabled", True):
-        return False
-    policy = _settings_str(settings, "plan_external_council_policy", "requested").strip().lower()
-    if policy in {"never", "off", "false"}:
-        return False
-    if policy in {"always", "on", "true"}:
-        return True
-    lower = (goal or "").lower()
-    return any(
-        token in lower
-        for token in (
-            "codex",
-            "claude",
-            "gemini",
-            "external planner",
-            "external planning",
-            "planning council",
-            "council",
-            "debate",
-            "debat",
-            "multi-model",
-            "multimodel",
-            "审核",
-            "辩论",
-            "讨论",
-        )
-    )
+    """External planning councils have been removed; always returns False."""
+    return False
 
 
 def _stdin_is_interactive() -> bool:
@@ -3211,232 +3032,19 @@ def _collect_external_planning_council(
     task: str,
     event_sink: Callable[[str, str, str, str, dict | None], None] | None = None,
 ) -> list[dict]:
-    """Run read-only external planning passes before plan approval."""
-    def emit(phase: str, actor: str, status: str, message: str, metadata: dict | None = None) -> None:
-        if event_sink:
-            event_sink(phase, actor, status, message, metadata or {})
-
-    if not _settings_bool(getattr(agent, "settings", None), "plan_external_council_enabled", False):
-        emit("External council", "biobank", "skipped", "external planning council disabled")
-        return []
-    registry = getattr(agent, "registry", None)
-    execute = getattr(registry, "execute", None)
-    if not callable(execute):
-        emit("External council", "biobank", "skipped", "registry execute unavailable")
-        return []
-
-    timeout_s = _settings_int(agent.settings, "plan_external_council_timeout_s", 180)
-    ctx = _external_agent_ctx(agent)
-    records: list[dict] = []
-    try:
-        configured_agents = _configured_external_agents(
-            agent.settings,
-            "plan_external_council_agents",
-            "codex,claude,gemini",
-        )
-        emit("External council", "biobank", "running", f"checking {'/'.join(configured_agents)} availability")
-        status_result = execute("external_agent_status", {"agent": "all"}, ctx=ctx)
-    except Exception as exc:
-        emit("External council", "biobank", "failed", str(exc))
-        return [{"agent": "external_agent_status", "status": "failed", "available": False, "error": str(exc)}]
-
-    agents = (status_result or {}).get("agents", {}) if isinstance(status_result, dict) else {}
-    runnable: list[tuple[str, str]] = []
-    configured_agents = _configured_external_agents(
-        agent.settings,
-        "plan_external_council_agents",
-        "codex,claude,gemini",
-    )
-    for name in configured_agents:
-        payload = agents.get(name, {}) if isinstance(agents, dict) else {}
-        if not payload.get("available"):
-            emit("External council", name, "skipped", payload.get("error", "external planner unavailable"))
-            records.append({
-                "agent": name,
-                "status": "unavailable",
-                "available": False,
-                "error": payload.get("error", "External planner unavailable"),
-                "summary": payload.get("remediation", ""),
-                "remediation": payload.get("remediation", ""),
-                "command_display": payload.get("binary", ""),
-            })
-            continue
-        runnable.append((name, f"{name}_plan"))
-
-    future_to_name = {}
-    started_at: dict[str, float] = {}
-    if runnable:
-        with ThreadPoolExecutor(max_workers=len(runnable)) as pool:
-            for name, skill_name in runnable:
-                emit("External council", name, "running", "planning in external agent")
-                started_at[name] = time.time()
-                future_to_name[pool.submit(
-                    execute,
-                    skill_name,
-                    {"task": task, "timeout_s": timeout_s},
-                    ctx=ctx,
-                )] = name
-
-            heartbeat_interval = max(_settings_float(agent.settings, "plan_heartbeat_interval_s", 1.0), 0.1)
-            last_heartbeat = 0.0
-            while future_to_name:
-                done = [future for future in list(future_to_name) if future.done()]
-                if not done:
-                    now = time.time()
-                    if now - last_heartbeat >= heartbeat_interval:
-                        for name in sorted(set(future_to_name.values())):
-                            elapsed = now - started_at.get(name, now)
-                            emit("External council", name, "running", f"still planning ({int(elapsed)}s)")
-                        last_heartbeat = now
-                    time.sleep(0.1)
-                    continue
-
-                for future in done:
-                    name = future_to_name.pop(future)
-                    elapsed = time.time() - started_at.get(name, time.time())
-                    try:
-                        result = future.result()
-                    except Exception as exc:
-                        emit("External council", name, "failed", str(exc))
-                        records.append({"agent": name, "status": "failed", "available": True, "error": str(exc)})
-                        continue
-                    if not isinstance(result, dict):
-                        emit("External council", name, "failed", "external planner returned non-dict output")
-                        records.append({"agent": name, "status": "failed", "available": True, "summary": str(result)})
-                        continue
-                    status = str(result.get("status", "unknown"))
-                    if status == "timeout":
-                        message = result.get("error") or f"timed out after {elapsed:.1f}s"
-                    elif status == "failed":
-                        message = result.get("error") or result.get("stderr") or f"failed in {elapsed:.1f}s"
-                    else:
-                        message = f"{status} in {elapsed:.1f}s"
-                    emit(
-                        "External council",
-                        name,
-                        "success" if status == "success" else "warning",
-                        str(message)[:240],
-                    )
-                    records.append({
-                        "agent": result.get("agent", name),
-                        "status": result.get("status", "unknown"),
-                        "available": result.get("available", True),
-                        "elapsed_s": result.get("elapsed_s", elapsed),
-                        "summary": result.get("stdout") or result.get("stderr") or "",
-                        "stdout": result.get("stdout", ""),
-                        "stderr": result.get("stderr", ""),
-                        "error": result.get("error", ""),
-                        "command_display": result.get("command_display", ""),
-                        "prompt_hash": result.get("prompt_hash", ""),
-                    })
-
-    order = {"codex": 0, "claude": 1, "gemini": 2, "external_agent_status": 3}
-    records.sort(key=lambda item: order.get(str(item.get("agent", "")), 99))
-    if records:
-        ok = sum(1 for r in records if r.get("status") == "success")
-        emit("External council", "biobank", "success" if ok else "warning", f"{ok}/{len(records)} external planners returned usable advice")
-        console.print(f"[dim]Planning council: {ok}/{len(records)} external planner(s) returned usable advice.[/dim]")
-        for record in records:
-            if record.get("status") != "success":
-                detail = record.get("error") or record.get("summary") or record.get("status")
-                console.print(
-                    f"[dim]  - {record.get('agent', 'external')}: "
-                    f"{record.get('status')} - {str(detail)[:240]}[/dim]"
-                )
-    return records
+    """External planning councils have been removed; always returns no records."""
+    if event_sink:
+        event_sink("External council", "biobank", "skipped", "external planning council removed", {})
+    return []
 
 
 def _run_external_agent_skill(agent: Agent, skill_name: str, args: dict) -> None:
-    """Execute an external-agent skill and render the result compactly."""
-    try:
-        result = agent.registry.execute(skill_name, args, ctx=_external_agent_ctx(agent))
-    except Exception as e:
-        console.print(f"[red]External agent command failed: {e}[/]")
-        return
-
-    if not isinstance(result, dict):
-        console.print(str(result))
-        return
-
-    if "agents" in result:
-        table = Table(title="External Agents")
-        table.add_column("Agent", style="cyan")
-        table.add_column("Available", style="green")
-        table.add_column("Version", style="white")
-        table.add_column("Path", style="dim")
-        table.add_column("Error", style="red")
-        table.add_column("Next action", style="yellow")
-        for name, payload in result.get("agents", {}).items():
-            payload = payload or {}
-            table.add_row(
-                str(name),
-                "yes" if payload.get("available") else "no",
-                str(payload.get("version", "")),
-                str(payload.get("path", "")),
-                str(payload.get("error", "")),
-                str(payload.get("remediation", "")),
-            )
-        console.print(table)
-        return
-
-    status = result.get("status", "unknown")
-    title = f"{result.get('agent', 'external')} {result.get('task_kind', 'run')} ({status})"
-    output = result.get("stdout") or result.get("stderr") or result.get("error") or "(no output)"
-    console.print(Panel(_sanitize_external_agent_display(str(output).strip())[:8000], title=title))
-    if result.get("command_display"):
-        console.print(f"[dim]{result['command_display']}[/]")
-
-
-def _sanitize_external_agent_display(text: str) -> str:
-    """Avoid rendering advisory planner text as if it were a local failure.
-
-    External Codex/Claude advice often contains phrases such as "no unknown
-    skill names" while describing guardrails. The executable Biobank plan is
-    still schema-validated separately; this display-only pass keeps transcripts
-    from looking like the local CLI hit an unknown-skill error.
-    """
-    safe = str(text or "")
-    replacements = (
-        (r"\bunknown skill names\b", "unavailable tool names"),
-        (r"\bunknown skill name\b", "unavailable tool name"),
-        (r"\bunknown skills\b", "unavailable tools"),
-        (r"\bunknown skill\b", "unavailable tool"),
-    )
-    for pattern, replacement in replacements:
-        safe = re.sub(pattern, replacement, safe, flags=re.IGNORECASE)
-    return safe
+    """External agent skills have been removed; this is a no-op."""
+    return None
 
 
 def _review_hook_selection(agent: Agent, report_dir: Path) -> list[str]:
-    """Return selected post-run external review agents."""
-    mode = _settings_str(agent.settings, "plan_review_hook_mode", "ask").strip().lower()
-    if mode in {"never", "off", "disabled", "skip"}:
-        return []
-    configured_agents = _configured_external_agents(
-        agent.settings,
-        "plan_review_hook_agents",
-        "codex,claude,gemini",
-    )
-    if mode in {"both", "all", "full", "council"}:
-        return configured_agents
-    if mode in {"codex", "claude", "gemini"}:
-        return [mode]
-
-    if not _stdin_is_interactive():
-        console.print("[dim]Review hooks skipped in non-interactive mode. Run /codex-check, /claude-check, or /gemini-check manually.[/dim]")
-        return []
-
-    from .progress import PlanProgressDisplay
-    PlanProgressDisplay(getattr(agent, "plan", None) or SimpleNamespace(steps=[]), console).show_review_hook_prompt(str(report_dir))
-    raw = console.input("[bold blue]Review hook choice[/] > ").strip().upper()
-    if raw in {"", "A"}:
-        return configured_agents
-    if raw == "B":
-        return ["codex"] if "codex" in configured_agents else []
-    if raw == "C":
-        return ["claude"] if "claude" in configured_agents else []
-    if raw == "D":
-        return ["gemini"] if "gemini" in configured_agents else []
+    """External review hooks have been removed; always returns no agents."""
     return []
 
 
@@ -3447,64 +3055,8 @@ def _run_external_review_hooks(
     focus: str = "",
     report_dir: Path | None = None,
 ) -> list[dict]:
-    """Run selected external execution-review hooks and render/save summaries."""
-    if not agents:
-        return []
-    registry = getattr(agent, "registry", None)
-    execute = getattr(registry, "execute", None)
-    if not callable(execute):
-        console.print("[yellow]External review hooks unavailable: registry execute missing.[/]")
-        return []
-
-    ctx = _external_agent_ctx(agent, report_dir)
-    records: list[dict] = []
-    for name in agents:
-        if name not in {"codex", "claude", "gemini"}:
-            continue
-        skill_name = f"{name}_check_execution"
-        console.print(f"[dim]Starting {name} review hook...[/dim]")
-        _emit_tui_plan_event(
-            agent,
-            "Review hooks",
-            name,
-            "running",
-            f"starting {name} execution review",
-            {"report_dir": str(report_dir) if report_dir else ""},
-        )
-        try:
-            result = execute(skill_name, {"focus": focus}, ctx=ctx)
-        except Exception as exc:
-            result = {"agent": name, "status": "failed", "error": str(exc)}
-        if not isinstance(result, dict):
-            result = {"agent": name, "status": "failed", "stdout": str(result)}
-        records.append(result)
-
-        status = result.get("status", "unknown")
-        ui_status = "failed" if str(status).lower() in {"failed", "error"} else "success"
-        _emit_tui_plan_event(
-            agent,
-            "Review hooks",
-            name,
-            ui_status,
-            f"{name} review {status}",
-            {"report_dir": str(report_dir) if report_dir else ""},
-        )
-        output = result.get("stdout") or result.get("stderr") or result.get("error") or "(no output)"
-        console.print(Panel(str(output).strip()[:8000], title=f"{name} review ({status})"))
-
-        if report_dir:
-            try:
-                report_dir.mkdir(parents=True, exist_ok=True)
-                artifact = report_dir / f"external_review_{name}.md"
-                artifact.write_text(
-                    f"# {name} review ({status})\n\n"
-                    f"**Focus:** {focus or 'post-run execution review'}\n\n"
-                    f"```text\n{str(output).strip()}\n```\n"
-                )
-                console.print(f"[dim]Saved {name} review: {artifact}[/dim]")
-            except Exception as exc:
-                logger.debug("Failed to save external review hook artifact: %s", exc)
-    return records
+    """External review hooks have been removed; always returns no records."""
+    return []
 
 
 def _review_output_text(record: dict) -> str:
@@ -3945,7 +3497,7 @@ def _call_mcp_tool(agent: Agent, arg: str) -> None:
         )
         return
 
-    ctx = _external_agent_ctx(agent, getattr(agent.settings, "reports_dir", Path("./reports")) / "mcp_calls")
+    ctx = _tool_ctx(agent, getattr(agent.settings, "reports_dir", Path("./reports")) / "mcp_calls")
     try:
         result = agent.registry.execute(tool_name, tool_args, ctx=ctx)
     except Exception as exc:

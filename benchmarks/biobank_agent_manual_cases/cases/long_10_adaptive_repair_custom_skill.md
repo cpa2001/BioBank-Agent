@@ -16,7 +16,6 @@ Run an adaptive UKB-only E11 and obesity cardiometabolic analysis. I want a reus
 /plan Run an adaptive UKB-only E11 and obesity cardiometabolic analysis. I want a reusable final "analysis readiness card" that summarizes fields found, cohort counts, missingness, model readiness, guardrail status, and report paths. If no existing skill can create this readiness card cleanly, create a small custom skill in custom_skills, hot-load it, use it in the plan, and then generate a dual report. If a step fails because data or arguments are missing, repair the plan by adding prerequisite discovery/cohort/model steps rather than stopping.
 /plan-approve
 /status
-/codex-check repair log, custom skill quality, hot-load evidence, and report quality
 ```
 
 ## Expected Tool Path

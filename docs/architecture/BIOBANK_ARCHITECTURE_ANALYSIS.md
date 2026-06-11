@@ -107,9 +107,8 @@ biobank_agent/
 | Category | Command | Purpose |
 |----------|---------|---------|
 | **Help & Discovery** | `/help` | Show all commands |
-| | `/skills` | List 64 registered analysis skills |
+| | `/skills` | List registered analysis skills |
 | | `/models-available` | Fetch supported models from LLM relay |
-| | `/external-agents` | Check Codex/Claude Code CLI availability |
 | **Analysis** | `/plan <task>` | Enter structured planning mode (INTAKE → ALIGNMENT → EXECUTION → DONE) |
 | | `/think <query>` | Invoke internal reasoning tool |
 | | `/model <name>` | Switch active LLM model |
@@ -127,10 +126,6 @@ biobank_agent/
 | | `/replay <name>` | Re-run saved pipeline |
 | | `/memory` | 8-tier memory summary (short/mid/long/error/domain/user/episodic/action-graph) |
 | | `/errors` | Error catalog + suggested fixes |
-| **External Review** | `/codex-plan <task>` | Ask Codex for read-only plan |
-| | `/codex-check [focus]` | Ask Codex to review execution |
-| | `/claude-plan <task>` | Ask Claude Code for read-only plan |
-| | `/claude-check [focus]` | Ask Claude Code to review execution |
 | **MCP Integration** | `/mcp-list` | List configured MCP servers & loaded tools |
 | | `/mcp-start` | Start STDIO MCP servers, register remote tools |
 | | `/mcp-health [--repair]` | Probe MCP servers, optionally reconnect |
@@ -206,10 +201,6 @@ search_api_key: str = ""
 # Plan Mode
 plan_repair_budget_per_step: int = 3
 plan_repair_budget_total: int = 8
-plan_external_council_enabled: bool = True
-plan_external_council_policy: str = "requested"  # requested | always | never
-plan_external_council_timeout_s: int = 180
-plan_external_council_agents: str = "codex,claude,gemini"
 
 # Custom Skills
 custom_skills_dir: Path = Path("./custom_skills")
@@ -377,7 +368,6 @@ error_suggestions — suggest error fixes
 suggest_error_fix — automated remediation
 environment_repair — fix environment issues
 project_doc — read project documentation
-external_agents — Codex/Claude Code status & calls
 ```
 
 #### Report/Governance Skills (15+)
@@ -719,46 +709,25 @@ otel_policy: str = "local"    # local | production
 
 ---
 
-## 10. External Agent Integration (Codex & Claude Code)
+## 10. Plugin Bundles
 
 ### Plugin Architecture
 
-**Codex Plugin:**
-- **Location**: `plugins/biobank-agent/`
-- **Marketplace**: `.agents/plugins/marketplace.json`
+Two repo-resident plugin bundles let compatible agent runtimes launch Biobank
+Agent through marketplace manifests:
 
-**Claude Code Plugin:**
-- **Location**: `plugins/biobank-agent-claude/`
-- **Marketplace**: `.claude-plugin/marketplace.json`
+- `plugins/biobank-agent/` with `.agents/plugins/marketplace.json`
+- `plugins/biobank-agent-claude/` with `.claude-plugin/marketplace.json`
 
-### Skills for External Agents
+Both bundles point at the same skill manifest and use a small Python bridge
+(`plugins/biobank-agent/scripts/biobank_agent_bridge.py`) that exposes
+`status` and `test` subcommands. See
+[docs/guides/PLUGIN_INTEGRATION.md](../guides/PLUGIN_INTEGRATION.md) for usage.
 
-**Built-in Skills:**
-- `external_agent_status` — check Codex/Claude CLI availability
-- `codex_plan` — ask Codex for read-only planning
-- `codex_check_execution` — ask Codex to review execution
-- `claude_plan` — ask Claude Code for planning
-- `claude_check_execution` — ask Claude Code to review execution
+### MCP
 
-**Default Behavior:**
-- Codex is **default** review gate for eval loops
-- Claude Code is **opt-in** secondary reviewer
-- Both run in **read-only mode** by default (mocked in tests)
-
-**Setup (Claude Code):**
-```bash
-claude auth status
-claude auth login
-```
-
-**Verify Bridge from BioBank Agent:**
-```
-/external-agents
-/codex-plan Draft a guarded report workflow
-/codex-check Check report guardrails
-/claude-plan Draft a guarded report workflow
-/claude-check Check report guardrails
-```
+For richer cross-tool integration, use the MCP manager
+(`/mcp-list`, `/mcp-start`, `/mcp-health`, `/mcp-call`, `/mcp-stop`).
 
 ---
 
@@ -916,10 +885,6 @@ DONE
 ```python
 plan_repair_budget_per_step: int = 3
 plan_repair_budget_total: int = 8
-plan_external_council_enabled: bool = True
-plan_external_council_policy: str = "requested"  # requested | always | never
-plan_external_council_timeout_s: int = 180
-plan_external_council_agents: str = "codex,claude,gemini"
 plan_clarification_enabled: bool = True
 plan_clarification_policy: str = "critical_only"
 ```
@@ -1039,7 +1004,7 @@ plan_clarification_policy: str = "critical_only"
 - **HTTP/SSE MCP Transport**: Production server + cloud deployment
 - **RAP Path**: SparkSQL adapter for UK Biobank secure analytics platform
 - **Paper Replication**: 1091-disease MILTON AUC distribution verification
-- **Codex Bridge Hardening**: DAAO-inspired task routing refinement
+- **Task Routing Refinement**: DAAO-inspired difficulty-aware routing
 - **CLI Package Decomposition** (`cli_legacy.py` → modular `cli/` package)
 
 ---
@@ -1076,7 +1041,6 @@ UKB_agent/
 │   ├── plan_executor.py        # Plan step executor + reflexion
 │   ├── tool_learner.py         # Error pattern mining + skill generation
 │   ├── retrieval.py            # Agentic RAG (BM25, embedding)
-│   ├── external_agents.py      # Codex/Claude Code CLI bridges
 │   ├── reproducibility.py      # SHA-256 checkpoints, replay
 │   ├── world_model.py          # World state consistency checks
 │   ├── difficulty.py           # DAAO-inspired task routing
@@ -1130,7 +1094,6 @@ UKB_agent/
 │   │   ├── web_search.py       # DuckDuckGo/Brave/Serper
 │   │   ├── read_paper.py       # Full-text paper parsing
 │   │   ├── report.py           # Report generation
-│   │   ├── external_agents.py  # Codex/Claude CLI
 │   │   ├── create_skill.py     # Auto skill generation
 │   │   ├── record_macro.py     # Pipeline recording
 │   │   └── ... (58 total)
@@ -1198,10 +1161,10 @@ UKB_agent/
 │   └── related_works/        # Related paper citations
 │
 ├── plugins/                   # Repo-local plugin bundles
-│   ├── biobank-agent/        # Codex plugin
+│   ├── biobank-agent/        # Primary plugin bundle
 │   │   └── .codex-plugin/
 │   │       └── plugin.json
-│   └── biobank-agent-claude/ # Claude Code plugin
+│   └── biobank-agent-claude/ # Alternative plugin manifest layout
 │       └── .claude-plugin/
 │           └── plugin.json
 │
@@ -1209,7 +1172,7 @@ UKB_agent/
 │   └── plugins/
 │       └── marketplace.json
 │
-├── .claude-plugin/            # Claude Code plugin registry
+├── .claude-plugin/            # Alternative plugin registry layout
 │   └── marketplace.json
 │
 ├── .github/
@@ -1222,7 +1185,6 @@ UKB_agent/
 ├── reports/                   # Generated outputs (gitignored)
 │   ├── eval/                 # Evaluation artifacts
 │   ├── checkpoints/          # Plan checkpoints
-│   ├── external_agents/      # External review results
 │   └── [timestamps]/         # Session reports
 │
 ├── plans/                     # Agent plans (gitignored)

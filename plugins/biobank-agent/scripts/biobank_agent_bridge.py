@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small bridge script used by Codex/Claude plugins for Biobank Agent."""
+"""Small bridge script the Biobank Agent plugin uses to introspect the runtime."""
 
 from __future__ import annotations
 
@@ -51,16 +51,6 @@ def status_cmd(_args: argparse.Namespace) -> int:
     return 0
 
 
-def external_status_cmd(_args: argparse.Namespace) -> int:
-    _prepare_runtime_env()
-    root = _repo_root()
-    sys.path.insert(0, str(root))
-    from biobank_agent.external_agents import ExternalAgentRunner
-
-    _json(ExternalAgentRunner(workspace=root, timeout_s=30).status())
-    return 0
-
-
 def pytest_cmd(args: argparse.Namespace) -> int:
     root = _repo_root()
     command = [sys.executable, "-m", "pytest", *args.pytest_args]
@@ -76,9 +66,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_status = sub.add_parser("status", help="Show registered skill/runtime status")
     p_status.set_defaults(func=status_cmd)
-
-    p_external = sub.add_parser("external-status", help="Show local Codex/Claude availability")
-    p_external.set_defaults(func=external_status_cmd)
 
     p_test = sub.add_parser("test", help="Run pytest with optional args")
     p_test.add_argument("pytest_args", nargs=argparse.REMAINDER)

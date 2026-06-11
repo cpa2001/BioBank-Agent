@@ -1,18 +1,13 @@
 """In-process sub-agent forked from a parent ``AsyncAgent``.
 
-Replaces the legacy ``external_agents.py`` subprocess fork — which
-cold-starts a fresh codex/claude CLI for every consultation — with an
-in-process ``SubAgent`` that shares the parent's ``ToolRegistry``,
-``LongTermMemory``, ``LLMClient``, and active ``DataManager``.
+A ``SubAgent`` shares the parent's ``ToolRegistry``, ``LongTermMemory``,
+``LLMClient``, and active ``DataManager`` rather than spawning a separate
+process, so a delegated investigation or verifier pass can reuse the
+parent context without rebuilding state.
 
-Inspired by codex's ``codex-rs/core/src/codex_delegate.rs``:
-
-    parent.fork(LastNTurns) → child shares context up to N turns,
-                              forwards events back to parent bus.
-
-For M2 we keep the API minimal — ``mode``, ``last_n_turns``,
-``forward_events_to`` — so the M4 reflexion loop can spawn a
-"verifier" sub-agent without bringing the whole agent state along.
+The API is intentionally minimal — ``mode``, ``last_n_turns``,
+``forward_events_to`` — so the reflexion loop can spawn a "verifier"
+sub-agent without bringing the whole agent state along.
 """
 
 from __future__ import annotations

@@ -63,5 +63,4 @@ def test_plugin_bridge_status_command_runs():
     payload = json.loads(proc.stdout)
     assert payload["skills_registered"] >= 40
     assert "prevalence" in payload["skills"]
-    assert "external_agent_status" in payload["skills"]
     assert "Matplotlib" not in proc.stderr

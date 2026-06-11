@@ -29,7 +29,3 @@ python "${CLAUDE_PLUGIN_ROOT}/../biobank-agent/scripts/biobank_agent_bridge.py" 
 - For target interpretation, include `target_annotation_context` and
   `target_enrichment` only when they support a biobank GWAS, burden, or target
   list. Treat external annotation/enrichment as context, not rank evidence.
-- If the request involves Codex or Claude Code delegation, include the
-  `external_agent_status`, `codex_plan`, `claude_plan`,
-  `codex_check_execution`, and `claude_check_execution` Biobank Agent skills
-  as candidate execution steps.

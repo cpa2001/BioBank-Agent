@@ -1,8 +1,7 @@
 """Deterministic report-review support for evaluation benchmarks.
 
 The helpers in this module are intentionally offline and side-effect free. They
-provide a structured mentor/reviewer/engineer review layer that can run before
-optional Codex or Claude subprocess reviewers in :class:`EvalHarness`.
+provide a structured mentor/reviewer/engineer review layer for :class:`EvalHarness`.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_PRIMARY_REVIEWER = "codex-gpt-5.5-xhigh"
+DEFAULT_PRIMARY_REVIEWER = "report_review_primary"
 
 
 @dataclass(frozen=True)
@@ -37,40 +36,27 @@ class RoleVerdict:
 
 
 def reviewer_specs(primary_reviewer: str = DEFAULT_PRIMARY_REVIEWER, include_claude: bool = False) -> list[dict[str, Any]]:
-    """Return external reviewer specs with explicit model/role metadata."""
+    """Return reviewer specs with explicit role metadata.
+
+    ``include_claude`` is retained for callsite compatibility and adds an
+    optional secondary reviewer slot.
+    """
 
     primary = (primary_reviewer or DEFAULT_PRIMARY_REVIEWER).strip().lower()
-    if primary in {"claude", "claude-code", "claude_code"}:
-        specs: list[dict[str, Any]] = [
-            {
-                "reviewer": "claude",
-                "skill": "claude_check_execution",
-                "role": "secondary_reviewer",
-                "provider": "anthropic",
-                "optional": False,
-            }
-        ]
-    else:
-        label = DEFAULT_PRIMARY_REVIEWER if primary in {"codex", "gpt-5.5", "gpt-5.5-xhigh"} else primary
-        specs = [
-            {
-                "reviewer": label,
-                "skill": "codex_check_execution",
-                "role": "primary_engineer_reviewer",
-                "provider": "openai",
-                "model_family": "gpt-5.5",
-                "reasoning_effort": "xhigh",
-                "optional": False,
-            }
-        ]
-
-    if include_claude and not any(spec["skill"] == "claude_check_execution" for spec in specs):
+    specs: list[dict[str, Any]] = [
+        {
+            "reviewer": primary or DEFAULT_PRIMARY_REVIEWER,
+            "skill": "report_review_primary",
+            "role": "primary_engineer_reviewer",
+            "optional": False,
+        }
+    ]
+    if include_claude:
         specs.append(
             {
-                "reviewer": "claude",
-                "skill": "claude_check_execution",
+                "reviewer": "report_review_secondary",
+                "skill": "report_review_secondary",
                 "role": "optional_secondary_reviewer",
-                "provider": "anthropic",
                 "optional": True,
             }
         )

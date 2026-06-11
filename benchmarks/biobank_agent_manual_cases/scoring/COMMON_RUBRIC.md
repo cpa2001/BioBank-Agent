@@ -7,7 +7,7 @@ Use this for every case unless the case-specific file overrides weights.
 - 5: Prompt accepted without brittle formatting requirements.
 - 5: Plan is understandable, ordered, and not filled with generic `think` steps.
 - 5: Plan uses real skill names and schema-valid args.
-- 5: If external agents are available, planning council/debate is surfaced and merged rather than blindly copied.
+- 5: When available, the built-in planning council/debate is surfaced and merged rather than blindly copied.
 
 ## B. Execution Reliability - 20 pts
 
@@ -28,7 +28,7 @@ Use this for every case unless the case-specific file overrides weights.
 - 5: Uses data discovery tools before analysis.
 - 5: Uses modelling/visualization/guardrail tools when relevant.
 - 5: Repairs missing prerequisites or creates reusable custom skills when justified.
-- 5: Uses memory/project docs/external planning where they materially improve the workflow.
+- 5: Uses memory/project docs where they materially improve the workflow.
 
 ## E. Report Quality - 20 pts
 

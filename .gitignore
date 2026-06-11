@@ -103,3 +103,10 @@ PHASE_*.md
 PHASE_*.txt
 README_AUDIT*.md
 IMPLEMENTATION_*.md
+
+# Local agent-development helper files (kept locally for IDE-side agent use only)
+AGENTS.md
+CLAUDE.md
+docs/biobank_agent_2_codex_absorption.md
+docs/codex_feature_parity_matrix.md
+docs/biobank_agent_2_product_spec.md

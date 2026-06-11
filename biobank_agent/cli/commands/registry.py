@@ -20,7 +20,6 @@ BUILTIN_COMMAND_MODULES = (
     "runtime",
     "plan",
     "research",
-    "external",
     "mcp",
     "reproducibility",
     "memory",

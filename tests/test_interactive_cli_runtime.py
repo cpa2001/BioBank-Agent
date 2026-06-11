@@ -153,32 +153,6 @@ class _FakeProgressTool(_FakeTool):
         return {"ok": True, "source": "demo.tsv"}
 
 
-class _FakeExternalAgentTool:
-    def __init__(self, name: str = "external_agent_status") -> None:
-        self._name = name
-
-    @property
-    def name(self):
-        return self._name
-
-    def spec(self):
-        from biobank_agent.core.tools.protocol import ToolSpec
-
-        return ToolSpec(name=self._name, description="external agent demo", parameters={})
-
-    def required_capabilities(self):
-        from biobank_agent.core.tools.protocol import Capability
-
-        return frozenset({Capability.CALL_REVIEWER})
-
-    @property
-    def is_mutating(self):
-        return False
-
-    async def handle(self, ctx):
-        return {"received": dict(ctx.args), "tool": ctx.name}
-
-
 class _FakeMcpTool:
     def __init__(self, name: str = "mcp_demo__echo") -> None:
         self._name = name
@@ -420,31 +394,6 @@ def test_mcp_call_routes_through_runtime_tool_execution(tmp_path):
     assert any(event["type"] == "tool_call_requested" for event in shell.session.events)
     assert any(event["type"] == "tool_call_completed" for event in shell.session.events)
     assert any(ref.node_type == "tool" and ref.node_id.startswith("mcp:") for ref in shell.session.action_graph_refs)
-
-
-def test_external_agent_slash_commands_route_through_runtime_tools(tmp_path):
-    shell, _output = _shell(tmp_path)
-    shell.runtime.tool_registry.register(_FakeExternalAgentTool("external_agent_status"))
-    shell.runtime.tool_registry.register(_FakeExternalAgentTool("codex_check_execution"))
-
-    status_events = shell.handle_line("/external-agents codex")
-    review_events = shell.handle_line("/codex-check report quality")
-
-    assert any(event.type == AgentEventType.TOOL_CALL_REQUESTED for event in status_events)
-    assert any(event.type == AgentEventType.TOOL_CALL_COMPLETED for event in review_events)
-    assert any(ref.node_type == "tool" and ref.node_id.startswith("external:external_agent_status:") for ref in shell.session.action_graph_refs)
-    assert any(ref.node_type == "tool" and ref.node_id.startswith("external:codex_check_execution:") for ref in shell.session.action_graph_refs)
-    assert shell.session.state.custom_data["external_agent_requests"] == [
-        {"skill": "external_agent_status", "args": {"agent": "codex"}},
-        {"skill": "codex_check_execution", "args": {"focus": "report quality"}},
-    ]
-    finished = [
-        event for event in review_events
-        if event.type == AgentEventType.COMMAND_FINISHED and event.payload.get("command") == "/codex-check"
-    ]
-    assert finished
-    assert finished[-1].payload["result"]["status"] == "done"
-    assert finished[-1].payload["result"]["result"]["received"]["focus"] == "report quality"
 
 
 def test_permissions_command_rebinds_runtime_policy(tmp_path):

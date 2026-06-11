@@ -40,10 +40,6 @@ AVAILABLE_SKILLS = [
     "safety_check",
     "world_model_audit",
     "generate_report",
-    "codex_plan",
-    "claude_plan",
-    "codex_check_execution",
-    "claude_check_execution",
     "think",
     "critical_thinking",
 ]

@@ -173,7 +173,7 @@ def review_methodology(payload: Any, *, text: str = "", n_test_threshold: int = 
                       "effect alleles and handle palindromic SNPs before coloc/MR.",
         })
 
-    # 7) 里程碑4 study-design & reporting guardrails (conservative; advisory unless structural).
+    # 7) Study-design & reporting guardrails (conservative; advisory unless structural).
     for _check in (_causal_overreach, _phenotype_encoding, _missingness_selection, _uncontrolled_confounding):
         extra = _check(lower)
         if extra:
@@ -188,7 +188,7 @@ def methodology_blocks(flags: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [f for f in (flags or []) if f.get("severity") == "block"]
 
 
-# ── 里程碑4 study-design & reporting guardrails ──────────────────────────────
+# ── Study-design & reporting guardrails ──────────────────────────────
 # Text-driven and deliberately conservative: each fires only on an explicit, unhedged
 # signal so a correct narrative does not trip it. All advisory except covariate leakage
 # (a structural error). Surfaced by the completion gate alongside the statistical sins.
@@ -262,7 +262,7 @@ def _covariate_leakage(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     # Only unambiguous dependent-variable keys, so a block never fires on a payload that
-    # merely carries a 'trait'/'label' as metadata (Codex 里程碑4 review).
+    # merely carries a 'trait'/'label' as metadata.
     outcome = ""
     for key in ("outcome", "phenotype", "target", "dependent_variable"):
         value = payload.get(key)

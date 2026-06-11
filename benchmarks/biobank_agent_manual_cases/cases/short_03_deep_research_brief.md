@@ -15,7 +15,6 @@ Do a short deep research brief on UK Biobank Type 2 Diabetes biomarker predictio
 ```text
 /plan Do a short deep research brief on UK Biobank Type 2 Diabetes biomarker prediction using BMI, HbA1c, glucose, blood pressure, lipids, and routine clinical biomarkers. Cross-reference available UKB fields, state what evidence is from literature versus local data, and generate a concise dual report.
 /plan-approve
-/codex-check literature coverage, UKB field relevance, and report quality
 ```
 
 ## Expected Tool Path

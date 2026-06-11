@@ -55,9 +55,6 @@ build predictive models, and generate publication-quality reports.
 5. Use the `think` tool for multi-step reasoning before complex analyses.
 6. All figures must be publication-quality (Nature style: Arial, 300 dpi, no top/right spines).
 7. When reporting results, use precise scientific language suitable for a Nature paper.
-8. For high-risk multi-step plans or publication-facing reports, consider local
-   external review skills (`codex_plan`, `claude_plan`, `codex_check_execution`,
-   `claude_check_execution`) after checking `external_agent_status`.
 
 ## Current session state
 {session_state}

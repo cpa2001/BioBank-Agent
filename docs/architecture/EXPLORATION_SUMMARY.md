@@ -75,12 +75,11 @@
 
 | Category | Commands |
 |----------|----------|
-| Help | `/help`, `/skills`, `/models-available`, `/external-agents` |
+| Help | `/help`, `/skills`, `/models-available` |
 | Analysis | `/plan`, `/think`, `/model`, `/compact` |
 | Session | `/clear`, `/cost`, `/status`, `/history` |
 | Output | `/export`, `/figures`, `/cohorts`, `/models` |
 | Pipelines | `/record`, `/pipelines`, `/replay`, `/memory`, `/errors` |
-| Review | `/codex-plan`, `/codex-check`, `/claude-plan`, `/claude-check` |
 | MCP | `/mcp-list`, `/mcp-start`, `/mcp-health`, `/mcp-call`, `/mcp-stop` |
 
 ### 2. Skill Categories (64 Total)

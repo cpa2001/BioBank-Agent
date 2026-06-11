@@ -15,7 +15,6 @@ Build a longitudinal HealthFormer-style trajectory forecast over time for UKB di
 ```text
 /plan Build a longitudinal HealthFormer-style trajectory forecast over time for UKB diabetes progression. Use UKB only, choose feasible endpoint and fields, search repeated BMI/HbA1c/glucose/blood pressure measurements, tokenize trajectory data if available, audit whether any forecast claim is supported, fall back to a tabular prediction model if trajectory rows are insufficient, and finish with a technical plus Nature-style dual report.
 /plan-approve
-/codex-check trajectory feasibility, fallback model branch, unsupported forecast claims, and report quality
 ```
 
 ## Ground Truth

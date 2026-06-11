@@ -1,7 +1,7 @@
 """A/B harness: keep the adversarial council only if it beats the symmetric one.
 
 Runs a fixed objective set through two planning modes, scores each result with an injected
-scorer, and tallies wins. This is the roadmap's empirical gate for M16 — the adversarial mode
+scorer, and tallies wins. This is the empirical gate for the alternative planning pipeline — it
 stays behind its flag until it wins here. Pure over injected run/score functions, so it runs
 offline in tests and against real models alike (e.g. scoring with runtime/run_eval.py).
 """

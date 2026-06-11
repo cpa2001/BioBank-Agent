@@ -24,15 +24,9 @@ python -m biobank_agent.cli
 /plan-approve
 ```
 
-`/status`、`/skills`、`/plans`、`/routing-status` 只是诊断命令，不是主流程必需步骤。`/plan` 会自动显示计划阶段进度、Codex/Claude planning council（如果启用且可用）、merge、validation 和 review 状态。
+`/status`、`/skills`、`/plans`、`/routing-status` 只是诊断命令，不是主流程必需步骤。`/plan` 会自动显示计划阶段进度、merge、validation 和 review 状态。
 
-如果执行完成后 CLI 弹出 review hook 选项，推荐选择：
-
-```text
-A
-```
-
-含义是让 Codex + Claude 对最终执行和报告做可选审核；也可以选择跳过。
+如果执行完成后 CLI 弹出 review hook 选项，按提示处理；通常选 `N` 跳过即可。
 
 ## 目录结构
 
@@ -99,11 +93,10 @@ report_nature.html
 
 ## 可选：用 live-test runner 批量跑
 
-如果要把这些人工 case 交给 pseudo-terminal runner 做并发长测，可以用：
+如果要把这些人工 case 交给 pseudo-terminal runner 做并发长测，可以用本地脚本：
 
 ```bash
-python /Users/chenpengan/.codex/skills/biobank-agent-live-test/scripts/run_live_test.py \
-  --repo /Users/chenpengan/Projects/CUHK/UKB_agent \
+python scripts/run_live_test.py \
   --workers 4 \
   --timeout-min 90 \
   --prompt-file benchmarks/biobank_agent_manual_cases/prompts/live_runner_prompts.txt \

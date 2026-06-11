@@ -16,7 +16,7 @@ def test_project_doc_lists_curated_markdown():
 
 
 def test_project_doc_searches_document_content():
-    result = project_doc(mode="search", query="external agents", limit=5)
+    result = project_doc(mode="search", query="plugin integration", limit=5)
 
     assert result["status"] == "success"
     assert result["results"]

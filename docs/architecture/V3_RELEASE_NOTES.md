@@ -154,6 +154,3 @@ biobank eval --suite v3_completion --run-dir <latest>                  # BLOCKED
 ## Provenance
 
 - Tree SHA (rc1): captured at `git tag -a v3.0-rc1 ...` time.
-- Plan file: `/Users/chenpengan/.claude/plans/biobank-agent-biobank-agent-ukb-hpp-ckb-clever-robin.md`
-  §0.5 v3 Closeout Roadmap.
-- Round-by-round Codex consultation: §0.5 Decision Process.

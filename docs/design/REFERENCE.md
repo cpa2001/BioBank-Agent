@@ -105,13 +105,13 @@ DEBATE_ROUNDS=2
 | Plan execution log | `/plan` steps execute through the agent recorder and are visible to generated report appendices |
 | `report_20_case` | 20 UKB-oriented synthetic aggregate cases for fast report regression |
 | `live_ukb_report_20` | 20 live UKB probes; fails closed when real UKB data access is unavailable |
-| Review loop | Codex/GPT-5.5 xhigh is the default reviewer; Claude Code is optional via `--include-claude` |
+| Review loop | A deterministic primary reviewer runs by default; a secondary reviewer is optional via `--include-claude` |
 
 ---
 
 ## 8. Selected Skills Inventory
 
-The current registry discovers 108 skills. This section lists representative
+The current registry discovers 100 skills. This section lists representative
 skills by workflow area rather than the full registry.
 
 ### Cohort, Data, and Descriptive Analysis
@@ -135,10 +135,6 @@ generate_report, statistical_review, safety_check, hypothesis, world_model_audit
 think, create_skill, suggest_error_fix, track_error, list_errors,
 recall_session, record_macro, replay_pipeline, list_pipelines,
 analyze_workflow_patterns, suggest_optimal_pipeline
-
-### External Review and Release
-external_agent_status, codex_plan, claude_plan, codex_check_execution,
-claude_check_execution, git_clean_push
 
 ---
 

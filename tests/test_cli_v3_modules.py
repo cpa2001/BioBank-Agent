@@ -53,11 +53,6 @@ def test_cli_package_exposes_importable_command_modules():
         "/plan-use",
         "/plan-option",
         "/tools",
-        "/external-agents",
-        "/codex-plan",
-        "/codex-check",
-        "/claude-plan",
-        "/claude-check",
         "/mcp-list",
         "/mcp-start",
         "/mcp-health",
@@ -78,11 +73,11 @@ def test_cli_package_exposes_importable_command_modules():
 
 
 def test_command_registry_discovers_split_builtin_modules():
-    from biobank_agent.cli.commands import external, mcp, memory, plan, reproducibility, research, runtime, session
+    from biobank_agent.cli.commands import mcp, memory, plan, reproducibility, research, runtime, session
     from biobank_agent.cli.commands.registry import BUILTIN_COMMAND_MODULES, iter_registered_commands
 
-    assert BUILTIN_COMMAND_MODULES == ("session", "runtime", "plan", "research", "external", "mcp", "reproducibility", "memory")
-    modules = [session, runtime, plan, research, external, mcp, reproducibility, memory]
+    assert BUILTIN_COMMAND_MODULES == ("session", "runtime", "plan", "research", "mcp", "reproducibility", "memory")
+    modules = [session, runtime, plan, research, mcp, reproducibility, memory]
     expected = {command.name for module in modules for command in module.commands()}
     discovered = {command.name for command in iter_registered_commands()}
 
@@ -894,7 +889,7 @@ def test_mcp_call_command_executes_loaded_tool_and_records_result(tmp_path):
     assert state.records[-1]["result"] == {"echo": "ok", "tool": "mcp_demo__echo"}
 
 
-def test_external_planning_council_runs_only_when_requested_by_default():
+def test_external_planning_council_is_always_disabled():
     import biobank_agent.cli as cli
 
     settings = type(
@@ -902,12 +897,9 @@ def test_external_planning_council_runs_only_when_requested_by_default():
         (),
         {
             "plan_external_council_enabled": True,
-            "plan_external_council_policy": "requested",
+            "plan_external_council_policy": "always",
         },
     )()
 
     assert cli._should_run_external_planning_council(settings, "run a short E11 report") is False
-    assert cli._should_run_external_planning_council(settings, "ask Codex and Claude for plans") is True
-
-    settings.plan_external_council_policy = "always"
-    assert cli._should_run_external_planning_council(settings, "run a short E11 report") is True
+    assert cli._should_run_external_planning_council(settings, "any goal whatsoever") is False

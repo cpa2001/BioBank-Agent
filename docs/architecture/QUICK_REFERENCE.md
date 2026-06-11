@@ -121,7 +121,6 @@ biobank                      # Start interactive CLI
 /plan "Research CVD"        # Enter plan mode
 /cost                        # Token usage
 /memory                      # 8-tier memory summary
-/codex-plan "Review this"    # Ask Codex
 /mcp-list                    # Show MCP servers
 ```
 

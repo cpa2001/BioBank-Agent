@@ -167,7 +167,7 @@ class EvalHarness:
         enforce_gate: bool = False,
         baseline_observability: Optional[dict[str, float]] = None,
         review_loop: bool = False,
-        primary_reviewer: str = "codex-gpt-5.5-xhigh",
+        primary_reviewer: str = "report_review_primary",
         include_claude: bool = False,
         review_timeout_s: int = 600,
     ) -> BenchmarkResult:
@@ -221,7 +221,7 @@ class EvalHarness:
         result: BenchmarkResult,
         benchmark: Benchmark,
         agent: Agent,
-        primary_reviewer: str = "codex-gpt-5.5-xhigh",
+        primary_reviewer: str = "report_review_primary",
         include_claude: bool = False,
         review_timeout_s: int = 600,
     ) -> dict[str, Any]:

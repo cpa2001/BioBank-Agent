@@ -290,7 +290,7 @@ def test_legacy_execution_handler_uses_inferred_capabilities(tmp_path):
     )
     review = _LegacyExecutionHandler(
         legacy=legacy,
-        skill_name="codex_plan",
+        skill_name="web_search",
         report_dir=tmp_path,
         allow_retry=True,
     )
@@ -300,10 +300,7 @@ def test_legacy_execution_handler_uses_inferred_capabilities(tmp_path):
         Capability.WRITE_REPORTS,
         Capability.EXPORT_AGGREGATE,
     })
-    assert review.required_capabilities() == frozenset({
-        Capability.CALL_REVIEWER,
-        Capability.NETWORK,
-    })
+    assert review.required_capabilities() == frozenset({Capability.NETWORK})
     assert Capability.EXPORT_PII not in train.required_capabilities()
     assert Capability.SHELL_EXEC not in review.required_capabilities()
 

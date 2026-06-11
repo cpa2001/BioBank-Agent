@@ -137,7 +137,7 @@ All 18 exploration points have been analyzed:
 | 13 | Verification layer | ✅ Complete | ANALYSIS (§11), SUMMARY (Verification) |
 | 14 | Memory system | ✅ Complete | ANALYSIS (§12), SUMMARY (Memory System) |
 | 15 | Plan mode | ✅ Complete | ANALYSIS (§13) |
-| 16 | External agents | ✅ Complete | ANALYSIS (§10), SUMMARY (External Review) |
+| 16 | Plugin bundles | ✅ Complete | ANALYSIS (§10), SUMMARY (Plugins) |
 | 17 | Bank adapters | ✅ Complete | ANALYSIS (§7), SUMMARY (Bank Extensibility) |
 | 18 | Repository structure | ✅ Complete | ANALYSIS (§18) |
 
@@ -282,7 +282,7 @@ docs/architecture/
 │       ├── 12. Memory System (8 tiers)
 │       ├── 13. Plan Mode
 │       ├── 14. Version History
-│       ├── 15. External Agents
+│       ├── 15. Plugin Bundles
 │       ├── 16. Known Limitations
 │       ├── 17. Repository Structure
 │       └── 18. Portability & Extensibility Summary

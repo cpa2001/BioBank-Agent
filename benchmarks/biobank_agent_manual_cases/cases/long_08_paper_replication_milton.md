@@ -15,8 +15,6 @@ Reproduce the closest feasible UKB-only slice of the MILTON-style disease predic
 ```text
 /plan Reproduce the closest feasible UKB-only slice of the MILTON-style disease prediction paper with DOI 10.1038/s41588-024-01898-1. If the exact paper features are unavailable, choose a defensible E11 Type 2 Diabetes biomarker prediction approximation. Read or fetch the paper when possible, do related deep research, map paper methods to local UKB fields, train an auto-selected model, evaluate calibration and feature importance, compare what is and is not replicated, and produce a technical plus Nature-style dual report.
 /plan-approve
-/codex-check paper-method mapping, approximation validity, model diagnostics, and report quality
-/claude-check replication gaps and unsupported claims
 ```
 
 ## Expected Tool Path

@@ -21,12 +21,12 @@ This case intentionally uses only the broad question a human researcher would no
 
 Notes:
 
-- `/plan` should show live phases: clarification, three-step Research Setup, Biobank plan, Codex/Claude/Gemini planning council when selected and available, merge, validation, and review.
-- Research Setup should ask one question per step: active data source, external planning council, then analysis strategy. It should confirm UKB as the active dataset, show HPP/CKB/RAP as future ports, and let the user accept or select available external planners.
+- `/plan` should show live phases: clarification, two-step Research Setup, Biobank plan, merge, validation, and review.
+- Research Setup should ask one question per step: active data source, then analysis strategy. It should confirm UKB as the active dataset and show HPP/CKB/RAP as future ports.
 - The user should not need to type the detailed pipeline. The agent should infer documentation/data inventory inspection, field discovery, literature review, E11 cohort design, trajectory feasibility, model training/evaluation, guardrails, and dual-report generation.
 - If the agent asks clarification questions, answer them naturally or accept the recommended default.
 - If execution stalls, use the displayed choices (`/plan-option A`, `/plan-option B`, `/plan-resume`, `/plan-exit`) instead of guessing.
-- After completion, choose review hook `A` if prompted to run the full Codex + Claude + Gemini review council. `/status`, `/plans`, `/routing-status`, `/codex-check`, `/claude-check`, and `/gemini-check` remain optional diagnostics.
+- After completion, follow the review-hook prompt if one appears. `/status`, `/plans`, and `/routing-status` remain optional diagnostics.
 
 ## Expected High-Coverage Tool Path
 
@@ -36,7 +36,6 @@ The exact plan can vary, but a strong run should include most of:
 - `ukb_data_inventory`
 - `ukb_field_resolve`
 - optional `ukb_materialize_fields` for selected raw-only fields when it genuinely improves the analysis and will not block the demo.
-- `external_agent_status`, `codex_plan`, `claude_plan`, `gemini_plan` when available
 - `deep_research`
 - `field_search`
 - `cohort_summary`
@@ -57,7 +56,7 @@ The exact plan can vary, but a strong run should include most of:
 ## Showcase Scoring - 100 pts
 
 - 10: Starts from the short human prompt and opens a Research Setup confirmation instead of requiring a pasted plan.
-- 10: Starts with project/schema awareness and external planning when selected and available.
+- 10: Starts with project/schema awareness.
 - 10: Produces a merged plan that is long-horizon but executable.
 - 10: Literature review and UKB field discovery are both meaningful.
 - 10: Cohort design is explicit and auditable.
@@ -70,7 +69,7 @@ The exact plan can vary, but a strong run should include most of:
 ## What "Impressive" Looks Like
 
 - The user typed only the broad research question; the saved plan still contains the full scientific trajectory.
-- Research Setup is split into data scope, external planning council, and analysis strategy steps; each step asks one question and supports Enter for the default.
+- Research Setup is split into data scope and analysis strategy steps; each step asks one question and supports Enter for the default.
 - The saved plan has a planning council appendix and a merged executable plan.
 - The technical report states the UKB data inventory: 502K-scale subject coverage, Milton parquet availability, full raw CSV availability, and which important fields were materialized or deferred.
 - The report opens with clear executive findings, not a raw log.

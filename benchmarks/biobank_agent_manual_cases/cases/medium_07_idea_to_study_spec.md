@@ -15,7 +15,6 @@ I have a vague research idea: maybe metabolic health, obesity, blood biomarkers,
 ```text
 /plan I have a vague research idea: maybe metabolic health, obesity, blood biomarkers, and diabetes progression in UKB are connected. Turn this into the safest feasible UKB-only study. You choose the endpoint, cohort design, fields, analysis path, and report structure. Push back on anything that cannot be supported by available data. Finish with a dual report that explains the chosen study design.
 /plan-approve
-/codex-check idea interpretation, endpoint choice, scientific validity, and report clarity
 ```
 
 ## Expected Tool Path

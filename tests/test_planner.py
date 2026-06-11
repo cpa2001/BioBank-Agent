@@ -239,9 +239,6 @@ class TestPlanModeStart:
 
         assert len(plan.steps) <= 14
         assert skills[:5] == ["deep_research", "field_search", "cohort_summary", "missing_data", "train_model"]
-        assert "external_agent_status" not in skills
-        assert "codex_check_execution" not in skills
-        assert "claude_check_execution" not in skills
         assert plan.steps[-1].skill == "generate_report"
         assert plan.steps[-1].args["format"] == "dual"
 

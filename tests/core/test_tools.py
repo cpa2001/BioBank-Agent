@@ -149,7 +149,7 @@ def test_default_profile_allows_read_data_only():
 
 def test_yolo_profile_allows_almost_everything():
     handler = _StubHandler(
-        "external_agents",
+        "web_fetch",
         frozenset({Capability.CALL_REVIEWER, Capability.NETWORK}),
     )
     policy = ApprovalPolicy(builtin_profile("yolo"))

@@ -60,7 +60,7 @@ class RunDetailPanel(Static):  # type: ignore[misc]
         message = str(event.payload.get("message") or "")
         metadata = event.payload.get("metadata") if isinstance(event.payload.get("metadata"), dict) else {}
 
-        if phase.lower() == "external council" or actor.lower() in {"codex", "claude", "claude_code", "claude-code"}:
+        if phase.lower() == "external council":
             self.external_status[actor] = f"{status}: {message}".strip(": ")
         if phase.lower() in {"repair", "validation"}:
             if metadata.get("pause_reason"):
