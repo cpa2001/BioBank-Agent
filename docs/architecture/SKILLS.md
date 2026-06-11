@@ -62,9 +62,9 @@ def autodiscover_skills(package_path: str = "biobank_agent.skills") -> None:
 3. Registers built-in skill schemas lazily from literal `@skill(...)` decorators when possible
 4. Falls back to eager import for ad-hoc or non-literal skill modules
 5. Loads the callable implementation on first execution
-6. **105 skills** are currently discoverable from the built-in skill registry
+6. **107 skills** are currently discoverable from the built-in skill registry
 
-**Current Skills:** 105 total, including data analysis, modelling, WGS/VCF,
+**Current Skills:** 107 total, including data analysis, modelling, WGS/VCF,
 genetic target interpretation, literature, reporting, guardrail, memory,
 project documentation, external review, and self-evolution tools.
 

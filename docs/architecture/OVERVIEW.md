@@ -22,7 +22,7 @@
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │ 1. Build system message (inject memory, cohort context)         │   │
-│  │ 2. Call LLM with tool schemas (105 registered skills)           │   │
+│  │ 2. Call LLM with tool schemas (107 registered skills)           │   │
 │  │ 3. Execute tool calls via SkillRegistry                         │   │
 │  │ 4. Record results → AnalysisRecord                              │   │
 │  │ 5. Loop until final text response (max 30 rounds)               │   │

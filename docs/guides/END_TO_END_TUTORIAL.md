@@ -131,7 +131,7 @@ biobank > /skills
 Success criteria:
 
 - `/doctor` reports provider configuration and local path readiness without exposing secrets.
-- `/tools` and `/skills` are aliases: both print one **Available Tools** table by category — currently ~116 entries (105 analysis skills plus the native runtime tools).
+- `/tools` and `/skills` are aliases: both print one **Available Tools** table by category — currently ~125 entries (107 analysis skills plus the native runtime tools).
 - WGS readiness reports whether VCF files, indexes, and standard external tools are available.
 
 ## 5. Explore the Local WGS Inputs

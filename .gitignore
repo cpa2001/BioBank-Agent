@@ -75,6 +75,9 @@ plugins/*
 *.pkl
 *.joblib
 
+# ML training artifacts
+catboost_info/
+
 # Logs
 *.log
 

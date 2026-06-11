@@ -83,7 +83,7 @@ biobank > /skills
 Interpretation:
 
 - `/doctor` checks provider config, data directories, report/memory paths, permission mode, tool readiness, and WGS dependency status.
-- `/tools` and `/skills` are aliases: both print one **Available Tools** table grouped by category — currently ~116 entries (105 analysis skills plus the native runtime tools) — followed by a WGS readiness summary.
+- `/tools` and `/skills` are aliases: both print one **Available Tools** table grouped by category — currently ~125 entries (107 analysis skills plus the native runtime tools) — followed by a WGS readiness summary.
 
 ## 5. Run a First Natural-Language Turn
 
@@ -135,7 +135,7 @@ Use `/audit` after any meaningful run to inspect the recorded trajectory, tools,
 | `/help` | Show registered slash commands. |
 | `/status` | Show session, platform, memory, and token state. |
 | `/doctor` | Run read-only readiness diagnostics. |
-| `/tools` / `/skills` | List all registered tools by category (≈116: 105 analysis skills + native tools), with WGS readiness. Aliases — same output. |
+| `/tools` / `/skills` | List all registered tools by category (≈125: 107 analysis skills + native tools), with WGS readiness. Aliases — same output. |
 | `/plan <task>` | Draft a structured plan. |
 | `/plan-approve` | Execute the active plan. |
 | `/plan-edit <feedback>` | Modify the active plan. |

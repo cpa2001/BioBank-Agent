@@ -84,6 +84,6 @@ functionality intact, but a regression is not a release blocker.
 - The single interactive `biobank` REPL is the only interaction mode. The former
   `--tui` (Textual) and `--legacy-repl` modes were removed during consolidation;
   `biobank [<task>]` always launches the REPL (seeding `<task>` as the first turn).
-- Slash command surface ships with 71 built-in commands under
+- Slash command surface ships with 75 built-in commands under
   `biobank_agent/cli/commands/`. Third-party command modules can be loaded
   through `BIOBANK_CLI_COMMAND_MODULES` (see `docs/guides/CLI_COMMAND_PLUGINS.md`).
