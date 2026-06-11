@@ -357,7 +357,46 @@ class RuntimePlanner:
                 plan.open_questions.append(question)
         self._validate_plan(plan)
         ctx.emit_event("Validation", status="success", message=f"{len(plan.steps)} steps validated")
+        plan = self._maybe_external_review(ctx, plan, clean_objective, refinement)
         ctx.emit_event("Review", status="success", message="plan ready for review")
+        return plan
+
+    def _maybe_external_review(self, ctx, plan, objective, refinement=""):
+        """When the external-agent council is enabled and policy permits, consult external coding-agent
+        CLIs to critique the drafted plan and fold their notes into ``open_questions``. Advisory only;
+        degrade-safe — any failure is logged at debug and skipped, never blocking the plan."""
+        cfg = self.config
+        if cfg is None or not getattr(cfg, "external_council_enabled", False):
+            return plan
+        try:
+            from biobank_agent.runtime.external_council import collect_plan_reviews, review_requested
+
+            steps = []
+            for s in (getattr(plan, "steps", []) or []):
+                title = (getattr(s, "title", "") or "").strip()
+                purpose = (getattr(s, "purpose", "") or "").strip()
+                text = f"{title} — {purpose}" if (title and purpose) else (title or purpose)
+                if text:
+                    steps.append(text)
+            notes = collect_plan_reviews(
+                objective,
+                steps,
+                agents=getattr(cfg, "external_council_agents", ""),
+                policy=getattr(cfg, "external_council_policy", "requested"),
+                requested=review_requested(objective, refinement),
+                timeout_s=getattr(cfg, "external_council_timeout_s", 180),
+            )
+            for note in notes:
+                question = f"External review {note}"
+                if question not in plan.open_questions:
+                    plan.open_questions.append(question)
+            if notes:
+                ctx.emit_event(
+                    "Review", status="success",
+                    message=f"external review: {len(notes)} agent response(s) folded in",
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("external review skipped: %s", exc)
         return plan
 
     def _inspection_plan(

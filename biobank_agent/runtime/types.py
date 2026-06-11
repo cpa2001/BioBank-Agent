@@ -84,6 +84,13 @@ class RuntimeConfig:
     # Hard-block goal acceptance on consensus methodology sins in the evidence.
     # Default off (advisory-grade heuristics); enabling makes the completion gate enforce.
     methodology_gate_enabled: bool = False
+    # External coding-agent plan-review council: consult codex/claude/gemini CLIs to critique a
+    # drafted plan, folding their notes into open_questions (advisory, never blocking). Default off;
+    # policy "requested" runs only when the user asks for a second opinion, "always" on every plan.
+    external_council_enabled: bool = False
+    external_council_agents: str = "codex,claude,gemini"
+    external_council_policy: str = "requested"  # requested | always | never
+    external_council_timeout_s: int = 180
     schema_version: int = SCHEMA_VERSION
 
     @classmethod
@@ -108,6 +115,10 @@ class RuntimeConfig:
             debate_confidence_floor=float(getattr(settings, "plan_debate_confidence_floor", cls.debate_confidence_floor)),
             adversarial_council_enabled=bool(getattr(settings, "adversarial_council_enabled", cls.adversarial_council_enabled)),
             methodology_gate_enabled=bool(getattr(settings, "methodology_gate_enabled", cls.methodology_gate_enabled)),
+            external_council_enabled=bool(getattr(settings, "plan_external_council_enabled", cls.external_council_enabled)),
+            external_council_agents=str(getattr(settings, "plan_external_council_agents", cls.external_council_agents)),
+            external_council_policy=str(getattr(settings, "plan_external_council_policy", cls.external_council_policy)),
+            external_council_timeout_s=int(getattr(settings, "plan_external_council_timeout_s", cls.external_council_timeout_s)),
         )
 
     def model_for_role(self, role: ProviderRole | str) -> str:

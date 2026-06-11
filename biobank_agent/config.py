@@ -149,7 +149,7 @@ class Settings(BaseSettings):
     plan_repair_budget_total: int = 8
     plan_code_mutation_mode: str = "review_only"
     plan_goal_acceptance_enabled: bool = True
-    plan_external_council_enabled: bool = True
+    plan_external_council_enabled: bool = False  # opt-in: shells out to external coding-agent CLIs
     plan_external_council_policy: str = "requested"  # requested | always | never
     plan_external_council_timeout_s: int = 180
     plan_external_council_agents: str = "codex,claude,gemini"
