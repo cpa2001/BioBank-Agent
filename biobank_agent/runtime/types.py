@@ -77,6 +77,9 @@ class RuntimeConfig:
     debate_rounds: int = 2
     consensus_threshold: float = 0.85
     debate_confidence_floor: float = 0.45
+    # M16: route /plan through the asymmetric proposer/red-team/referee council instead of
+    # the symmetric debate. Default off; flipped on once it wins the council_ab A/B gate.
+    adversarial_council_enabled: bool = False
     schema_version: int = SCHEMA_VERSION
 
     @classmethod
@@ -99,6 +102,7 @@ class RuntimeConfig:
             debate_rounds=int(getattr(settings, "debate_rounds", cls.debate_rounds)),
             consensus_threshold=float(getattr(settings, "plan_consensus_threshold", cls.consensus_threshold)),
             debate_confidence_floor=float(getattr(settings, "plan_debate_confidence_floor", cls.debate_confidence_floor)),
+            adversarial_council_enabled=bool(getattr(settings, "adversarial_council_enabled", cls.adversarial_council_enabled)),
         )
 
     def model_for_role(self, role: ProviderRole | str) -> str:

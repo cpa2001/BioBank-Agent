@@ -29,6 +29,7 @@ from biobank_agent.runtime.council import (
     extract_json,
     run_parallel,
 )
+from biobank_agent.runtime.adversarial_council import adversarial_plan
 from biobank_agent.runtime.types import PlanState, PlanStatus, PlanStep, ProviderRole
 
 logger = logging.getLogger(__name__)
@@ -283,43 +284,48 @@ class RuntimePlanner:
         # (issue #5) instead of erroring — so "classify N traits and find each
         # class's characteristic genes" yields a workable plan. Otherwise re-raise.
         try:
-            # 2) Planning: parallel candidate drafts.
-            ctx.emit_event("Planning", status="running", message=f"drafting {self.num_candidates} candidate plans")
-            candidate_jobs = [
-                CouncilJob(
-                    role=_DRAFT_ROLES[i % len(_DRAFT_ROLES)],
-                    messages=self._candidate_messages(clean_objective, context, refinement, tools, _PERSONAS[i % len(_PERSONAS)]),
-                    label=f"candidate-{i + 1}",
-                    stage="Planning",
-                    metadata={
-                        "persona": i % len(_PERSONAS),
-                        "persona_tag": _PERSONA_TAGS[i % len(_PERSONA_TAGS)],
-                        "slot": i,
-                        "activity": "drafting",
-                    },
-                )
-                for i in range(self.num_candidates)
-            ]
-            candidate_results = run_parallel(ctx, candidate_jobs)
-            nodes = self._parse_candidates(candidate_results, candidate_jobs)
-            if not nodes:
-                ctx.emit_event("Planning", status="error", message="no candidate plan parsed")
-                raise CouncilError(
-                    "Council planning failed: no model produced a valid plan. "
-                    "Check the planner model/credentials, then retry /plan."
-                )
-            ctx.emit_event("Planning", status="success", message=f"{len(nodes)}/{self.num_candidates} candidate plan(s) parsed")
+            if self.config is not None and getattr(self.config, "adversarial_council_enabled", False):
+                # 2') Adversarial-game council (M16): proposer drafts, red-team attacks,
+                # referee adjudicates the load-bearing flaws into a revised plan.
+                merged = self._adversarial_plan_pipeline(ctx, clean_objective, context, refinement, tools)
+            else:
+                # 2) Planning: parallel candidate drafts.
+                ctx.emit_event("Planning", status="running", message=f"drafting {self.num_candidates} candidate plans")
+                candidate_jobs = [
+                    CouncilJob(
+                        role=_DRAFT_ROLES[i % len(_DRAFT_ROLES)],
+                        messages=self._candidate_messages(clean_objective, context, refinement, tools, _PERSONAS[i % len(_PERSONAS)]),
+                        label=f"candidate-{i + 1}",
+                        stage="Planning",
+                        metadata={
+                            "persona": i % len(_PERSONAS),
+                            "persona_tag": _PERSONA_TAGS[i % len(_PERSONA_TAGS)],
+                            "slot": i,
+                            "activity": "drafting",
+                        },
+                    )
+                    for i in range(self.num_candidates)
+                ]
+                candidate_results = run_parallel(ctx, candidate_jobs)
+                nodes = self._parse_candidates(candidate_results, candidate_jobs)
+                if not nodes:
+                    ctx.emit_event("Planning", status="error", message="no candidate plan parsed")
+                    raise CouncilError(
+                        "Council planning failed: no model produced a valid plan. "
+                        "Check the planner model/credentials, then retry /plan."
+                    )
+                ctx.emit_event("Planning", status="success", message=f"{len(nodes)}/{self.num_candidates} candidate plan(s) parsed")
 
-            # 3) External council: critique each candidate in parallel (scores nodes).
-            nodes = self._critique(ctx, clean_objective, nodes)
+                # 3) External council: critique each candidate in parallel (scores nodes).
+                nodes = self._critique(ctx, clean_objective, nodes)
 
-            # 3b) Debate: bounded multi-round cross-pollination with confidence-based
-            # consensus pruning (CONCAT/EVOCHAMBER). No-op unless >=2 distinct models.
-            nodes = self._debate(ctx, clean_objective, context, refinement, tools, nodes)
+                # 3b) Debate: bounded multi-round cross-pollination with confidence-based
+                # consensus pruning (CONCAT/EVOCHAMBER). No-op unless >=2 distinct models.
+                nodes = self._debate(ctx, clean_objective, context, refinement, tools, nodes)
 
-            # 4) Merge: orchestrator synthesizes from the debate winners (or uses the
-            # single best surviving candidate).
-            merged = self._merge(ctx, clean_objective, context, refinement, tools, nodes)
+                # 4) Merge: orchestrator synthesizes from the debate winners (or uses the
+                # single best surviving candidate).
+                merged = self._merge(ctx, clean_objective, context, refinement, tools, nodes)
 
             # 5) Validation: build + validate runtime-native PlanState.
             ctx.emit_event("Validation", status="running", message="validating merged plan schema")
@@ -1013,6 +1019,114 @@ class RuntimePlanner:
         )
         return [
             {"role": "system", "content": "You are a senior research lead merging plan proposals. Output ONLY valid JSON."},
+            {"role": "user", "content": user},
+        ]
+
+    # ------------------------------------------------------- adversarial council
+    def _adversarial_plan_pipeline(
+        self, ctx: CouncilContext, objective: str, context: str, refinement: str, tools: list[str]
+    ) -> dict[str, Any]:
+        """M16 adversarial-game planning: a proposer drafts a plan, a red-team attacks it, and a
+        referee folds the load-bearing flaws into a revised plan — each bound to a distinct council
+        model. Returns the final plan dict for ``_plan_state_from_json``; raises ``CouncilError``
+        (caught by ``build_plan``, which then degrades to a scaffold) if no plan ever parses."""
+        first_draft: dict[str, str] = {"text": ""}
+
+        # Each role goes through run_parallel (even for one job) so the as_completed
+        # timeout in council.py bounds a hung provider — run_one would not.
+        def proposer_fn(obj: str) -> str:
+            res = run_parallel(ctx, [CouncilJob(
+                role=ProviderRole.PLANNER,
+                messages=self._candidate_messages(obj, context, refinement, tools, _PERSONAS[0]),
+                label="adversarial-proposer", stage="Adversarial")])[0]
+            if not res.ok:
+                raise CouncilError(f"adversarial proposer produced no plan: {res.error or 'empty response'}")
+            first_draft["text"] = res.text
+            return res.text
+
+        def redteam_fn(obj: str, draft: str) -> list[dict[str, Any]]:
+            res = run_parallel(ctx, [CouncilJob(
+                role=ProviderRole.CRITIC, messages=self._redteam_messages(obj, draft),
+                label="adversarial-redteam", stage="Adversarial")])[0]
+            if not res.ok:
+                return []
+            try:
+                data = extract_json(res.text)
+            except ValueError:
+                return []
+            flaws = data.get("flaws") if isinstance(data, dict) else data
+            return [f for f in flaws if isinstance(f, dict)] if isinstance(flaws, list) else []
+
+        def referee_fn(obj: str, draft: str, flaws: list[dict[str, str]]) -> dict[str, Any]:
+            res = run_parallel(ctx, [CouncilJob(
+                role=ProviderRole.SUMMARIZER, messages=self._referee_messages(obj, draft, flaws),
+                label="adversarial-referee", stage="Adversarial")])[0]
+            if not res.ok:
+                return {"plan": draft, "accepted": [], "dismissed": list(flaws), "notes": "referee unavailable"}
+            try:
+                verdict = extract_json(res.text)
+            except ValueError:
+                return {"plan": draft, "accepted": [], "dismissed": [], "notes": "referee returned no JSON"}
+            if not isinstance(verdict, dict):
+                return {"plan": draft, "accepted": [], "dismissed": [], "notes": ""}
+            # Keep the running draft a JSON STRING: adversarial_plan does ``str(verdict["plan"])``,
+            # so a dict/list plan would become an unparseable Python repr next round.
+            plan_val = verdict.get("plan")
+            if isinstance(plan_val, (dict, list)):
+                verdict["plan"] = json.dumps(plan_val, ensure_ascii=False)
+            return verdict
+
+        ctx.emit_event("Adversarial", status="running",
+                       message="proposer drafting; red-team + referee to adjudicate")
+        out = adversarial_plan(objective, proposer_fn=proposer_fn, redteam_fn=redteam_fn,
+                               referee_fn=referee_fn, rounds=self.debate_rounds)
+        ctx.emit_event("Adversarial", status="success",
+                       message=(f"converged after R{out.rounds}; red-team "
+                                f"{out.game_score['redteam']} / proposer {out.game_score['proposer']}"),
+                       game_score=out.game_score, rounds=out.rounds,
+                       addressed=[f.to_dict() for f in out.addressed])
+        # Prefer the adjudicated plan; fall back to the proposer's first draft. Require a
+        # non-empty steps list so a stepless verdict cannot slip past _plan_state_from_json.
+        for candidate in (out.plan, first_draft["text"]):
+            try:
+                merged = extract_json(candidate)
+            except ValueError:
+                continue
+            if isinstance(merged, dict) and merged.get("steps"):
+                return merged
+        raise CouncilError("adversarial council produced no parseable plan with steps")
+
+    def _redteam_messages(self, objective: str, draft: str) -> list[dict[str, str]]:
+        user = (
+            f"Objective: {objective}\n\n"
+            f"Proposed plan (JSON):\n{str(draft)[:4000]}\n\n"
+            "You are an adversarial red-team. Attack this plan: find missing data or cohort "
+            "definitions, methodology sins (uncorrected multiple testing, data leakage, missing "
+            "covariates, underpowered groups, causal overreach), infeasible or mis-ordered steps, "
+            "and hidden assumptions. Severity 'block' invalidates the result; 'major' is serious but "
+            "fixable; 'minor' is a nitpick. Return ONLY JSON: "
+            '{"flaws": [{"severity": "block"|"major"|"minor", "kind": "<short tag>", '
+            '"claim": "what is wrong", "fix": "the concrete correction"}]}'
+        )
+        return [
+            {"role": "system", "content": "You are a rigorous adversarial red-team for biobank research plans. Output only valid JSON."},
+            {"role": "user", "content": user},
+        ]
+
+    def _referee_messages(self, objective: str, draft: str, flaws: list[dict[str, Any]]) -> list[dict[str, str]]:
+        user = (
+            f"Objective: {objective}\n\n"
+            f"Current plan (JSON):\n{str(draft)[:3500]}\n\n"
+            f"Red-team flaws:\n{json.dumps(flaws, ensure_ascii=False)[:2500]}\n\n"
+            "You are the referee. Accept the flaws that are genuinely load-bearing (block/major — "
+            "they would invalidate or block the result) and dismiss nitpicks or misunderstandings. "
+            "Fold every accepted fix into a fully revised plan that still follows the schema below. "
+            'Return ONLY JSON: {"plan": <full revised plan object>, "accepted": [<accepted flaw '
+            'objects>], "dismissed": [<dismissed flaw objects>], "notes": "<one line>"}\n\n'
+            f"{_PLAN_SCHEMA_HINT}"
+        )
+        return [
+            {"role": "system", "content": "You are an impartial referee adjudicating a plan red-team. Output only valid JSON."},
             {"role": "user", "content": user},
         ]
 
