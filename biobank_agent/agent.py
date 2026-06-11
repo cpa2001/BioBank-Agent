@@ -402,6 +402,37 @@ class Agent:
 
         return {"role": "system", "content": content}
 
+    def _append_output_paths(self, text: str) -> str:
+        """Close a run by stating, in one place, where its outputs landed.
+
+        Skills each return their own artifact paths, but the run never told the user WHERE — so a
+        finished run could read as if it produced nothing. Append a single Outputs section listing
+        the files this run wrote (no-op when there are none, and never duplicates a report's own list).
+        """
+        try:
+            from biobank_agent.runtime.output_summary import summarize_output_paths
+
+            payloads = []
+            for record in self.state.records:
+                key_results = getattr(record, "key_results", None)
+                payload = dict(key_results) if isinstance(key_results, dict) else {}
+                figures = getattr(record, "figure_paths", None)
+                if isinstance(figures, (list, tuple)) and figures:
+                    existing = payload.get("figure_artifacts")
+                    merged = list(existing) if isinstance(existing, (list, tuple)) else []
+                    merged.extend(figures)
+                    payload["figure_artifacts"] = merged
+                payloads.append(payload)
+            summary = summarize_output_paths(payloads)
+        except Exception:
+            return text
+        paths = summary.get("paths") or []
+        if not paths:
+            return text
+        if "## Outputs" in text or any(p in text for p in paths):
+            return text
+        return f"{text}\n\n## Outputs\n{summary['message']}"
+
     def run(self, user_query: str) -> str:
         """Execute a full agent turn: user query → final text response.
 
@@ -544,6 +575,7 @@ class Agent:
                     pass
                 self._record_executive_findings(user_query, safe_text, orchestration_result)
                 self._post_run(user_query)
+                safe_text = self._append_output_paths(safe_text)
                 return safe_text
 
             # Process tool calls

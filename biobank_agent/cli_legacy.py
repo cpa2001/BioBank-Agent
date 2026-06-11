@@ -1413,6 +1413,7 @@ def eval_cmd() -> None:
     from .eval.benchmarks import (
         AgentReportWorkflowBenchmark,
         BiomedQABenchmark,
+        FieldIssuesBenchmark,
         LiveUKBReport20Benchmark,
         Report20CaseBenchmark,
         ReportQualityBenchmark,
@@ -1615,6 +1616,7 @@ def eval_cmd() -> None:
         "skill_schemas": SkillSchemaBenchmark,
         "biomedical_qa": BiomedQABenchmark,
         "skill_calls": SkillCallBenchmark,
+        "field_issues": FieldIssuesBenchmark,
     }
     if suite not in benchmarks:
         console.print(f"[red]Unknown suite: {suite}.[/]")

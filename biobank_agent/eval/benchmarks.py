@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from .harness import Benchmark, TestCase, TestResult
+from .field_benchmark import FieldIssuesBenchmark
 from .metrics import report_quality_score
 
 

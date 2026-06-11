@@ -373,7 +373,9 @@ def test_run_executes_tool_records_provenance_and_then_final_answer(tmp_path):
 
     out = agent.run("use a tool")
 
-    assert out == "done"
+    # The skill produced a figure, so the final answer now reports where outputs landed (issue #7).
+    assert out.startswith("done")
+    assert "## Outputs" in out and "figure.svg" in out
     assert registry.calls[0][0] == "fake_skill"
     assert agent.state.records[0].skill == "fake_skill"
     assert agent.state.records[0].figure_paths[0].endswith("figure.svg")
