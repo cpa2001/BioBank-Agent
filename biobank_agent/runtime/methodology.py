@@ -172,11 +172,112 @@ def review_methodology(payload: Any, *, text: str = "", n_test_threshold: int = 
             "detail": "colocalization/MR across datasets without explicit allele harmonization; harmonize "
                       "effect alleles and handle palindromic SNPs before coloc/MR.",
         })
+
+    # 7) 里程碑4 study-design & reporting guardrails (conservative; advisory unless structural).
+    for _check in (_causal_overreach, _phenotype_encoding, _missingness_selection, _uncontrolled_confounding):
+        extra = _check(lower)
+        if extra:
+            flags.append(extra)
+    leak = _covariate_leakage(payload)
+    if leak:
+        flags.append(leak)
     return flags
 
 
 def methodology_blocks(flags: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [f for f in (flags or []) if f.get("severity") == "block"]
+
+
+# ── 里程碑4 study-design & reporting guardrails ──────────────────────────────
+# Text-driven and deliberately conservative: each fires only on an explicit, unhedged
+# signal so a correct narrative does not trip it. All advisory except covariate leakage
+# (a structural error). Surfaced by the completion gate alongside the statistical sins.
+_CAUSAL_VERBS = ("causes ", "cause of", "caused by", "leads to", "lead to", "results in")
+_CAUSAL_DESIGN = ("randomized", "randomised", "rct", "mendelian randomization", "mendelian randomisation",
+                  "instrumental variable", "longitudinal", "prospective cohort", "difference-in-difference",
+                  "regression discontinuity", "causal inference", "counterfactual", "two-sample mr", "two sample mr")
+_OBS_DATA = ("cross-sectional", "observational", "phewas", "gwas", "case-control", "case/control",
+             "cohort study", "biobank", "registry data", "ehr ")
+_CAUSAL_HEDGES = ("associated with", "association", "associated", "correlat", " may ", "might ",
+                  "could ", "suggest", "potential", "possible", "likely", "hypothesi")
+
+
+def _causal_overreach(lower: str) -> dict[str, Any] | None:
+    if (any(v in lower for v in _CAUSAL_VERBS)
+            and any(o in lower for o in _OBS_DATA)
+            and not any(d in lower for d in _CAUSAL_DESIGN)
+            and not any(h in lower for h in _CAUSAL_HEDGES)):
+        return {"issue": "causal_overreach", "severity": "advisory",
+                "detail": "unhedged causal language on observational evidence with no causal design "
+                          "(RCT, Mendelian randomization, longitudinal). Reword to associational or "
+                          "justify the design before a causal claim."}
+    return None
+
+
+def _phenotype_encoding(lower: str) -> dict[str, Any] | None:
+    binary = any(h in lower for h in ("case/control", "case-control", "case control",
+                                      "cases and controls", "binary outcome", "binary phenotype"))
+    continuous = any(h in lower for h in ("continuous outcome", "continuous trait",
+                                          "continuous phenotype", "quantitative trait"))
+    linear = ("linear regression" in lower or "ordinary least squares" in lower) and "logistic" not in lower
+    logistic = ("logistic regression" in lower or "odds ratio" in lower) and "linear regression" not in lower
+    if binary and linear:
+        return {"issue": "phenotype_encoding_mismatch", "severity": "advisory",
+                "detail": "a binary case/control outcome modelled with linear regression; use logistic "
+                          "regression (or a binomial GLM) and report odds ratios with 95% CIs."}
+    if continuous and logistic:
+        return {"issue": "phenotype_encoding_mismatch", "severity": "advisory",
+                "detail": "a continuous trait modelled with logistic regression / odds ratios; use linear "
+                          "regression and report betas with 95% CIs."}
+    return None
+
+
+def _missingness_selection(lower: str) -> dict[str, Any] | None:
+    signals = ("complete-case", "complete case", "listwise deletion", "excluded participants with missing",
+               "dropped participants with missing", "removed samples with missing", "excluded due to missing",
+               "differential dropout", "differential missingness")
+    mitigations = ("imput", "sensitivity analysis", "inverse probability", "ipw", "multiple imputation")
+    if any(s in lower for s in signals) and not any(m in lower for m in mitigations):
+        return {"issue": "missingness_or_selection_bias", "severity": "advisory",
+                "detail": "complete-case / exclusion-on-missingness with no imputation or sensitivity "
+                          "analysis can bias estimates; quantify missingness and assess selection bias "
+                          "(multiple imputation or inverse-probability weighting)."}
+    return None
+
+
+def _uncontrolled_confounding(lower: str) -> dict[str, Any] | None:
+    crude = any(h in lower for h in ("unadjusted", "crude association", "crude estimate", "crude odds",
+                                     "without adjustment", "no adjustment", "did not adjust", "not adjusted for"))
+    adjusted = any(h in lower for h in ("adjusted for", "covariate", "multivariable", "controlling for",
+                                        "controlled for", "principal component", "mixed model", "mixed-model"))
+    observational = any(o in lower for o in _OBS_DATA) or "association" in lower or "exposure" in lower
+    if crude and observational and not adjusted:
+        return {"issue": "uncontrolled_confounding", "severity": "advisory",
+                "detail": "an observational association reported as unadjusted/crude with no covariate "
+                          "adjustment named; adjust for age, sex, ancestry PCs and key confounders."}
+    return None
+
+
+def _covariate_leakage(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    # Only unambiguous dependent-variable keys, so a block never fires on a payload that
+    # merely carries a 'trait'/'label' as metadata (Codex 里程碑4 review).
+    outcome = ""
+    for key in ("outcome", "phenotype", "target", "dependent_variable"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            outcome = value.strip().lower()
+            break
+    if not outcome:
+        return None
+    raw = payload.get("covariates") or payload.get("covars") or payload.get("adjusted_for") or []
+    covs = [raw] if isinstance(raw, str) else (list(raw) if isinstance(raw, (list, tuple)) else [])
+    if any(outcome == str(c).strip().lower() for c in covs if str(c).strip()):
+        return {"issue": "covariate_leakage", "severity": "block",
+                "detail": f"the outcome '{outcome}' also appears in the covariate set — adjusting for the "
+                          "outcome leaks the target; remove it from the covariates."}
+    return None
 
 
 def _omics_context(text_lower: str) -> bool:

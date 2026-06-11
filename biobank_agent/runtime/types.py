@@ -80,6 +80,9 @@ class RuntimeConfig:
     # M16: route /plan through the asymmetric proposer/red-team/referee council instead of
     # the symmetric debate. Default off; flipped on once it wins the council_ab A/B gate.
     adversarial_council_enabled: bool = False
+    # M11/里程碑4: hard-block goal acceptance on consensus methodology sins in the evidence.
+    # Default off (advisory-grade heuristics); enabling makes the completion gate enforce.
+    methodology_gate_enabled: bool = False
     schema_version: int = SCHEMA_VERSION
 
     @classmethod
@@ -103,6 +106,7 @@ class RuntimeConfig:
             consensus_threshold=float(getattr(settings, "plan_consensus_threshold", cls.consensus_threshold)),
             debate_confidence_floor=float(getattr(settings, "plan_debate_confidence_floor", cls.debate_confidence_floor)),
             adversarial_council_enabled=bool(getattr(settings, "adversarial_council_enabled", cls.adversarial_council_enabled)),
+            methodology_gate_enabled=bool(getattr(settings, "methodology_gate_enabled", cls.methodology_gate_enabled)),
         )
 
     def model_for_role(self, role: ProviderRole | str) -> str:
