@@ -887,19 +887,3 @@ def test_mcp_call_command_executes_loaded_tool_and_records_result(tmp_path):
 
     assert state.records[-1]["skill"] == "mcp_demo__echo"
     assert state.records[-1]["result"] == {"echo": "ok", "tool": "mcp_demo__echo"}
-
-
-def test_external_planning_council_is_always_disabled():
-    import biobank_agent.cli as cli
-
-    settings = type(
-        "Settings",
-        (),
-        {
-            "plan_external_council_enabled": True,
-            "plan_external_council_policy": "always",
-        },
-    )()
-
-    assert cli._should_run_external_planning_council(settings, "run a short E11 report") is False
-    assert cli._should_run_external_planning_council(settings, "any goal whatsoever") is False

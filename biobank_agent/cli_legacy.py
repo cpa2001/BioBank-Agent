@@ -2805,11 +2805,6 @@ def _settings_float(settings: Any, name: str, default: float) -> float:
         return default
 
 
-def _should_run_external_planning_council(settings: Any, goal: str) -> bool:
-    """External planning councils have been removed; always returns False."""
-    return False
-
-
 def _stdin_is_interactive() -> bool:
     isatty = getattr(sys.stdin, "isatty", None)
     try:
