@@ -83,6 +83,8 @@ class LLMClient:
         api_key: str = "",
         model: str = "claude-opus-4-7",
         request_timeout_s: float = 60.0,
+        max_retries: int = _MAX_RETRIES,
+        retry_base_delay_s: float = _BASE_DELAY,
     ) -> None:
         # Ensure base URL has /v1 suffix for OpenAI SDK
         is_openrouter = "openrouter.ai" in base_url.lower()
@@ -101,6 +103,8 @@ class LLMClient:
             default_headers=default_headers,
         )
         self.model = model
+        self.max_retries = max(0, int(max_retries))
+        self.retry_base_delay_s = max(0.0, float(retry_base_delay_s))
         self.tool_call_content_mode = "null"  # "null" | "empty"
         self._model_cache: list[str] = []
         self._model_cache_ts: float = 0.0
@@ -222,7 +226,8 @@ class LLMClient:
             return list(self._model_cache)
 
         last_error = None
-        for attempt in range(_MAX_RETRIES + 1):
+        max_retries = self.max_retries
+        for attempt in range(max_retries + 1):
             try:
                 resp = self.client.models.list()
                 data = getattr(resp, "data", []) or []
@@ -236,27 +241,27 @@ class LLMClient:
                 return list(self._model_cache)
             except _RETRYABLE_ERRORS as e:
                 last_error = e
-                if attempt < _MAX_RETRIES:
-                    delay = _BASE_DELAY * (2 ** attempt)
+                if attempt < max_retries:
+                    delay = self.retry_base_delay_s * (2 ** attempt)
                     logger.warning(
                         "Model list call failed (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, _MAX_RETRIES + 1, e, delay,
+                        attempt + 1, max_retries + 1, e, delay,
                     )
                     time.sleep(delay)
                 else:
-                    logger.warning("Model list call failed after %d attempts: %s", _MAX_RETRIES + 1, e)
+                    logger.warning("Model list call failed after %d attempts: %s", max_retries + 1, e)
             except APIError as e:
                 if e.status_code and e.status_code >= 500:
                     last_error = e
-                    if attempt < _MAX_RETRIES:
-                        delay = _BASE_DELAY * (2 ** attempt)
+                    if attempt < max_retries:
+                        delay = self.retry_base_delay_s * (2 ** attempt)
                         logger.warning(
                             "Model list server error %d (attempt %d/%d): %s. Retrying in %.1fs...",
-                            e.status_code, attempt + 1, _MAX_RETRIES + 1, e, delay,
+                            e.status_code, attempt + 1, max_retries + 1, e, delay,
                         )
                         time.sleep(delay)
                     else:
-                        logger.warning("Model list server error after %d attempts: %s", _MAX_RETRIES + 1, e)
+                        logger.warning("Model list server error after %d attempts: %s", max_retries + 1, e)
                 else:
                     last_error = e
                     break
@@ -387,24 +392,33 @@ class LLMClient:
 
     def _create_chat_completion_with_compat(self, kwargs: dict[str, Any]):
         """Create completion with retries + deprecated-parameter adaptation."""
-        last_error = None
-        for attempt in range(_MAX_RETRIES + 1):
+        last_error: Optional[Exception] = None
+        max_retries = self.max_retries
+        # Dropping a deprecated parameter is a fix, not a failed attempt — retry immediately without
+        # consuming the retry budget, but bound it so a relay that keeps flagging params can't spin.
+        max_adaptations = len(_COMPAT_OPTIONAL_PARAMS) + 1
+        attempt = 0
+        adaptations = 0
+        while attempt <= max_retries:
             try:
                 return self.client.chat.completions.create(**kwargs)
             except _RETRYABLE_ERRORS as e:
                 last_error = e
-                if attempt < _MAX_RETRIES:
-                    delay = _BASE_DELAY * (2 ** attempt)
+                if attempt < max_retries:
+                    delay = self.retry_base_delay_s * (2 ** attempt)
                     logger.warning(
                         "LLM call failed (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, _MAX_RETRIES + 1, e, delay,
+                        attempt + 1, max_retries + 1, e, delay,
                     )
                     time.sleep(delay)
                 else:
-                    logger.error("LLM call failed after %d attempts: %s", _MAX_RETRIES + 1, e)
+                    logger.error("LLM call failed after %d attempts: %s", max_retries + 1, e)
+                attempt += 1
             except APIError as e:
                 # If a model deprecates a parameter, drop it and retry immediately.
-                if self._adapt_deprecated_params(e, kwargs):
+                if self._adapt_deprecated_params(e, kwargs) and adaptations < max_adaptations:
+                    last_error = e
+                    adaptations += 1
                     continue
                 # Relay says this model has no active channel right now: fail fast.
                 if self._is_unavailable_channel_error(e):
@@ -417,23 +431,30 @@ class LLMClient:
                 # Server errors (500/502/503) are retryable.
                 if e.status_code and e.status_code >= 500:
                     last_error = e
-                    if attempt < _MAX_RETRIES:
-                        delay = _BASE_DELAY * (2 ** attempt)
+                    if attempt < max_retries:
+                        delay = self.retry_base_delay_s * (2 ** attempt)
                         logger.warning(
                             "LLM server error %d (attempt %d/%d): %s. Retrying in %.1fs...",
-                            e.status_code, attempt + 1, _MAX_RETRIES + 1, e, delay,
+                            e.status_code, attempt + 1, max_retries + 1, e, delay,
                         )
                         time.sleep(delay)
                     else:
-                        logger.error("LLM server error after %d attempts: %s", _MAX_RETRIES + 1, e)
+                        logger.error("LLM server error after %d attempts: %s", max_retries + 1, e)
+                    attempt += 1
                 else:
                     raise  # Non-retryable API errors (400, 401, 403, etc.)
             except Exception as e:
                 # Some relays may wrap 400s in non-APIError exception types.
-                if self._adapt_deprecated_params(e, kwargs):
+                if self._adapt_deprecated_params(e, kwargs) and adaptations < max_adaptations:
+                    last_error = e
+                    adaptations += 1
                     continue
                 raise
-        raise last_error  # type: ignore[misc]
+        # Never raise None: if every attempt was a param adaptation we still have a captured error,
+        # but guard anyway so the caller sees a real exception, not "exceptions must derive from...".
+        raise last_error or RuntimeError(
+            f"LLM [{self.model}] call failed after {max_retries + 1} attempts with no captured error"
+        )
 
     @staticmethod
     def _is_unavailable_channel_error(error: Exception) -> bool:

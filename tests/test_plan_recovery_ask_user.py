@@ -8,6 +8,7 @@ Covers the runtime-backed ``InteractiveShell`` plan loop additions:
 """
 
 from io import StringIO
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +20,7 @@ from biobank_agent.core.tools.native import build_native_tools
 
 TCC = AgentEventType.TOOL_CALL_COMPLETED.value
 ERR = AgentEventType.ERROR.value
+TOOL_ERR = AgentEventType.TOOL_ERROR.value
 
 
 # ── fakes ────────────────────────────────────────────────────
@@ -144,6 +146,45 @@ def test_recovery_retries_then_succeeds():
     assert shell.runtime.run_turn.call_count == 3  # 1 original + 2 retries
 
 
+def test_recovery_accepts_completed_turn_after_later_successful_tool():
+    s = _session()
+
+    def script(session, instruction):
+        session.events.append({"type": TOOL_ERR, "payload": {"state": "failed", "message": "bad path"}})
+        session.events.append({"type": TCC, "payload": {"state": "done"}})
+        session.turns.append(FakeTurn("completed", [
+            FakeToolResult("shell_exec", {"status": "error", "stderr": "bad path"}),
+            FakeToolResult("shell_exec", {"status": "success", "stdout": "recovered"}),
+        ]))
+
+    shell = _shell(s, script, max_retries=2)
+    with patch("biobank_agent.cli.interactive.time.sleep"):
+        status, reason, calls, q = shell._run_step_with_recovery(MagicMock(), _step(), 1, 9, MagicMock())
+
+    assert status == "ok"
+    assert reason == ""
+    assert q == ""
+    assert shell.runtime.run_turn.call_count == 1
+
+
+def test_completed_turn_with_terminal_tool_error_is_not_marked_ok():
+    s = _session()
+
+    def script(session, instruction):
+        session.events.append({"type": TOOL_ERR, "payload": {"state": "failed", "message": "bad path"}})
+        session.turns.append(FakeTurn("completed", [
+            FakeToolResult("shell_exec", {"status": "error", "stderr": "bad path", "log_path": "/tmp/tool.log"}),
+        ]))
+
+    shell = _shell(s, script, max_retries=0)
+    with patch("biobank_agent.cli.interactive.time.sleep"):
+        status, reason, calls, q = shell._run_step_with_recovery(MagicMock(), _step(), 1, 9, MagicMock())
+
+    assert status == "failed"
+    assert "bad path" in reason
+    assert shell.runtime.run_turn.call_count == 1
+
+
 def test_recovery_exhausts_then_fails():
     s = _session()
 
@@ -176,6 +217,25 @@ def test_recovery_stops_to_ask_user():
     assert shell.runtime.run_turn.call_count == 1  # no retries once blocked on user input
 
 
+def test_recovery_pauses_on_step_timeout():
+    s = _session()
+
+    def script(session, instruction):
+        time.sleep(5)
+
+    shell = _shell(s, script, max_retries=2)
+    shell.settings.plan_step_timeout_s = 0.1
+
+    status, reason, calls, q = shell._run_step_with_recovery(MagicMock(), _step(), 1, 9, MagicMock())
+
+    assert status == "needs_input"
+    assert calls == 0
+    assert "plan_step_timeout_s=0.1s" in reason
+    assert "timed out" in q
+    assert s.state.custom_data["plan_last_diagnosis"]["step_status"] == "timeout"
+    assert shell.runtime.run_turn.call_count == 1
+
+
 # ── pending-answer routing ───────────────────────────────────
 
 
@@ -202,6 +262,20 @@ def test_reply_to_pending_question_resumes_with_answer():
     assert answers and answers[-1]["a"] == "the data is in data/vc_wgs_vcf"
     assert "plan_pending_question" not in s.state.custom_data
     shell._cmd_plan_retry.assert_called_once()
+
+
+def test_non_answer_to_pending_question_stays_paused():
+    s = _session()
+    s.state.custom_data["plan_pending_question"] = "Where are the VCFs?"
+    shell = _router_shell(s)
+
+    shell._handle_plan_natural_language("not sure, stop for now")
+
+    assert s.state.custom_data.get("plan_pending_question") == "Where are the VCFs?"
+    assert s.state.custom_data.get("plan_paused") is True
+    assert not s.state.custom_data.get("plan_user_answers")
+    shell._cmd_plan_retry.assert_not_called()
+    shell._cmd_plan_use.assert_not_called()
 
 
 def test_reply_with_path_also_updates_context():

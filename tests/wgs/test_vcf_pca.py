@@ -235,6 +235,9 @@ class TestVcfPcaSkill:
         result = vcf_pca(chromosomes="chr21-22", ctx=mock_ctx)
         assert "error" not in result
         assert call_count["n"] >= 2
+        assert result["skipped_regions"][0]["region"] == "chr21"
+        assert result["skipped_regions"][0]["stage"] == "merge"
+        assert "bcftools crashed" in result["skipped_regions"][0]["reason"]
 
     def test_no_common_variants(self, monkeypatch, mock_ctx):
         """build_genotype_matrix returning 0 variants everywhere → error."""

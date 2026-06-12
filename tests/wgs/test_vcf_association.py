@@ -123,6 +123,13 @@ class TestVcfAssociation:
             "biobank_agent.utils.vcf_genotypes.build_allele_counts",
             fake_allele_counts,
         )
+        monkeypatch.setattr(
+            "biobank_agent.skills.vcf_association.wgs_environment_status",
+            lambda: {
+                "executables": {"plink2": ""},
+                "modules": {"standard_gwas": "PARTIAL"},
+            },
+        )
 
     # ------------------------------------------------------------------
     # 1. No phenotype data
@@ -199,6 +206,59 @@ class TestVcfAssociation:
         assert "standard_gwas_available" in result
         assert "top_hits" in result
         assert "figures" in result
+
+    def test_standard_gwas_downgrade_pauses_without_user_consent(self, monkeypatch, mock_ctx):
+        from biobank_agent.skills.vcf_association import vcf_association
+
+        self._setup_mocks(monkeypatch, mock_ctx)
+        monkeypatch.setattr(
+            "biobank_agent.skills.vcf_association.wgs_environment_status",
+            lambda: {
+                "executables": {"plink2": "/bin/plink2"},
+                "modules": {"standard_gwas": "READY"},
+            },
+        )
+
+        result = vcf_association(case_group="J", control_group="V", region="chr22", ctx=mock_ctx)
+
+        assert result["awaiting_user"] is True
+        assert result["standard_gwas_downgrade"] is True
+        assert result["analysis_mode"] == "standard_gwas_blocked"
+
+    def test_standard_gwas_requested_pauses_when_plink_missing(self, monkeypatch, mock_ctx):
+        from biobank_agent.skills.vcf_association import vcf_association
+
+        self._setup_mocks(monkeypatch, mock_ctx)
+        mock_ctx.state.custom_data["workflow_mode"] = "standard"
+
+        result = vcf_association(case_group="J", control_group="V", region="chr22", ctx=mock_ctx)
+
+        assert result["awaiting_user"] is True
+        assert result["standard_gwas_downgrade"] is True
+        assert "PLINK2 is not available" in result["reason"]
+
+    def test_standard_gwas_downgrade_can_be_explicitly_exploratory(self, monkeypatch, mock_ctx):
+        from biobank_agent.skills.vcf_association import vcf_association
+
+        self._setup_mocks(monkeypatch, mock_ctx)
+        monkeypatch.setattr(
+            "biobank_agent.skills.vcf_association.wgs_environment_status",
+            lambda: {
+                "executables": {"plink2": "/bin/plink2"},
+                "modules": {"standard_gwas": "READY"},
+            },
+        )
+
+        result = vcf_association(
+            case_group="J",
+            control_group="V",
+            region="chr22",
+            allow_exploratory_fallback=True,
+            ctx=mock_ctx,
+        )
+
+        assert "error" not in result
+        assert result["analysis_mode"] == "exploratory_fisher_exact"
 
     # ------------------------------------------------------------------
     # 6. QC propagation — pass_samples filters case/ctrl
@@ -294,6 +354,9 @@ class TestVcfAssociation:
         # The skill should continue past the merge failure
         assert "error" not in result
         assert result["n_variants_tested"] > 0
+        assert result["skipped_regions"][0]["region"] == "chr21"
+        assert result["skipped_regions"][0]["stage"] == "merge"
+        assert "bcftools error" in result["skipped_regions"][0]["reason"]
 
     # ------------------------------------------------------------------
     # 9. No variants tested → error

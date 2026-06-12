@@ -99,6 +99,21 @@ def test_vcf_dir_discovery_includes_human_prompt_and_cluster_fallback(monkeypatc
     assert "/Files/ResultData/BW_WGS_vcf" in dirs
 
 
+def test_vcf_dir_discovery_prefers_active_workspace_for_relative_defaults(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from biobank_agent.skills.vcf_query import _get_vcf_dirs
+
+    monkeypatch.delenv("VC_WGS_VCF_DIR", raising=False)
+    monkeypatch.delenv("VC_VIRTUAL_VCF_DIR", raising=False)
+
+    dirs = _get_vcf_dirs(SimpleNamespace(workspace_root=tmp_path))
+
+    assert tmp_path / "data" / "vc_wgs_vcf" in dirs
+    assert Path("data/vc_wgs_vcf") not in dirs
+    assert Path("/Files/ResultData/BW_WGS_vcf") in dirs
+
+
 def test_vcf_sample_list_discovers_repo_local_data_dir(tmp_path, monkeypatch):
     from biobank_agent.skills.vcf_query import vcf_sample_list
 

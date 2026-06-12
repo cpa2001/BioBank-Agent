@@ -257,6 +257,9 @@ class TestVcfBurdenTest:
         if "gene_results" in result:
             genes_tested = {gr["gene"] for gr in result["gene_results"]}
             assert "TYR" not in genes_tested
+        assert result["skipped_regions"][0]["region"].startswith("chr11:")
+        assert result["skipped_regions"][0]["stage"] == "merge"
+        assert "simulated merge failure" in result["skipped_regions"][0]["reason"].lower()
 
     # ------------------------------------------------------------------
     # 7. test_min_variants_per_gene
@@ -277,6 +280,8 @@ class TestVcfBurdenTest:
         )
 
         assert "error" in result  # TYR skipped → no genes → error
+        assert result["skipped_regions"][0]["stage"] == "variant_filter"
+        assert "min_variants_per_gene=2" in result["skipped_regions"][0]["reason"]
 
     # ------------------------------------------------------------------
     # 8. test_no_genes_with_rare_variants

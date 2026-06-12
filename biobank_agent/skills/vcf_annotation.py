@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +14,7 @@ from biobank_agent.registry import skill
 from biobank_agent.utils.plotting import nature_figure, save_figure, PALETTE
 from biobank_agent.utils.wgs import (
     external_cache_dir,
+    external_tool_log_path,
     file_signature,
     find_executable,
     link_or_copy,
@@ -49,6 +51,70 @@ VITILIGO_GENES_HG38 = {
     "CXCL10":    ("chr4",  76013416,  76016388),
     "TNF":       ("chr6",  31575565,  31578336),
 }
+
+
+def _workflow_mode_from_ctx(ctx) -> str:
+    try:
+        custom = getattr(getattr(ctx, "state", None), "custom_data", {}) or {}
+        context = custom.get("plan_context") or {}
+        mode = str(context.get("workflow_mode") or custom.get("workflow_mode") or "").strip().lower()
+        if mode:
+            return mode
+    except Exception:
+        pass
+    return str(os.getenv("BIOBANK_WGS_WORKFLOW_MODE", "") or os.getenv("WGS_WORKFLOW_MODE", "")).strip().lower()
+
+
+def _annotation_fallback_allowed(ctx, explicit: bool = False) -> bool:
+    if explicit:
+        return True
+    if _workflow_mode_from_ctx(ctx) in {"exploratory", "degraded", "fallback"}:
+        return True
+    value = str(os.getenv("BIOBANK_ALLOW_EXPLORATORY_FALLBACK", "") or "").strip().lower()
+    return value in {"1", "true", "yes", "y"}
+
+
+def _pause_for_standard_annotation_downgrade(
+    *,
+    ctx,
+    reason: str,
+    standard_annotation_runs: list[dict],
+    allow_exploratory_fallback: bool,
+) -> dict | None:
+    if _annotation_fallback_allowed(ctx, explicit=allow_exploratory_fallback):
+        return None
+    try:
+        from biobank_agent.skills.pause_and_ask import pause_and_ask
+    except Exception:
+        pause_and_ask = None
+    question = (
+        "Standard VEP/SnpEff/ANNOVAR annotation could not be completed. "
+        "Should I stop so you can fix the annotation setup, or continue with built-in hg38 gene-body coordinates?"
+    )
+    options = "fix annotation setup,continue exploratory,provide corrected VEP/SnpEff/ANNOVAR cache path"
+    if pause_and_ask is not None:
+        payload = pause_and_ask(
+            question=question,
+            reason=reason,
+            category="tool_mismatch",
+            options=options,
+            ctx=ctx,
+        )
+    else:
+        payload = {
+            "status": "ok",
+            "awaiting_user": True,
+            "question": question,
+            "reason": reason,
+            "category": "tool_mismatch",
+            "options": [o.strip() for o in options.split(",")],
+        }
+    payload.update({
+        "standard_annotation_downgrade": True,
+        "annotation_mode": "standard_annotation_blocked",
+        "standard_annotation_runs": standard_annotation_runs,
+    })
+    return payload
 
 
 def _query_gene_variants(vcf_path: str, gene: str, chrom: str,
@@ -166,6 +232,7 @@ def _run_snpeff_annotation(
     report_dir: Path,
     genome: str = "hg38",
     label: str = "candidate_regions",
+    ctx=None,
 ) -> dict:
     """Run SnpEff on a merged VCF when the genome database is installed."""
     snpeff = find_executable("snpEff")
@@ -229,7 +296,13 @@ def _run_snpeff_annotation(
         genome,
         str(merged_vcf),
     ]
-    run = run_external(cmd, timeout=3600, stdout_path=annotated_vcf)
+    run = run_external(
+        cmd,
+        timeout=3600,
+        stdout_path=annotated_vcf,
+        settings=getattr(ctx, "settings", None) if ctx is not None else None,
+        log_path=external_tool_log_path(ctx, report_dir, f"snpeff_{safe_label}") if ctx is not None else None,
+    )
     outputs = [str(annotated_vcf), str(stats_html)]
     if not run["ok"]:
         return {
@@ -269,6 +342,7 @@ def _run_vep_annotation(
     merged_vcf: Path,
     report_dir: Path,
     assembly: str = "GRCh38",
+    ctx=None,
 ) -> dict:
     """Run VEP if a local cache is present; avoid online DB dependence."""
     vep = find_executable("vep")
@@ -289,7 +363,13 @@ def _run_vep_annotation(
         "-i", str(merged_vcf),
         "-o", str(out_vcf),
     ]
-    run = run_external(cmd, timeout=3600)
+    run = run_external(
+        cmd,
+        timeout=3600,
+        settings=getattr(ctx, "settings", None) if ctx is not None else None,
+        line_sink=getattr(ctx, "emit_line", None) if ctx is not None else None,
+        log_path=external_tool_log_path(ctx, report_dir, "vep_annotation") if ctx is not None else None,
+    )
     return {
         "ok": bool(run["ok"]),
         "reason": "" if run["ok"] else "VEP annotation failed",
@@ -328,6 +408,11 @@ def _run_vep_annotation(
             "description": "Comma-separated sample IDs (empty = all)",
             "default": "",
         },
+        "allow_exploratory_fallback": {
+            "type": "boolean",
+            "description": "If true, continue with built-in hg38 gene-body coordinates when standard annotation cannot run.",
+            "default": False,
+        },
     },
     required=[],
 )
@@ -336,6 +421,7 @@ def vcf_annotation(
     min_qual: float = 30.0,
     max_variants_per_gene: int = 5000,
     sample_ids: str = "",
+    allow_exploratory_fallback: bool = False,
     *,
     ctx=None,
 ) -> dict:
@@ -382,8 +468,22 @@ def vcf_annotation(
     report_dir = wgs_results_dir(ctx, "annotation")
     env_status = wgs_environment_status()
     standard_annotation_runs: list[dict] = []
+    skipped_regions: list[dict[str, str]] = []
     merged_for_standard: Path | None = None
     can_try_standard_annotation = all(Path(p).exists() for p in sample_paths.values())
+    standard_requested = _workflow_mode_from_ctx(ctx) == "standard"
+    if standard_requested and env_status["modules"].get("standard_annotation") != "READY":
+        paused = _pause_for_standard_annotation_downgrade(
+            ctx=ctx,
+            reason=(
+                "workflow_mode=standard was requested, but no local VEP/SnpEff/ANNOVAR "
+                "annotation setup is ready. Built-in hg38 gene-body coordinates would be an exploratory downgrade."
+            ),
+            standard_annotation_runs=[],
+            allow_exploratory_fallback=bool(allow_exploratory_fallback),
+        )
+        if paused is not None:
+            return paused
 
     for chrom in sorted(chroms_needed):
         genes_on_chrom = {g: coords for g, coords in target_genes.items()
@@ -398,6 +498,7 @@ def vcf_annotation(
             merge_vcfs(list(sample_paths.values()), merged, region=region)
         except Exception as e:
             logger.warning("Merge failed for %s: %s", chrom, e)
+            skipped_regions.append({"region": region, "stage": "merge", "reason": str(e)})
             continue
         if merged_for_standard is None:
             merged_for_standard = merged
@@ -407,14 +508,14 @@ def vcf_annotation(
             and Path(merged).exists()
             and env_status.get("annotation_databases", {}).get("snpeff_hg38")
         ):
-            snpeff_run = _run_snpeff_annotation(merged, report_dir, genome="hg38", label=chrom)
+            snpeff_run = _run_snpeff_annotation(merged, report_dir, genome="hg38", label=chrom, ctx=ctx)
             standard_annotation_runs.append(snpeff_run)
         elif (
             can_try_standard_annotation
             and Path(merged).exists()
             and env_status.get("annotation_databases", {}).get("vep_GRCh38_cache")
         ):
-            vep_run = _run_vep_annotation(merged, report_dir, assembly="GRCh38")
+            vep_run = _run_vep_annotation(merged, report_dir, assembly="GRCh38", ctx=ctx)
             standard_annotation_runs.append(vep_run)
 
         for gene_name, (_, gstart, gend) in genes_on_chrom.items():
@@ -481,6 +582,7 @@ def vcf_annotation(
             "gene_hits": {g: len(v) for g, v in gene_hits.items()},
             "gene_coords": target_genes,
             "standard_annotation_runs": standard_annotation_runs,
+            "skipped_regions": skipped_regions,
         }
 
     standard_ok = [r for r in standard_annotation_runs if r.get("ok")]
@@ -508,6 +610,19 @@ def vcf_annotation(
                 "Exon/intron distinction and functional effect prediction require VEP/SnpEff/ANNOVAR."
             )
 
+    if standard_requested and not standard_ok:
+        paused = _pause_for_standard_annotation_downgrade(
+            ctx=ctx,
+            reason=note,
+            standard_annotation_runs=[
+                {k: v for k, v in r.items() if k not in {"run"}}
+                for r in standard_annotation_runs
+            ],
+            allow_exploratory_fallback=bool(allow_exploratory_fallback),
+        )
+        if paused is not None:
+            return paused
+
     return {
         "n_genes_queried": len(target_genes),
         "n_genes_with_variants": len(gene_hits),
@@ -523,5 +638,6 @@ def vcf_annotation(
             {k: v for k, v in r.items() if k not in {"run"}}
             for r in standard_annotation_runs
         ],
+        "skipped_regions": skipped_regions,
         "note": note,
     }

@@ -323,6 +323,9 @@ class TestMergeFailSkipsChrom:
         # _query_gene_variants should never have been called (merge failed)
         assert queried == []
         assert result["n_genes_with_variants"] == 0
+        assert result["skipped_regions"][0]["region"].startswith("chr11:")
+        assert result["skipped_regions"][0]["stage"] == "merge"
+        assert "merge fail" in result["skipped_regions"][0]["reason"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +554,50 @@ class TestNoFigureWithoutHits:
         assert "error" not in result
         assert result["figures"] == []
         assert ctx.state.figures == []
+
+
+class TestStandardAnnotationDowngrade:
+    """Standard annotation mode should pause before built-in coordinate fallback."""
+
+    def test_standard_annotation_missing_pauses_without_user_consent(self, monkeypatch, tmp_path):
+        ctx = _make_ctx(tmp_path, custom_data={"workflow_mode": "standard"})
+        _patch_infra(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "biobank_agent.skills.vcf_annotation.wgs_environment_status",
+            lambda: {
+                "executables": {"snpEff": "", "vep": "", "table_annovar.pl": ""},
+                "modules": {"standard_annotation": "PARTIAL"},
+            },
+        )
+
+        from biobank_agent.skills.vcf_annotation import vcf_annotation
+
+        result = vcf_annotation(genes="TYR", ctx=ctx)
+
+        assert result["awaiting_user"] is True
+        assert result["standard_annotation_downgrade"] is True
+        assert result["annotation_mode"] == "standard_annotation_blocked"
+
+    def test_standard_annotation_missing_can_continue_exploratory(self, monkeypatch, tmp_path):
+        ctx = _make_ctx(tmp_path, custom_data={"workflow_mode": "standard"})
+        _patch_infra(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "biobank_agent.skills.vcf_annotation.wgs_environment_status",
+            lambda: {
+                "executables": {"snpEff": "", "vep": "", "table_annovar.pl": ""},
+                "modules": {"standard_annotation": "PARTIAL"},
+            },
+        )
+        monkeypatch.setattr(
+            "biobank_agent.skills.vcf_annotation._query_gene_variants", _noop_query
+        )
+
+        from biobank_agent.skills.vcf_annotation import vcf_annotation
+
+        result = vcf_annotation(genes="TYR", allow_exploratory_fallback=True, ctx=ctx)
+
+        assert "error" not in result
+        assert result["annotation_mode"] == "built_in_hg38_candidate_gene_coordinates"
 
 
 class TestAnnotationResultsInState:

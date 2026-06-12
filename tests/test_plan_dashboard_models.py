@@ -76,7 +76,7 @@ def test_note_partial_appends_and_drops_after_completion():
     d.note_partial("candidate-2", "先做 QC")
     d.note_partial("candidate-2", " 再跑 SAIGE")
     assert d._active["candidate-2"]["partial"].endswith("再跑 SAIGE")
-    assert "QC" in _render(d)
+    assert "QC" in d._active["candidate-2"]["partial"]  # buffered; raw tokens are no longer rendered
     d.record("Planning", status="success", metadata={"subagent": "candidate-2", "model": "kimi", "elapsed_s": 3})
     d.note_partial("candidate-2", " LATE")  # late delta after completion: dropped, no crash
     assert "candidate-2" not in d._active

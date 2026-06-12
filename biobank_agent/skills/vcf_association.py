@@ -17,6 +17,7 @@ from biobank_agent.utils.plotting import nature_figure, save_figure, PALETTE, SE
 from biobank_agent.utils.stats import fisher_exact, benjamini_hochberg, bonferroni
 from biobank_agent.utils.wgs import (
     external_cache_dir,
+    external_tool_log_path,
     file_signature,
     find_executable,
     link_or_copy,
@@ -42,6 +43,71 @@ _CHROM_LENGTHS_HG38 = {
     "chr19": 58617616, "chr20": 64444167, "chr21": 46709983,
     "chr22": 50818468,
 }
+
+
+def _workflow_mode_from_ctx(ctx) -> str:
+    try:
+        custom = getattr(getattr(ctx, "state", None), "custom_data", {}) or {}
+        context = custom.get("plan_context") or {}
+        mode = str(context.get("workflow_mode") or custom.get("workflow_mode") or "").strip().lower()
+        if mode:
+            return mode
+    except Exception:
+        pass
+    return str(os.getenv("BIOBANK_WGS_WORKFLOW_MODE", "") or os.getenv("WGS_WORKFLOW_MODE", "")).strip().lower()
+
+
+def _exploratory_fallback_allowed(ctx, explicit: bool = False) -> bool:
+    if explicit:
+        return True
+    mode = _workflow_mode_from_ctx(ctx)
+    if mode in {"exploratory", "degraded", "fallback"}:
+        return True
+    value = str(os.getenv("BIOBANK_ALLOW_EXPLORATORY_FALLBACK", "") or "").strip().lower()
+    return value in {"1", "true", "yes", "y"}
+
+
+def _pause_for_standard_gwas_downgrade(
+    *,
+    ctx,
+    reason: str,
+    plink_runs: list[dict],
+    allow_exploratory_fallback: bool,
+) -> dict | None:
+    if _exploratory_fallback_allowed(ctx, explicit=allow_exploratory_fallback):
+        return None
+    try:
+        from biobank_agent.skills.pause_and_ask import pause_and_ask
+    except Exception:
+        pause_and_ask = None
+    question = (
+        "Standard PLINK2 GWAS could not be completed for this VCF/phenotype input. "
+        "Should I stop so you can fix the input/tool setup, or continue with exploratory Fisher exact results?"
+    )
+    options = "fix input/tool setup,continue exploratory,provide corrected phenotype/VCF path"
+    if pause_and_ask is not None:
+        payload = pause_and_ask(
+            question=question,
+            reason=reason,
+            category="tool_mismatch",
+            options=options,
+            ctx=ctx,
+        )
+    else:
+        payload = {
+            "status": "ok",
+            "awaiting_user": True,
+            "question": question,
+            "reason": reason,
+            "category": "tool_mismatch",
+            "options": [o.strip() for o in options.split(",")],
+        }
+    payload.update({
+        "standard_gwas_downgrade": True,
+        "analysis_mode": "standard_gwas_blocked",
+        "plink2_runs": plink_runs,
+    })
+    return payload
 
 
 def _genomic_inflation(p_values: np.ndarray) -> float:
@@ -204,6 +270,7 @@ def _run_plink2_association(
     label: str,
     pcs_df: pd.DataFrame | None = None,
     n_pcs: int = 10,
+    ctx=None,
 ) -> dict:
     """Run PLINK2 logistic/Firth association on one merged VCF."""
     plink2 = find_executable("plink2")
@@ -336,7 +403,14 @@ def _run_plink2_association(
     else:
         cache_prefix = None
 
-    run = run_external(cmd, timeout=1800)
+    log_path = external_tool_log_path(ctx, report_dir, f"plink2_assoc_{_safe_prefix(label)}") if ctx is not None else None
+    run = run_external(
+        cmd,
+        timeout=1800,
+        settings=getattr(ctx, "settings", None) if ctx is not None else None,
+        line_sink=getattr(ctx, "emit_line", None) if ctx is not None else None,
+        log_path=log_path,
+    )
     outputs = sorted(str(p) for p in report_dir.glob(f"{out_prefix.name}*"))
     if not run["ok"]:
         return {
@@ -421,6 +495,7 @@ def _association_return(
     all_table: Path,
     top_table: Path,
     plink_runs: list[dict],
+    skipped_regions: list[dict],
     figures: list[str | Path],
     report_dir: Path,
 ) -> dict:
@@ -443,6 +518,7 @@ def _association_return(
                      for h in top_hits],
         "result_tables": [str(all_table), str(top_table)],
         "plink2_runs": plink_runs,
+        "skipped_regions": skipped_regions,
         "figures": [str(p) for p in figures],
         "result_dir": str(report_dir),
         "power_warning": (
@@ -492,6 +568,11 @@ def _association_return(
             "description": "Max variants to test per chromosome (default 0 = unlimited)",
             "default": 0,
         },
+        "allow_exploratory_fallback": {
+            "type": "boolean",
+            "description": "If true, continue with built-in exploratory Fisher tests when standard PLINK2 GWAS cannot run.",
+            "default": False,
+        },
     },
     required=[],
 )
@@ -502,6 +583,7 @@ def vcf_association(
     region: str = "",
     chromosomes: str = "chr1-22",
     max_variants: int = 0,
+    allow_exploratory_fallback: bool = False,
     *,
     ctx=None,
 ) -> dict:
@@ -549,18 +631,33 @@ def vcf_association(
     all_results = []
     plink_results: list[dict] = []
     plink_runs: list[dict] = []
+    skipped_regions: list[dict] = []
     report_dir = wgs_results_dir(ctx, "association")
     env_status = wgs_environment_status()
     can_try_plink2 = bool(
         env_status["executables"].get("plink2")
         and all(Path(p).exists() for p in all_vcfs)
     )
+    standard_requested = _workflow_mode_from_ctx(ctx) == "standard"
+    if standard_requested and not env_status["executables"].get("plink2"):
+        paused = _pause_for_standard_gwas_downgrade(
+            ctx=ctx,
+            reason=(
+                "workflow_mode=standard was requested, but PLINK2 is not available. "
+                "Running the built-in Fisher exact fallback would be an exploratory downgrade."
+            ),
+            plink_runs=[],
+            allow_exploratory_fallback=bool(allow_exploratory_fallback),
+        )
+        if paused is not None:
+            return paused
     for rgn in regions_to_process:
         merged = tmp_dir / f"merged_assoc_{rgn.replace(':', '_')}.vcf.gz"
         try:
             merge_vcfs(all_vcfs, merged, region=rgn)
         except Exception as e:
             logger.warning("Merge failed for %s: %s", rgn, e)
+            skipped_regions.append({"region": str(rgn), "stage": "merge", "reason": str(e)})
             continue
 
         case_ids = [s for s in case_samples if s in sample_paths]
@@ -577,6 +674,7 @@ def vcf_association(
                 rgn or "all",
                 pcs_df=_pcs_from_ctx(ctx),
                 n_pcs=10,
+                ctx=ctx,
             )
             plink_runs.append({k: v for k, v in plink_run.items() if k != "records"})
             if plink_run.get("records"):
@@ -588,6 +686,13 @@ def vcf_association(
             maf_min=maf_min, region=None,
             max_variants=max_variants,
         )
+        if not counts:
+            skipped_regions.append({
+                "region": str(rgn),
+                "stage": "variant_filter",
+                "reason": "No variants remained after allele-count, MAF, and genotype filters.",
+            })
+            continue
 
         for rec in counts:
             table = np.array([[rec["case_alt"], rec["case_ref"]],
@@ -616,6 +721,16 @@ def vcf_association(
         elif plink_runs:
             reasons = [r.get("reason", "") for r in plink_runs if r.get("reason")]
             standard_result_note = "; ".join(reasons[:3]) or "PLINK2 produced no parseable association rows."
+
+    if standard_result_note:
+        paused = _pause_for_standard_gwas_downgrade(
+            ctx=ctx,
+            reason=standard_result_note,
+            plink_runs=plink_runs,
+            allow_exploratory_fallback=bool(allow_exploratory_fallback),
+        )
+        if paused is not None:
+            return paused
 
     if not all_results:
         return {"error": "No variants tested. Check regions and MAF threshold."}
@@ -686,6 +801,7 @@ def vcf_association(
                     "lambda_gc": lambda_gc,
                     "analysis_mode": analysis_mode,
                     "plink2_runs": plink_runs,
+                    "skipped_regions": skipped_regions,
                 }
             return _association_return(
                 case_group=case_group,
@@ -704,6 +820,7 @@ def vcf_association(
                 all_table=all_table,
                 top_table=top_table,
                 plink_runs=plink_runs,
+                skipped_regions=skipped_regions,
                 figures=figures,
                 report_dir=report_dir,
             )
@@ -790,6 +907,7 @@ def vcf_association(
             "lambda_gc": lambda_gc,
             "analysis_mode": analysis_mode,
             "plink2_runs": plink_runs,
+            "skipped_regions": skipped_regions,
         }
 
     if assoc_cache_prefix is not None:
@@ -828,6 +946,7 @@ def vcf_association(
         all_table=all_table,
         top_table=top_table,
         plink_runs=plink_runs,
+        skipped_regions=skipped_regions,
         figures=figures,
         report_dir=report_dir,
     )

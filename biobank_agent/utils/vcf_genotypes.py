@@ -297,5 +297,5 @@ def get_sample_vcf_paths(ctx) -> dict[str, str]:
     from biobank_agent.data.vcf_loader import discover_vcf_files
     from biobank_agent.skills.vcf_query import _get_vcf_dirs
 
-    files = discover_vcf_files(*_get_vcf_dirs())
+    files = discover_vcf_files(*_get_vcf_dirs(ctx))
     return {f["filename"]: f["vcf_path"] for f in files}

@@ -10,12 +10,31 @@ from biobank_agent.registry import skill
 from biobank_agent.utils.wgs import wgs_environment_status, wgs_results_dir
 
 
-def _get_vcf_dirs() -> list[Path]:
+def _ctx_workspace_root(ctx: Any = None) -> Path | None:
+    if ctx is None:
+        return None
+    for attr in ("workspace_root", "cwd"):
+        value = getattr(ctx, attr, None)
+        if value:
+            return Path(value).expanduser()
+    settings = getattr(ctx, "settings", None)
+    value = getattr(settings, "project_root", "") if settings else ""
+    return Path(value).expanduser() if value else None
+
+
+def _resolve_vcf_dir(path: Path, workspace: Path | None) -> Path:
+    if path.is_absolute() or workspace is None:
+        return path
+    return workspace / path
+
+
+def _get_vcf_dirs(ctx: Any = None) -> list[Path]:
+    workspace = _ctx_workspace_root(ctx)
     dirs: list[Path] = []
     for env in ("VC_WGS_VCF_DIR", "VC_VIRTUAL_VCF_DIR"):
         val = os.getenv(env, "").strip()
         if val:
-            dirs.append(Path(val))
+            dirs.append(_resolve_vcf_dir(Path(val), workspace))
     for candidate in (
         Path("data/vc_wgs_vcf"),
         Path("data/VirtualCell_WGS_vcf"),
@@ -25,7 +44,7 @@ def _get_vcf_dirs() -> list[Path]:
         Path("/Files/ResultData/VirtualCell_WGS_vcf"),
         Path("/Files/ResultData/BW_WGS_vcf"),
     ):
-        dirs.append(candidate)
+        dirs.append(_resolve_vcf_dir(candidate, workspace))
     out: list[Path] = []
     seen: set[str] = set()
     for d in dirs:
@@ -40,7 +59,7 @@ def _get_vcf_dirs() -> list[Path]:
 def _build_vcf_dm(ctx: Any = None):
     from biobank_agent.data.vcf_loader import VCFDataManager
 
-    vcf_dirs = _get_vcf_dirs()
+    vcf_dirs = _get_vcf_dirs(ctx)
     if not vcf_dirs:
         settings = getattr(ctx, "settings", None)
         if settings:

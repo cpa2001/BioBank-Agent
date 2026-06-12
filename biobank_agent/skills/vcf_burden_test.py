@@ -102,6 +102,7 @@ def vcf_burden_test(
 
     tmp_dir = get_tmp_dir(ctx)
     gene_results = []
+    skipped_regions: list[dict[str, str]] = []
 
     genes_by_chrom: dict[str, list[tuple[str, int, int]]] = {}
     for gene_name, (chrom, start, end) in target_genes.items():
@@ -119,6 +120,7 @@ def vcf_burden_test(
             merge_vcfs(all_vcfs, merged, region=chrom_region)
         except Exception as e:
             logger.warning("Merge failed for %s: %s", chrom, e)
+            skipped_regions.append({"region": chrom_region, "stage": "merge", "reason": str(e)})
             continue
         chrom_merged_cache[chrom] = str(merged)
 
@@ -174,6 +176,14 @@ def vcf_burden_test(
 
             n_rare = len(rare_variants)
             if n_rare < min_variants_per_gene:
+                skipped_regions.append({
+                    "region": gene_region,
+                    "stage": "variant_filter",
+                    "reason": (
+                        f"Only {n_rare} rare variant(s) remained; "
+                        f"min_variants_per_gene={min_variants_per_gene}."
+                    ),
+                })
                 continue
 
             n_case_carriers = len(case_carrier_set)
@@ -221,7 +231,10 @@ def vcf_burden_test(
             })
 
     if not gene_results:
-        return {"error": "No genes had enough rare variants for burden testing."}
+        return {
+            "error": "No genes had enough rare variants for burden testing.",
+            "skipped_regions": skipped_regions,
+        }
 
     p_burden_arr = np.array([r["p_burden"] for r in gene_results])
     p_weighted_arr = np.array([r["p_weighted"] for r in gene_results])
@@ -271,6 +284,7 @@ def vcf_burden_test(
         ctx.state.custom_data["burden_results"] = {
             "gene_results": gene_results,
             "significant_genes": [gr["gene"] for gr in gene_results if gr["significant_burden"]],
+            "skipped_regions": skipped_regions,
         }
 
     n_sig = sum(1 for gr in gene_results if gr["significant_burden"])
@@ -285,4 +299,5 @@ def vcf_burden_test(
         "top_gene": gene_results[0]["gene"] if gene_results else "",
         "figures": [str(p) for p in figures],
         "result_dir": str(report_dir),
+        "skipped_regions": skipped_regions,
     }

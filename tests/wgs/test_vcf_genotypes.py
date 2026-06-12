@@ -219,7 +219,7 @@ class TestGetSampleVcfPaths:
         )
         monkeypatch.setattr(
             "biobank_agent.skills.vcf_query._get_vcf_dirs",
-            lambda: ["/fake/dir"],
+            lambda ctx=None: ["/fake/dir"],
         )
         ctx = SimpleNamespace(dm=dm)
         paths = mod.get_sample_vcf_paths(ctx)

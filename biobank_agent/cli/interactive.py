@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
 import select
 import shlex
+import signal
 import subprocess
 import sys
 import termios
@@ -16,6 +18,7 @@ import time
 import tty
 import uuid
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -51,6 +54,7 @@ from biobank_agent.runtime import (
     ProviderRouter,
     PlanStatus,
     RuntimeConfig,
+    RuntimeStatus,
     SessionStore,
     ToolCall,
 )
@@ -66,6 +70,85 @@ from biobank_agent.runtime.planner import RuntimePlanner
 from biobank_agent.runtime.replay import replay_trajectory
 from biobank_agent.runtime.researcher import RuntimeResearcher
 from biobank_agent.progress import PlanRunDashboard
+
+
+class PlanStepTimeoutError(BaseException):
+    """Raised when one autonomous plan step exceeds the configured wall-clock cap.
+
+    Inherits ``BaseException`` (not ``Exception``), like ``KeyboardInterrupt``: the SIGALRM handler
+    raises this from deep inside ``runtime.run_turn``, whose broad ``except Exception`` tool/agent-loop
+    guards would otherwise swallow the deadline before the step's ``except`` handler can run."""
+
+
+class PlanBuildTimeoutError(BaseException):
+    """Raised when plan drafting exceeds the configured wall-clock cap. ``BaseException`` for the same
+    reason — the planner/council's broad ``except Exception`` guards must not swallow the deadline."""
+
+
+# Active inactivity watchdogs. ``mark_activity()`` refreshes them on every sign of progress (an LLM
+# token, a step, a phase change), so a model that is actively streaming is never judged as timed out —
+# the deadline measures SILENCE, not total wall-clock.
+_ACTIVE_TIMEOUTS: list[dict] = []
+
+
+def mark_activity() -> None:
+    """Signal forward progress so an INACTIVITY watchdog re-arms instead of firing. No-op when idle.
+
+    Only refreshes activity-based timeouts (plan drafting). Hard per-step deadlines are left untouched
+    so a real provider stall during a step still fires regardless of unrelated activity elsewhere."""
+    if not _ACTIVE_TIMEOUTS:
+        return
+    now = time.monotonic()
+    for state in _ACTIVE_TIMEOUTS:
+        if state.get("activity_based"):
+            state["last_activity"] = now
+
+
+@contextmanager
+def _wall_clock_timeout(timeout_s: float, exc_type: type[BaseException], label: str,
+                        *, activity_based: bool = False):
+    if timeout_s <= 0 or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    state = {"last_activity": time.monotonic(), "activity_based": activity_based}
+
+    def _handler(_signum, _frame):
+        if activity_based:
+            idle = time.monotonic() - state["last_activity"]
+            if idle < timeout_s:
+                # Progress since the last tick — re-arm for the remaining idle window instead of firing.
+                signal.setitimer(signal.ITIMER_REAL, max(0.05, timeout_s - idle))
+                return
+            raise exc_type(f"{label} stalled for {timeout_s:.0f}s with no model activity")
+        # Hard deadline: a real provider stall must fire regardless of activity elsewhere.
+        raise exc_type(f"{label} exceeded {timeout_s:.0f}s")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _handler)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    _ACTIVE_TIMEOUTS.append(state)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        try:
+            _ACTIVE_TIMEOUTS.remove(state)
+        except ValueError:
+            pass
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
+def _plan_step_wall_clock_timeout(timeout_s: float):
+    # Hard per-step deadline: a stalled provider during a step must fire regardless of other activity.
+    return _wall_clock_timeout(timeout_s, PlanStepTimeoutError, "plan step")
+
+
+def _plan_build_wall_clock_timeout(timeout_s: float):
+    # Inactivity-based: while the planner's models are actively streaming, drafting is not "stalled".
+    return _wall_clock_timeout(timeout_s, PlanBuildTimeoutError, "plan drafting", activity_based=True)
 
 
 class LLMProvider:
@@ -91,6 +174,7 @@ class LLMProvider:
                     final = stop.value
                     break
                 deltas.append(chunk)
+                mark_activity()  # a streaming token is progress — refresh the inactivity watchdog
                 try:
                     stream_cb(chunk)
                 except Exception:
@@ -124,13 +208,49 @@ class LazyLLMProvider:
         model: str,
         provider_name: str,
         tool_call_content_mode: str = "null",
+        request_timeout_s: float = 60.0,
+        max_retries: int = 3,
+        retry_base_delay_s: float = 2.0,
     ) -> None:
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
         self.provider_name = provider_name
         self.tool_call_content_mode = tool_call_content_mode
+        self.request_timeout_s = float(request_timeout_s or 60.0)
+        self.max_retries = max(0, int(max_retries))
+        self.retry_base_delay_s = max(0.0, float(retry_base_delay_s))
         self._provider: LLMProvider | None = None
+
+    def set_request_timeout(self, request_timeout_s: float) -> float:
+        previous = self.request_timeout_s
+        next_timeout = float(request_timeout_s or previous or 60.0)
+        if abs(next_timeout - previous) > 1e-9:
+            self.request_timeout_s = next_timeout
+            self._provider = None
+        return previous
+
+    def set_llm_policy(
+        self,
+        *,
+        request_timeout_s: float | None = None,
+        max_retries: int | None = None,
+    ) -> tuple[float, int]:
+        previous = (self.request_timeout_s, self.max_retries)
+        changed = False
+        if request_timeout_s is not None:
+            next_timeout = float(request_timeout_s or self.request_timeout_s or 60.0)
+            if abs(next_timeout - self.request_timeout_s) > 1e-9:
+                self.request_timeout_s = next_timeout
+                changed = True
+        if max_retries is not None:
+            next_retries = max(0, int(max_retries))
+            if next_retries != self.max_retries:
+                self.max_retries = next_retries
+                changed = True
+        if changed:
+            self._provider = None
+        return previous
 
     def _ensure(self) -> LLMProvider:
         if self._provider is None:
@@ -140,6 +260,9 @@ class LazyLLMProvider:
                 base_url=self.base_url,
                 api_key=self.api_key,
                 model=self.model,
+                request_timeout_s=self.request_timeout_s,
+                max_retries=self.max_retries,
+                retry_base_delay_s=self.retry_base_delay_s,
             )
             if hasattr(llm, "tool_call_content_mode"):
                 llm.tool_call_content_mode = self.tool_call_content_mode
@@ -171,6 +294,7 @@ class _LineExecutionView:
 
     def record(self, phase: str, actor: str = "biobank", status: str = "running",
                message: str = "", metadata: dict[str, Any] | None = None) -> None:
+        mark_activity()  # recorded progress refreshes the inactivity watchdog
         icon = self._ICONS.get(status, "•")
         self.console.print(f"[dim]{_rich_escape(str(phase))}[/] {icon} {_rich_escape(str(message))}")
 
@@ -250,6 +374,9 @@ class InteractiveShell:
                 model=model_name,
                 provider_name=model_name,
                 tool_call_content_mode=getattr(self.settings, "tool_call_content_mode", "null"),
+                request_timeout_s=float(getattr(self.settings, "llm_request_timeout_s", 60.0) or 60.0),
+                max_retries=int(getattr(self.settings, "llm_max_retries", 3) or 0),
+                retry_base_delay_s=float(getattr(self.settings, "llm_retry_base_delay_s", 2.0) or 0.0),
             )
         session_root = Path(self.settings.memory_dir) / "runtime_sessions"
         provider_router = ProviderRouter(providers, runtime_config)
@@ -337,7 +464,7 @@ class InteractiveShell:
         table.add_row("mcp", f"{mcp_loaded} loaded tool(s)")
         table.add_row(
             "commands",
-            "/help, /status, /graph, /plan, /plan-diagnose, /plan-retry, /plan-use, /goal, /resume, /compact, /diff, /permissions, /doctor, /tools, /skills, /agent, /subagents, /review, /audit, /harness, /learn, /replay, /evolve, /quit",
+            "/help, /status, /graph, /plan, /plan-diagnose, /plan-retry, /plan-use, /goal, /resume, /cd, /jobs, /job-tail, /artifacts, /compact, /diff, /permissions, /doctor, /tools, /skills, /agent, /subagents, /review, /audit, /harness, /learn, /replay, /evolve, /quit",
         )
         return Panel(table, title="BioBank Agent", border_style="cyan", box=box.ROUNDED)
 
@@ -523,12 +650,13 @@ class InteractiveShell:
             "plan_skip": self._cmd_plan_skip,
             "plan_exit": self._cmd_plan_exit,
             "plans": self._cmd_plans,
+            "artifacts": self._cmd_artifacts,
             "routing_status": self._cmd_routing_status,
             "cost": self._cmd_cost,
             "clear": self._cmd_clear,
             "export": self._cmd_export,
             "skills": self._cmd_skills,
-            "tools": self._cmd_skills,
+            "tools": self._cmd_tools,
             "history": self._cmd_history,
             "figures": self._cmd_figures,
             "cohorts": self._cmd_cohorts,
@@ -547,6 +675,34 @@ class InteractiveShell:
             "memory": self._cmd_memory,
             "debate": self._cmd_debate,
         }
+
+    def _reports_root(self, session: AgentSession | None = None) -> Path:
+        """Root for user-visible outputs for a session.
+
+        When reports_follow_workspace is enabled, outputs follow the active
+        workspace so `/cd` and `--workspace` keep scripts, logs, and reports
+        together. Otherwise use the configured global reports_dir.
+        """
+        sess = session or self._require_session()
+        if getattr(self.settings, "reports_follow_workspace", True):
+            return Path(sess.cwd).expanduser() / "reports"
+        return Path(self.settings.reports_dir).expanduser()
+
+    def _session_report_dir(self, session: AgentSession | None = None) -> Path:
+        sess = session or self._require_session()
+        return self._reports_root(sess) / sess.session_id
+
+    def _reroot_job_manager(self, session: AgentSession | None = None) -> None:
+        """Make background-job commands follow the active/resumed workspace."""
+        if self.job_manager is None:
+            return
+        sess = session or self._require_session()
+        jobs_dir = str(getattr(self.settings, "jobs_dir_name", ".biobank_jobs") or ".biobank_jobs")
+        self.job_manager.jobs_root = Path(sess.cwd).expanduser() / jobs_dir
+        try:
+            self.job_manager.reattach()
+        except Exception:
+            pass
 
     def _cmd_help(self) -> None:
         table = Table(title="Slash commands", box=box.SIMPLE_HEAVY)
@@ -588,6 +744,51 @@ class InteractiveShell:
             "goal_status": session.state.goal.completion_state if session.state.goal else "none",
         }
 
+    def _apply_planning_provider_caps(self, runtime, build_timeout_s: float) -> list:
+        """Temporarily cap each provider's request timeout and disable retries during planning, so a
+        single slow/stalled provider can't outlast the plan-build deadline. Returns a restore list."""
+        restore: list[tuple[Any, tuple[float, int] | float]] = []
+        if build_timeout_s <= 0:
+            return restore
+        request_cap = max(0.05, build_timeout_s)
+        for provider in getattr(runtime.provider_router, "providers", {}).values():
+            policy_setter = getattr(provider, "set_llm_policy", None)
+            if callable(policy_setter):
+                try:
+                    current = float(getattr(provider, "request_timeout_s", request_cap) or request_cap)
+                    restore.append((provider, policy_setter(
+                        request_timeout_s=request_cap if request_cap < current else current,
+                        max_retries=0)))
+                except Exception:
+                    continue
+                continue
+            timeout_setter = getattr(provider, "set_request_timeout", None)
+            if callable(timeout_setter):
+                try:
+                    current = float(getattr(provider, "request_timeout_s", request_cap) or request_cap)
+                    if request_cap < current:
+                        restore.append((provider, timeout_setter(request_cap)))
+                except Exception:
+                    continue
+        return restore
+
+    def _restore_planning_provider_caps(self, restore: list) -> None:
+        """Undo the temporary planning caps applied by _apply_planning_provider_caps."""
+        for provider, previous_policy in restore:
+            policy_setter = getattr(provider, "set_llm_policy", None)
+            if callable(policy_setter) and isinstance(previous_policy, tuple):
+                try:
+                    policy_setter(request_timeout_s=previous_policy[0], max_retries=previous_policy[1])
+                except Exception:
+                    pass
+                continue
+            timeout_setter = getattr(provider, "set_request_timeout", None)
+            if callable(timeout_setter):
+                try:
+                    timeout_setter(float(previous_policy))
+                except Exception:
+                    pass
+
     def _cmd_plan(self, arg: str = "") -> dict[str, Any]:
         runtime = self._require_runtime()
         session = self._require_session()
@@ -610,14 +811,69 @@ class InteractiveShell:
         # object), so it gets mutated to "plan" too — it must not be used as the
         # restore source; this captured string is the safe source.
         self._pre_plan_profile = previous_mode
+        build_timeout_s = max(0.0, float(getattr(self.settings, "plan_build_timeout_s", 240.0)))
+        provider_timeout_restore = self._apply_planning_provider_caps(runtime, build_timeout_s)
+        plan = None  # defined for the finally so an aborted draft can detect "no plan produced"
         try:
-            plan = self._draft_plan_with_live_progress(arg)
+            with _plan_build_wall_clock_timeout(build_timeout_s):
+                plan = self._draft_plan_with_live_progress(arg)
+        except PlanBuildTimeoutError:
+            self._set_activity("idle")
+            timeout_label = f"{build_timeout_s:g}"
+            reason = (
+                f"Plan generation stalled for {timeout_label}s with no model activity "
+                f"(plan_build_timeout_s={timeout_label}s) before producing a draft. "
+                "The planner is likely blocked on an unreachable provider or an over-broad task; retry or narrow the request."
+            )
+            session.state.custom_data["plan_last_diagnosis"] = {
+                "status": "failed",
+                "step_id": "planning",
+                "step_title": "Plan generation",
+                "step_status": "timeout",
+                "reason": reason,
+                "objective": arg,
+                "blocked": True,
+                "repair_options": [
+                    "Retry /plan with a narrower objective or explicit input file paths.",
+                    f"Increase PLAN_BUILD_TIMEOUT_S or plan_build_timeout_s if the planner needs more than {timeout_label}s.",
+                    "Use /doctor to verify provider/API connectivity before retrying.",
+                ],
+            }
+            self._emit_plan_phase("Planning", status="error", message=reason, metadata={"objective": arg, "timeout_s": build_timeout_s})
+            runtime.save_session(session)
+            self.console.print(f"[red]Planning timed out:[/] {_rich_escape(reason)}")
+            return {"status": "failed", "error": reason, "step_status": "timeout"}
         except CouncilError as exc:
             self._set_activity("idle")
+            session.state.custom_data["plan_last_diagnosis"] = {
+                "status": "failed",
+                "step_id": "planning",
+                "step_title": "Plan generation",
+                "step_status": "failed",
+                "reason": str(exc),
+                "objective": arg,
+                "blocked": True,
+                "repair_options": [
+                    "Use /plan-edit <feedback> to simplify or constrain the task.",
+                    "Retry /plan after checking planner credentials with /doctor.",
+                    "For tabular files, mention the file type and desired output table explicitly.",
+                ],
+            }
             self._emit_plan_phase("Planning", status="error", message=str(exc), metadata={"objective": arg})
             runtime.save_session(session)
             self.console.print(f"[red]Planning failed:[/] {_rich_escape(str(exc))}")
             return {"status": "failed", "error": str(exc)}
+        finally:
+            self._restore_planning_provider_caps(provider_timeout_restore)
+            if plan is None:
+                # Drafting aborted (timeout / council error) before any plan existed: drafting had
+                # flipped the runtime to the read-only "plan" profile. Restore the EXACT profile the
+                # user had before /plan — never widen it. (Unlike approval, nothing executes here, so a
+                # user already in read-only "plan" mode must NOT be escalated to yolo by a failed draft.)
+                try:
+                    runtime.set_approval_profile(previous_mode)
+                except Exception:
+                    pass
         self.console.print(f"[dim]Plan mode is read-only. Previous permission mode was {previous_mode!r}.[/]")
         review = self._run_plan_review_loop(plan, previous_mode=previous_mode)
         final_plan = session.state.plan or plan
@@ -831,6 +1087,7 @@ class InteractiveShell:
     def _finalize_execution(self, plan, done: int, failed: int, halted, total: int,
                             step_outputs: dict[str, dict] | None = None,
                             unverified: int = 0) -> dict[str, Any]:
+        step_outputs = step_outputs or {}
         unv = f", [yellow]{unverified} unverified[/]" if unverified else ""
         if halted:
             paused = len(halted) > 2 and halted[2] == "paused"
@@ -860,9 +1117,22 @@ class InteractiveShell:
             for i, step in enumerate(plan.steps, 1)
         ]
         self._render_progress_rows("Plan Execution Summary", rows)
+        artifacts = self._collect_artifact_index(plan, step_outputs)
+        self._render_artifact_index(artifacts)
+        try:
+            self._require_session().state.custom_data["last_artifact_index"] = artifacts
+            self._require_runtime().save_session(self._require_session())
+        except Exception:
+            pass
         # Surface what each step produced + a final answer.
-        self._render_step_outputs(plan, step_outputs or {})
-        return {"status": getattr(plan.status, "value", str(plan.status)), "done": done, "failed": failed}
+        self._render_step_outputs(plan, step_outputs)
+        return {
+            "status": getattr(plan.status, "value", str(plan.status)),
+            "done": done,
+            "failed": failed,
+            "unverified": unverified,
+            "artifacts": artifacts,
+        }
 
     def _capture_step_output(self) -> dict[str, Any]:
         """Snapshot the most recent turn's tool outputs + final text for a step.
@@ -884,6 +1154,29 @@ class InteractiveShell:
         messages = getattr(turn, "assistant_messages", None) or []
         text = messages[-1].text.strip() if messages and getattr(messages[-1], "text", "") else ""
         return {"tool_results": tool_results, "text": text}
+
+    @staticmethod
+    def _turn_terminal_tool_failure(session) -> str:
+        turns = getattr(session, "turns", None) or []
+        if not turns:
+            return ""
+        results = getattr(turns[-1], "tool_results", None) or []
+        if not results:
+            return ""
+        result = results[-1]
+        raw_error = str(getattr(result, "error", "") or "").strip()
+        payload = getattr(result, "result", None) or {}
+        if isinstance(payload, dict):
+            if payload.get("awaiting_user"):
+                return ""
+            status = str(payload.get("status") or "").strip().lower()
+            if status in {"error", "failed", "cancelled", "requires_confirmation"}:
+                return str(payload.get("error") or payload.get("stderr") or raw_error or status)
+            if payload.get("ok") is False:
+                return str(payload.get("error") or payload.get("reason") or raw_error or "tool returned ok=false")
+            if payload.get("error") and status not in {"ok", "success", "done", "completed"}:
+                return str(payload.get("error"))
+        return raw_error
 
     def _render_step_outputs(self, plan, step_outputs: dict[str, dict]) -> None:
         """Render each completed step's real output and a final-answer panel.
@@ -920,6 +1213,82 @@ class InteractiveShell:
                 border_style="green",
                 padding=(1, 2),
             ))
+
+    _ARTIFACT_PATH_KEYS = {
+        "path", "output", "output_path", "out_path", "report_path", "report_dir", "figure",
+        "artifact", "file", "saved_to", "log_path", "all_table", "top_table",
+        "annotation_table", "effect_table", "result_dir",
+    }
+    _ARTIFACT_LIST_KEYS = {"figures", "artifacts", "files", "outputs", "output_paths", "report_paths", "logs"}
+
+    @classmethod
+    def _collect_artifact_paths(cls, payload: Any, *, prefix: str = "") -> list[tuple[str, str]]:
+        found: list[tuple[str, str]] = []
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                label = f"{prefix}.{key}" if prefix else str(key)
+                key_l = str(key).lower()
+                if key_l in cls._ARTIFACT_PATH_KEYS and isinstance(value, (str, Path)) and str(value).strip():
+                    found.append((label, str(value)))
+                    continue
+                if key_l in cls._ARTIFACT_LIST_KEYS and isinstance(value, (list, tuple, set)):
+                    for item in value:
+                        if isinstance(item, (str, Path)) and str(item).strip():
+                            found.append((label, str(item)))
+                        else:
+                            found.extend(cls._collect_artifact_paths(item, prefix=label))
+                    continue
+                if isinstance(value, (dict, list, tuple)):
+                    found.extend(cls._collect_artifact_paths(value, prefix=label))
+        elif isinstance(payload, (list, tuple)):
+            for item in payload:
+                found.extend(cls._collect_artifact_paths(item, prefix=prefix))
+        return found
+
+    def _collect_artifact_index(self, plan, step_outputs: dict[str, dict]) -> list[dict[str, str]]:
+        index: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for step in getattr(plan, "steps", []) or []:
+            captured = step_outputs.get(step.id) or {}
+            for tool_name, result in captured.get("tool_results") or []:
+                for label, path in self._collect_artifact_paths(result):
+                    key = (str(step.id), str(tool_name), path)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    index.append({
+                        "step_id": str(step.id),
+                        "step_title": str(getattr(step, "title", "")),
+                        "tool": str(tool_name),
+                        "kind": label,
+                        "path": path,
+                    })
+        return index
+
+    def _render_artifact_index(self, artifacts: list[dict[str, str]]) -> None:
+        if not artifacts:
+            return
+        table = Table(title="Output Artifacts", box=box.SIMPLE)
+        table.add_column("Step", style="cyan", no_wrap=True)
+        table.add_column("Tool", style="magenta", no_wrap=True)
+        table.add_column("Kind", no_wrap=True)
+        table.add_column("Path", overflow="fold")
+        for item in artifacts[:30]:
+            table.add_row(
+                str(item.get("step_id") or "-"),
+                str(item.get("tool") or "-"),
+                str(item.get("kind") or "-")[-40:],
+                str(item.get("path") or "-"),
+            )
+        if len(artifacts) > 30:
+            table.caption = f"{len(artifacts) - 30} additional artifact(s) omitted from display; full index is in last_artifact_index."
+        self.console.print(table)
+        full_paths = [
+            f"{item.get('step_id') or '-'} {item.get('tool') or '-'} {item.get('kind') or '-'}: {item.get('path') or '-'}"
+            for item in artifacts[:30]
+        ]
+        if full_paths:
+            self.console.print(Panel("\n".join(_rich_escape(p) for p in full_paths), title="Full Artifact Paths", border_style="blue"))
 
     @staticmethod
     def _final_answer_text(plan, step_outputs: dict[str, dict]) -> str:
@@ -1097,6 +1466,10 @@ class InteractiveShell:
             max_retries = max(0, int(getattr(self.settings, "plan_step_max_retries", 2)))
         except (TypeError, ValueError):
             max_retries = 2
+        try:
+            step_timeout_s = max(0.0, float(getattr(self.settings, "plan_step_timeout_s", 240.0)))
+        except (TypeError, ValueError):
+            step_timeout_s = 240.0
         answer_suffix = self._plan_answer_suffix(session)
         reason = ""
         attempt = 0
@@ -1110,7 +1483,52 @@ class InteractiveShell:
             if answer_suffix:
                 instruction = f"{instruction}\n\n{answer_suffix}"
             before = len(session.events)
-            runtime.run_turn(session, instruction)  # autonomous agent; self-bounded
+            try:
+                with _plan_step_wall_clock_timeout(step_timeout_s):
+                    runtime.run_turn(session, instruction)  # autonomous agent; self-bounded by step_timeout_s
+            except PlanStepTimeoutError:
+                # If the agent PAUSED to ask the user (pause_and_ask / ask_user) before the deadline,
+                # surface THAT question — a hard timeout must not swallow the agent's pause path.
+                paused_question = self._pending_ask_user_question(session)
+                if paused_question:
+                    paused_calls = sum(1 for e in session.events[before:]
+                                       if e.get("type") == AgentEventType.TOOL_CALL_COMPLETED.value)
+                    return ("needs_input", f"The agent needs input: {paused_question}",
+                            paused_calls, paused_question)
+                timeout_label = f"{step_timeout_s:g}"
+                reason = (
+                    f"Step {position}/{total} exceeded the configured "
+                    f"plan_step_timeout_s={timeout_label}s before producing a usable update."
+                )
+                if session.turns:
+                    turn = session.turns[-1]
+                    if getattr(turn, "status", "") == "running":
+                        turn.status = "failed"
+                        turn.completed_at = time.time()
+                session.state.active_turn_id = None
+                session.state.status = RuntimeStatus.PAUSED
+                session.state.custom_data["plan_last_diagnosis"] = {
+                    "status": "paused",
+                    "step_id": getattr(step, "id", ""),
+                    "step_title": getattr(step, "title", ""),
+                    "step_status": "timeout",
+                    "reason": reason,
+                    "blocked": True,
+                    "repair_options": [
+                        "Increase PLAN_STEP_TIMEOUT_S for slow model/tool calls, then run /plan-retry.",
+                        "For long bioinformatics commands, ask me to run the command as a background job and monitor it with /jobs or /job-tail.",
+                        "If this was just file inspection, retry once; provider latency may have caused the stall.",
+                    ],
+                }
+                try:
+                    runtime.save_session(session)
+                except Exception:
+                    pass
+                question = (
+                    "This step timed out before producing output. Should I retry, "
+                    "increase PLAN_STEP_TIMEOUT_S, or convert the slow work to a background job?"
+                )
+                return ("needs_input", reason, 0, question)
             new_events = session.events[before:]
             tool_calls = sum(1 for e in new_events
                              if e.get("type") == AgentEventType.TOOL_CALL_COMPLETED.value)
@@ -1118,14 +1536,17 @@ class InteractiveShell:
             if question:
                 return ("needs_input", f"The agent needs input: {question}", tool_calls, question)
             turn_ok = bool(session.turns) and str(session.turns[-1].status) == "completed"
+            if turn_ok:
+                terminal_failure = self._turn_terminal_tool_failure(session)
+                if not terminal_failure:
+                    return ("ok", "", tool_calls, "")
+                reason = terminal_failure
             event_failed = any(
                 e.get("type") in {AgentEventType.ERROR.value, AgentEventType.TOOL_ERROR.value}
                 or str((e.get("payload") or {}).get("state", "")).lower() in {"failed", "cancelled", "error"}
                 for e in new_events
             )
-            if turn_ok and not event_failed:
-                return ("ok", "", tool_calls, "")
-            reason = self._recent_plan_error_details() or f"step {position}/{total} did not converge"
+            reason = reason or self._recent_plan_error_details() or f"step {position}/{total} did not converge"
             if attempt >= max_retries:
                 return ("failed", reason, tool_calls, "")
             attempt += 1
@@ -1142,6 +1563,9 @@ class InteractiveShell:
         session = self.session
         plan = session.state.plan if session is not None else None
         if plan is None:
+            saved = dict(session.state.custom_data.get("plan_last_diagnosis") or {}) if session is not None else {}
+            if saved.get("step_id") == "planning" and str(saved.get("status")) == "failed":
+                return self._classify_plan_message(text) in {"diagnose", "edit", "retry"}
             return False
         if plan.status in {PlanStatus.FAILED, PlanStatus.PAUSED}:
             return True
@@ -1149,15 +1573,56 @@ class InteractiveShell:
             return True
         return any(str(step.status).lower() in {"failed", "cancelled"} for step in plan.steps)
 
+    @staticmethod
+    def _pending_reply_is_non_answer(text: str) -> bool:
+        raw = str(text or "").strip()
+        lower = raw.lower()
+        if not raw:
+            return True
+        phrases = (
+            "cancel", "stop", "pause", "quit", "exit", "skip",
+            "not sure", "don't know", "do not know", "unknown",
+            "no idea", "wait", "hold on",
+        )
+        chinese = ("取消", "停止", "暂停", "退出", "跳过", "不知道", "不确定", "先别", "等一下")
+        return any(p in lower for p in phrases) or any(p in raw for p in chinese)
+
     def _handle_plan_natural_language(self, text: str) -> list[AgentEvent]:
         session = self._require_session()
         before = len(session.events)
         intent = self._classify_plan_message(text)
+        plan = getattr(session.state, "plan", None)
+        saved_diag = dict(session.state.custom_data.get("plan_last_diagnosis") or {})
+        if plan is None and saved_diag.get("step_id") == "planning":
+            objective = str(saved_diag.get("objective") or "").strip()
+            if intent == "diagnose" or not objective:
+                self._cmd_plan_diagnose()
+            elif intent == "retry":
+                self.console.print("[green]Retrying planning for the last objective.[/]")
+                self._cmd_plan(objective)
+            elif intent == "edit":
+                self.console.print("[green]Retrying planning with your refinement.[/]")
+                self._cmd_plan(f"{objective}\n\nUser refinement: {text}")
+            else:
+                self._cmd_plan_diagnose()
+            self._require_runtime().save_session(session)
+            return [AgentEvent.from_dict(e) for e in session.events[before:]]
         pending_q = str(session.state.custom_data.get("plan_pending_question") or "").strip()
         # If the agent paused via ask_user, treat this reply as the ANSWER (unless the
         # user explicitly asked to diagnose). Record it, fold any path/option into plan
         # context, and resume the step with the answer available to the agent.
         if pending_q and intent != "diagnose":
+            if self._pending_reply_is_non_answer(text):
+                session.state.custom_data["plan_paused"] = True
+                session.state.custom_data["plan_pause_reason"] = (
+                    "The plan is still waiting for a concrete answer to the pending question."
+                )
+                self.console.print(
+                    "[yellow]Plan is still paused.[/] I kept the pending question instead of guessing. "
+                    "Answer it with the path/choice to use, or run /plan-diagnose."
+                )
+                self._require_runtime().save_session(session)
+                return [AgentEvent.from_dict(e) for e in session.events[before:]]
             answers = list(session.state.custom_data.get("plan_user_answers") or [])
             answers.append({"q": pending_q, "a": str(text or "").strip()})
             session.state.custom_data["plan_user_answers"] = answers
@@ -1209,6 +1674,10 @@ class InteractiveShell:
         session = self._require_session()
         plan = session.state.plan
         if plan is None:
+            saved = dict(session.state.custom_data.get("plan_last_diagnosis") or {})
+            if saved:
+                self._render_plan_diagnosis(None, diagnosis=saved)
+                return saved
             self.console.print("[yellow]No active plan to diagnose.[/]")
             return {"status": "no_plan"}
         diagnosis = self._build_plan_diagnosis(plan)
@@ -1421,17 +1890,55 @@ class InteractiveShell:
 
     @staticmethod
     def _plan_step_mentions_wgs(plan, step) -> bool:
+        """Whether a step genuinely needs WGS/variant-data readiness checks.
+
+        Do not key off `gwas` in a filename alone: GWAS summary-stat CSVs are
+        tabular inputs, not genotype/VCF inputs. Trigger WGS preflight only when
+        the plan names variant/genotype tooling, real variant file extensions, or
+        explicit WGS/VCF/genotype workflow language outside file paths.
+        """
         parts = [
-            getattr(plan, "objective", ""),
-            getattr(plan, "title", ""),
             getattr(step, "id", ""),
             getattr(step, "title", ""),
             getattr(step, "purpose", ""),
             " ".join(getattr(step, "tool_scope", None) or []),
             " ".join(getattr(step, "file_scope", None) or []),
         ]
-        haystack = " ".join(str(part).lower() for part in parts)
-        return any(keyword in haystack for keyword in ("wgs", "vcf", "gwas", "variant", "genome", "genomic", "变异", "全基因组"))
+        haystack = " ".join(str(part or "") for part in parts)
+        lowered = haystack.lower()
+        tool_names = {str(t).lower() for t in (getattr(step, "tool_scope", None) or [])}
+        if any(name.startswith("vcf_") or name.startswith("wgs_") or name == "wgs_environment_check" for name in tool_names):
+            return True
+        if "inspection fast-path" in str(getattr(plan, "audit_summary", "")).lower():
+            return False
+        if "read-only preview" in lowered or "file-inspection" in lowered:
+            return False
+
+        file_text = " ".join(str(x) for x in (getattr(step, "file_scope", None) or []))
+        file_refs = re.findall(
+            r"((?:[~\w.\-]+)?(?:/[\w.\-]+)+|[\w.\-]+\.(?:csv|tsv|txt|parquet|xlsx?|json|vcf|gz|bgen|bed|pgen))",
+            f"{haystack} {file_text}",
+            flags=re.I,
+        )
+        variant_ext = re.compile(r"(\.vcf(\.gz)?|\.bgen|\.bed|\.pgen)$", re.I)
+        tabular_ext = re.compile(r"\.(csv|tsv|txt|parquet|xlsx?|json)$", re.I)
+        if any(variant_ext.search(ref) for ref in file_refs):
+            return True
+        non_path_text = haystack
+        for ref in sorted(set(file_refs), key=len, reverse=True):
+            non_path_text = non_path_text.replace(ref, " ")
+        non_path = non_path_text.lower()
+        if any(tabular_ext.search(ref) for ref in file_refs) and not re.search(
+            r"\b(wgs|whole[- ]genome|vcf|genotyp(?:e|ing)|variant calling|raw variants?)\b|全基因组|基因型|变异文件",
+            non_path,
+            flags=re.I,
+        ):
+            return False
+        return bool(re.search(
+            r"\b(wgs|whole[- ]genome|vcf|genotyp(?:e|ing)|variant calling|raw variants?|run\s+gwas|gwas association)\b|全基因组|基因型|变异文件",
+            non_path,
+            flags=re.I,
+        ))
 
     def _recent_plan_error_details(self) -> str:
         session = self._require_session()
@@ -1490,7 +1997,7 @@ class InteractiveShell:
         except Exception as exc:
             return {"n_samples": 0, "n_indexed": 0, "workflow_mode": "unknown", "error": str(exc)}
 
-        dirs = _get_vcf_dirs()
+        dirs = _get_vcf_dirs(self._require_session() if self.session is not None else None)
         files = discover_vcf_files(*dirs)
         executables = {
             "bcftools": find_executable("bcftools"),
@@ -1569,16 +2076,48 @@ class InteractiveShell:
             return
         self._set_activity("refining plan")
         objective = session.state.plan.objective
+        # Snapshot the plan state: drafting re-plans through the runtime and may mutate session.state
+        # mid-flight (the plan AND its derived pending_work), so a failed/timed-out refinement must
+        # restore both to truly leave the plan unchanged.
+        original_plan = copy.deepcopy(session.state.plan)
+        original_pending_work = copy.deepcopy(session.state.pending_work)
+        previous_mode = runtime.config.approval_profile  # drafting flips to read-only "plan"; restore on abort
+        build_timeout_s = max(0.0, float(getattr(self.settings, "plan_build_timeout_s", 240.0)))
+        provider_timeout_restore = self._apply_planning_provider_caps(runtime, build_timeout_s)
+        plan = None
         try:
-            # Re-plan through the same council path (with live progress) so the
-            # refinement produces a real, objective-specific plan, not a stub.
-            plan = self._draft_plan_with_live_progress(objective, refinement=arg)
+            # Re-plan through the same council path (with live progress) so the refinement produces a
+            # real, objective-specific plan — under the SAME build-timeout guard as /plan so it can't hang.
+            with _plan_build_wall_clock_timeout(build_timeout_s):
+                plan = self._draft_plan_with_live_progress(objective, refinement=arg)
+        except PlanBuildTimeoutError:
+            self._set_activity("idle")
+            timeout_label = f"{build_timeout_s:g}"
+            reason = (
+                f"Plan refinement stalled for {timeout_label}s with no model activity "
+                f"(plan_build_timeout_s={timeout_label}s); the original plan is unchanged."
+            )
+            self._emit_plan_phase("Plan review", status="error", message=reason, metadata={"feedback": arg.strip()})
+            self.console.print(f"[red]Plan refinement timed out:[/] {_rich_escape(reason)}")
+            return {"status": "failed", "error": reason, "step_status": "timeout"}
         except CouncilError as exc:
             self._set_activity("idle")
             self._emit_plan_phase("Plan review", status="error", message=str(exc), metadata={"feedback": arg.strip()})
-            runtime.save_session(session)
             self.console.print(f"[red]Plan refinement failed:[/] {_rich_escape(str(exc))}")
             return {"status": "failed", "error": str(exc)}
+        finally:
+            self._restore_planning_provider_caps(provider_timeout_restore)
+            if plan is None:
+                # The draft aborted (timeout / council error): restore the pre-edit plan, its derived
+                # pending_work, AND the approval profile (drafting flips to read-only "plan") so a failed
+                # refinement leaves no half-mutated state behind. Restore the EXACT profile — never widen.
+                try:
+                    session.state.plan = original_plan
+                    session.state.pending_work = original_pending_work
+                    runtime.set_approval_profile(previous_mode)
+                    runtime.save_session(session)
+                except Exception:
+                    pass
         self._record_plan_review_graph(plan, action="refine", choice="fix", detail=arg.strip())
         self._emit_plan_phase(
             "Plan review",
@@ -1961,9 +2500,13 @@ class InteractiveShell:
 
             legacy = self._require_legacy_agent()
             session = self._require_session()
-            report_dir = Path(self.settings.reports_dir) / session.session_id / "research"
+            report_dir = self._session_report_dir(session) / "research"
             report_dir.mkdir(parents=True, exist_ok=True)
             ctx = legacy._build_ctx(report_dir)
+            try:
+                ctx.workspace_root = Path(session.cwd)
+            except Exception:
+                pass
             return dict(_deep_research(subquery, max_sources, ctx=ctx) or {})
         except Exception:
             return {}
@@ -2908,7 +3451,7 @@ class InteractiveShell:
                 verifications.append(f"{ver.get('command', '')}={ver.get('status', '')}")
         if not report_present:
             try:
-                report_dir = Path(self.settings.reports_dir) / session.session_id
+                report_dir = self._session_report_dir(session)
                 if report_dir.exists():
                     scanned = 0
                     for path in report_dir.rglob("*"):  # bounded scan to cap worst-case I/O
@@ -3099,6 +3642,7 @@ class InteractiveShell:
             runtime.config = self.session.config
             runtime.provider_router.config = self.session.config
             runtime.set_approval_profile(self.session.config.approval_profile)
+            self._reroot_job_manager(self.session)
             self._warn_if_workspace_changed(self.session)
             self._record_event(
                 AgentEvent.make(
@@ -3115,6 +3659,7 @@ class InteractiveShell:
             runtime.config = self.session.config
             runtime.provider_router.config = self.session.config
             runtime.set_approval_profile(self.session.config.approval_profile)
+            self._reroot_job_manager(self.session)
             self._warn_if_workspace_changed(self.session)
             self._record_event(
                 AgentEvent.make(
@@ -3154,7 +3699,9 @@ class InteractiveShell:
 
     def _cmd_new(self, arg: str = "") -> None:
         runtime = self._require_runtime()
-        self.session = runtime.create_session(title=arg.strip() or "Interactive session", cwd=str(Path.cwd()))
+        cwd = self._require_session().cwd if self.session is not None else str(Path.cwd())
+        self.session = runtime.create_session(title=arg.strip() or "Interactive session", cwd=cwd)
+        self._reroot_job_manager(self.session)
         runtime.save_session(self.session)
         self.console.print(f"[green]New session:[/] {self.session.session_id}")
         return {"session_id": self.session.session_id}
@@ -3206,9 +3753,7 @@ class InteractiveShell:
         except Exception:
             pass
         # Re-root background jobs under the new workspace.
-        if self.job_manager is not None:
-            jobs_dir = str(getattr(self.settings, "jobs_dir_name", ".biobank_jobs") or ".biobank_jobs")
-            self.job_manager.jobs_root = Path(new_cwd) / jobs_dir
+        self._reroot_job_manager(session)
         runtime.save_session(session)
         try:
             self._record_event(
@@ -3235,7 +3780,11 @@ class InteractiveShell:
         jm = self.job_manager
         recs = jm.list() if jm is not None else []
         if not recs:
-            self.console.print("[dim]No background jobs.[/]")
+            self.console.print(
+                "[dim]No background jobs.[/]\n"
+                "[dim]For long bioinformatics commands, ask the agent to use the run_job tool; "
+                "then monitor with /jobs and /job-tail <job-id>.[/]"
+            )
             return {"status": "ok", "jobs": []}
         table = Table(title="[bold]Background Jobs[/bold]", box=box.SIMPLE)
         table.add_column("Job"); table.add_column("State"); table.add_column("Label")
@@ -3265,10 +3814,11 @@ class InteractiveShell:
         return {"status": "ok", "job_id": job_id, "state": rec.state}
 
     def _cmd_diff(self, *_args: Any) -> None:
+        session = self._require_session()
         try:
             result = subprocess.run(
                 ["git", "status", "--short"],
-                cwd=Path.cwd(),
+                cwd=session.cwd,
                 text=True,
                 capture_output=True,
                 timeout=5,
@@ -3290,12 +3840,13 @@ class InteractiveShell:
 
     def _cmd_doctor(self, *_args: Any) -> None:
         runtime = self._require_runtime()
+        session = self._require_session()
         tool_summary = self._tool_summary_snapshot()
         wgs = self._wgs_readiness_snapshot()
         checks = [
             ("python", sys.version.split()[0]),
-            ("workspace", str(Path.cwd())),
-            ("reports_dir", _path_state(Path(self.settings.reports_dir))),
+            ("workspace", session.cwd),
+            ("reports_dir", _path_state(self._reports_root(session))),
             ("memory_dir", _path_state(Path(self.settings.memory_dir))),
             ("sessions", _path_state(runtime.session_store.root)),
             ("llm_model", self.settings.llm_model),
@@ -3461,7 +4012,7 @@ class InteractiveShell:
         except Exception:
             audited = session
         report = audit_session(runtime, audited)
-        artifacts = write_audit_report(report, Path(self.settings.reports_dir) / "audits")
+        artifacts = write_audit_report(report, self._reports_root(audited) / "audits")
         self._record_event(
             AgentEvent.make(
                 AgentEventType.PLAN_PHASE,
@@ -3551,7 +4102,7 @@ class InteractiveShell:
             return
         task = HarnessTask.from_file(path)
         runner = RuntimeHarnessRunner(self)
-        report = runner.run(task, output_dir=Path(self.settings.reports_dir) / "harness")
+        report = runner.run(task, output_dir=self._reports_root(session) / "harness")
         self._record_event(
             AgentEvent.make(
                 AgentEventType.PLAN_PHASE,
@@ -3570,7 +4121,7 @@ class InteractiveShell:
         runtime = self._require_runtime()
         session = self._require_session()
         report = learn_from_session(runtime, session)
-        artifacts = write_learning_report(report, Path(self.settings.reports_dir) / "learning")
+        artifacts = write_learning_report(report, self._reports_root(session) / "learning")
         # Curator pass — surface usage-driven skill-tier recommendations (dry-run,
         # advisory). /learn reports promotions/demotions; it never auto-rewrites the
         # manifest (tier mutation stays an explicit, reviewable action).
@@ -3890,12 +4441,24 @@ class InteractiveShell:
         legacy = self._require_legacy_agent()
         # Reports follow the active workspace by default so a --workspace/`/cd`
         # switch keeps inputs and outputs together (issue #4).
-        if getattr(self.settings, "reports_follow_workspace", True):
-            report_dir = Path(session.cwd) / "reports" / session.session_id
-        else:
-            report_dir = Path(self.settings.reports_dir) / session.session_id
+        report_dir = self._session_report_dir(session)
         report_dir.mkdir(parents=True, exist_ok=True)
         ctx = legacy._build_ctx(report_dir)
+        # Critical compatibility for legacy direct skills (python_exec/shell_exec):
+        # set workspace_root and project_root before the broader best-effort
+        # backfill below, so an unrelated legacy-state attribute failure cannot
+        # silently drop tools back to the process cwd.
+        try:
+            ctx.workspace_root = Path(session.cwd)
+        except Exception:
+            pass
+        try:
+            setattr(ctx.settings, "project_root", str(Path(session.cwd)))
+        except Exception:
+            try:
+                object.__setattr__(ctx.settings, "project_root", str(Path(session.cwd)))
+            except Exception:
+                pass
         try:
             legacy.state.current_report_dir = report_dir
         except Exception:
@@ -4039,7 +4602,7 @@ class InteractiveShell:
 
     def _cmd_export(self, fmt: str = "json") -> None:
         session = self._require_session()
-        root = Path(self.settings.reports_dir) / "exports"
+        root = self._reports_root(session) / "exports"
         root.mkdir(parents=True, exist_ok=True)
         if str(fmt or "json").lower().startswith("md"):
             path = root / f"{session.session_id}.md"
@@ -4049,6 +4612,94 @@ class InteractiveShell:
             path.write_text(json.dumps(session.to_dict(), indent=2, ensure_ascii=False, default=str), encoding="utf-8")
         self.console.print(f"[green]Exported:[/] {path}")
         return {"path": str(path), "format": fmt}
+
+    def _cmd_artifacts(self, *_args: Any) -> dict[str, Any]:
+        session = self._require_session()
+        artifacts = list(session.state.custom_data.get("last_artifact_index") or [])
+        if artifacts:
+            self._render_artifact_index(artifacts)
+            return {"status": "ok", "artifacts": artifacts, "count": len(artifacts)}
+        report_dir = self._session_report_dir(session)
+        self.console.print(
+            "[dim]No captured plan artifacts yet. New plan outputs will be listed here after execution.[/]\n"
+            f"[dim]Current session report directory: {report_dir}[/]"
+        )
+        return {"status": "empty", "artifacts": [], "report_dir": str(report_dir)}
+
+    def _cmd_tools(self, *_args: Any) -> dict[str, Any]:
+        runtime = self._require_runtime()
+        from biobank_agent.core.tools.protocol import LegacySkillToolHandler
+        from biobank_agent.skills import manifest as _sm
+
+        rows: list[dict[str, Any]] = []
+        category_counts: Counter[str] = Counter()
+        exposure_counts: Counter[str] = Counter()
+        capability_counts: Counter[str] = Counter()
+        for handler in sorted(runtime.tool_registry.list_handlers(), key=lambda h: str(h.name)):
+            spec = handler.spec()
+            meta = spec.metadata()
+            caps = sorted(getattr(cap, "value", str(cap)) for cap in handler.required_capabilities())
+            for cap in caps:
+                capability_counts[cap] += 1
+            try:
+                exposure = runtime.tool_registry._exposure(handler)
+            except Exception:
+                exposure = _sm.exposure_of(str(handler.name)) if isinstance(handler, LegacySkillToolHandler) else _sm.DIRECT
+            category = _sm.domain_of(str(handler.name))
+            if category == "other":
+                category = self._tool_category(str(handler.name))
+            category_counts[category] += 1
+            exposure_counts[exposure] += 1
+            rows.append({
+                "name": str(handler.name),
+                "category": category,
+                "exposure": exposure,
+                "capabilities": caps,
+                "safety": meta.get("safety_class", ""),
+                "approval": meta.get("approval_requirement", ""),
+                "workspace_scope": meta.get("workspace_scope", ""),
+                "mutating": bool(handler.is_mutating),
+                "description": str(spec.description or ""),
+            })
+
+        summary = Table(title="Tool Registry", box=box.SIMPLE)
+        summary.add_column("Metric", style="cyan", no_wrap=True)
+        summary.add_column("Value")
+        summary.add_row("total", str(len(rows)))
+        summary.add_row("exposure", ", ".join(f"{k}:{v}" for k, v in sorted(exposure_counts.items())) or "-")
+        summary.add_row("categories", ", ".join(f"{k}:{v}" for k, v in sorted(category_counts.items())) or "-")
+        summary.add_row("capabilities", ", ".join(f"{k}:{v}" for k, v in capability_counts.most_common(6)) or "-")
+        summary.add_row("long commands", "use run_job, then monitor with /jobs and /job-tail <job-id>")
+        self.console.print(summary)
+
+        table = Table(title="Available Tools", box=box.SIMPLE)
+        table.add_column("Tool", style="cyan", no_wrap=True)
+        table.add_column("Category", no_wrap=True)
+        table.add_column("Exposure", no_wrap=True)
+        table.add_column("Capabilities")
+        table.add_column("Safety")
+        table.add_column("Description")
+        for row in rows[:80]:
+            safety = "/".join(str(row.get(k) or "-") for k in ("safety", "approval", "workspace_scope"))
+            table.add_row(
+                row["name"],
+                row["category"],
+                row["exposure"],
+                ", ".join(row["capabilities"]) or "-",
+                safety,
+                row["description"][:90],
+            )
+        if len(rows) > 80:
+            table.caption = f"{len(rows) - 80} additional tool(s) omitted from display; full list returned in the command payload."
+        self.console.print(table)
+        return {
+            "status": "ok",
+            "total_tools": len(rows),
+            "categories": dict(category_counts),
+            "exposures": dict(exposure_counts),
+            "capabilities": dict(capability_counts),
+            "tools": rows,
+        }
 
     def _cmd_skills(self) -> None:
         runtime = self._require_runtime()
@@ -4103,7 +4754,22 @@ class InteractiveShell:
         missing = ", ".join(str(x) for x in (wgs.get("missing_for_standard_workflow") or []) if x)
         wgs_table.add_row("Missing for standard", missing or "none")
         self.console.print(wgs_table)
-        return names
+        return {
+            "status": "ok",
+            "total_tools": len(handlers),
+            "direct_tools": n_direct,
+            "domains": {
+                domain: {
+                    "total": sum(len(names) for names in tiers.values()),
+                    "direct": len(tiers.get(_sm.DIRECT, [])),
+                    "deferred": len(tiers.get(_sm.DEFERRED, [])),
+                    "hidden": len(tiers.get(_sm.HIDDEN, [])),
+                    "examples": sorted([n for names in tiers.values() for n in names])[:12],
+                }
+                for domain, tiers in sorted(grouped.items())
+            },
+            "wgs": wgs,
+        }
 
     def _cmd_model(self, arg: str = "") -> None:
         runtime = self._require_runtime()

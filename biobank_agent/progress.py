@@ -395,27 +395,23 @@ class PlanRunDashboard:
         now = time.time()
         table = Table(show_header=False, box=None, padding=(0, 1))
         table.add_column(width=2)              # spinner
-        table.add_column(min_width=8)          # model
-        table.add_column(width=14, no_wrap=True, overflow="ellipsis")  # activity · persona
-        table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")   # streamed partial
-        table.add_column(justify="right", width=7)  # timer
+        table.add_column(min_width=10)         # model
+        table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")  # what it is doing now · persona
+        table.add_column(justify="right", width=7)  # live timer
         frame = _SPINNER_FRAMES[int(now * 8) % len(_SPINNER_FRAMES)]
         # Stable order: by start time. Cap rows so a wide fan-out cannot overflow.
         rows = sorted(self._active.items(), key=lambda kv: kv[1].get("start_ts", now))[: max(1, max_rows)]
         for _label, row in rows:
             model = _rich_escape(_short_model(row.get("model", "")))
-            # An explicit per-job activity verb (e.g. "revising R2") takes
-            # precedence over the stage default; it is model/round-derived, so
-            # escape it. Falls back to the stage verb ("drafting"/"debating").
+            # A clear "what it is doing now" verb (e.g. "revising R2") instead of raw model tokens —
+            # an explicit per-job activity takes precedence over the stage default ("drafting"/"debating").
             activity = _rich_escape(str(row.get("activity") or _STAGE_ACTIVITY.get(row.get("stage", ""), "working")))
             persona = row.get("persona")
             label = f"[cyan]{activity}[/cyan]"
             if persona:
                 label += f" [dim]· {_rich_escape(str(persona))}[/dim]"
-            partial = row.get("partial", "")
-            stream = f"[white]{self._sanitize(partial, 100)}[/white]" if partial else ""
             timer = _elapsed_str(now - row.get("start_ts", now))
-            table.add_row(f"[green]{frame}[/green]", f"[bold]{model}[/bold]", label, stream, f"[dim]{timer}[/dim]")
+            table.add_row(f"[green]{frame}[/green]", f"[bold]{model}[/bold]", label, f"[dim]{timer}[/dim]")
         return table
 
     def _phases_renderable(self) -> Table:

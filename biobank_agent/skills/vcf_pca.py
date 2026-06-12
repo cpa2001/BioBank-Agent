@@ -109,6 +109,7 @@ def vcf_pca(
     all_G = []
     all_vids = []
     sample_order = None
+    skipped_regions: list[dict[str, str]] = []
 
     for rgn in regions_to_process:
         merged_path = tmp_dir / f"merged_pca_{rgn.replace(':', '_')}.vcf.gz"
@@ -116,6 +117,7 @@ def vcf_pca(
             merge_vcfs(list(sample_paths.values()), merged_path, region=rgn)
         except Exception as e:
             logger.warning("Merge failed for %s: %s", rgn, e)
+            skipped_regions.append({"region": str(rgn), "stage": "merge", "reason": str(e)})
             continue
 
         G_chr, vids_chr, samples = build_genotype_matrix(
@@ -127,6 +129,11 @@ def vcf_pca(
         )
 
         if G_chr.shape[1] == 0:
+            skipped_regions.append({
+                "region": str(rgn),
+                "stage": "variant_filter",
+                "reason": "No variants remained after MAF/SNV filtering.",
+            })
             continue
 
         if sample_order is None:
@@ -138,7 +145,10 @@ def vcf_pca(
             break
 
     if not all_G:
-        return {"error": "No common variants found after merging and MAF filtering."}
+        return {
+            "error": "No common variants found after merging and MAF filtering.",
+            "skipped_regions": skipped_regions,
+        }
 
     G = np.hstack(all_G)
     n_samples, n_snps = G.shape
@@ -229,6 +239,7 @@ def vcf_pca(
             "explained_variance": [round(float(v), 6) for v in explained],
             "sample_order": sample_order,
             "n_snps": n_snps,
+            "skipped_regions": skipped_regions,
         }
 
     return {
@@ -242,4 +253,5 @@ def vcf_pca(
         "figures": [str(p) for p in figures],
         "result_dir": str(report_dir),
         "pca_stored_in_state": True,
+        "skipped_regions": skipped_regions,
     }

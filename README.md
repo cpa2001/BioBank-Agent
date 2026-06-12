@@ -20,7 +20,7 @@ Biobank Agent is an LLM-powered scientific workflow agent for population-scale b
 The current repository is a v3 runtime-oriented build with:
 
 - **101 registered skills** discovered from `biobank_agent.skills`, including cohort analysis, modelling, WGS/VCF workflows, literature research, report writing, paper→skill synthesis, and self-evolution support.
-- **69 slash commands** in the v3 command registry, including `/plan`, `/plan-diagnose`, `/plan-retry`, `/plan-use`, `/research`, `/doctor`, `/tools`, `/resume`, `/audit`, `/trace`, `/harness`, `/replay`, `/learn`, and `/evolve`.
+- **70 slash commands** in the v3 command registry, including `/plan`, `/plan-diagnose`, `/plan-retry`, `/plan-use`, `/research`, `/doctor`, `/tools`, `/artifacts`, `/resume`, `/audit`, `/trace`, `/harness`, `/replay`, `/learn`, and `/evolve`.
 - **Runtime-backed sessions** with event logs, action graph references, plan state, trajectory replay, audit reports, and resume support.
 - **VirtualCell/WGS support** for local VCF discovery, WGS dependency checks, exploratory VCF QC, PCA, kinship, association, burden testing, annotation, pathway enrichment, and WGS report polishing.
 - **OpenAI-compatible providers** configured through `.env`, with multi-model planning and review routes controlled by settings.
@@ -127,6 +127,21 @@ Useful plan commands:
 | `/plan-resume` | Resume a paused or repaired plan. |
 | `/plan-skip <step_id>` | Record a step id to skip (advisory — does not yet alter execution; use `/plan-edit` to change the plan). |
 
+Long-running bioinformatics steps should either stream progress through the
+foreground tool log or run through the background job tools. Use `/jobs` to see
+running jobs and logs, and `/artifacts` after a step or plan completes to see
+full output paths. Tune long-run behavior in `.env`:
+
+```bash
+PLAN_BUILD_TIMEOUT_S=240
+PLAN_STEP_TIMEOUT_S=240
+EXEC_LONG_TOOL_TIMEOUT_S=7200
+```
+
+Relative `cwd` and output paths are resolved under the active workspace. Start
+`biobank` from the project folder that should own the inputs, scripts, logs, and
+outputs, or provide paths relative to that folder.
+
 ### WGS and VirtualCell
 
 The repository can discover local VCFs under `data/vc_wgs_vcf`. The WGS skills include:
@@ -180,11 +195,19 @@ Configuration is loaded from `.env` through `biobank_agent.config.Settings`.
 | `LLM_BASE_URL` | OpenAI-compatible provider endpoint. |
 | `LLM_API_KEY` | Provider API key. Keep this out of logs and commits. |
 | `LLM_MODEL` | Primary model for normal turns. |
+| `LLM_REQUEST_TIMEOUT_S` | Per-request provider timeout for model calls. |
+| `LLM_MAX_RETRIES` | Retry count for transient provider errors outside plan-time timeout overrides. |
+| `LLM_RETRY_BASE_DELAY_S` | Base retry backoff delay for provider calls. |
 | `DATA_DIR` | Processed biobank or VirtualCell-style data directory. |
 | `RAW_DIR` | Optional raw data fallback directory. |
 | `REPORTS_DIR` | Generated reports and analysis artifacts. |
 | `PLANS_DIR` | Saved plan checkpoints. |
 | `MEMORY_DIR` | Runtime sessions, memory, trajectories, and action graph state. |
+| `PLAN_BUILD_TIMEOUT_S` | Wall-clock cap for generating a plan before saving a diagnosis. |
+| `PLAN_STEP_TIMEOUT_S` | Wall-clock cap for one autonomous plan step; set `0` to disable. |
+| `EXEC_DEFAULT_TIMEOUT_S` | Default timeout for shell/Python tools. |
+| `EXEC_LONG_TOOL_TIMEOUT_S` | Minimum timeout for known long bioinformatics tools. |
+| `JOBS_DIR_NAME` | Workspace subdirectory for background job metadata and logs. |
 | `MULTI_MODEL_ENABLED` | Enable multi-model routing when configured. |
 | `MCP_CONFIG_PATH` | Optional MCP server configuration path. |
 

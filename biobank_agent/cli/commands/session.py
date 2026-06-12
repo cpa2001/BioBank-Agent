@@ -34,6 +34,7 @@ def commands() -> list[RegisteredCommand]:
         RegisteredCommand("/compact", "/compact", "Compress conversation history", action("compact")),
         RegisteredCommand("/clear", "/clear", "Reset session state", action("clear")),
         RegisteredCommand("/export", "/export [format]", "Export session as JSON or Markdown", _export),
+        RegisteredCommand("/artifacts", "/artifacts", "Show output files and logs from the latest plan run", action("artifacts")),
         RegisteredCommand("/skills", "/skills", "List all available analysis tools", action("skills")),
         RegisteredCommand("/tools", "/tools", "Show available tools by category and health", action("tools")),
         RegisteredCommand("/history", "/history", "Show analysis history", action("history")),

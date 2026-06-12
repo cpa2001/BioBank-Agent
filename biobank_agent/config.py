@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: str = ""
     llm_model: str = "deepseek/deepseek-v4-pro"
+    llm_request_timeout_s: float = 60.0
+    llm_max_retries: int = 3
+    llm_retry_base_delay_s: float = 2.0
 
     # ── Data Paths ───────────────────────────────────────────────
     # Accept both new (DATA_DIR/RAW_DIR) and legacy (UKB_PARQUET_DIR/UKB_RAW_DIR) env var names
@@ -154,6 +157,7 @@ class Settings(BaseSettings):
     plan_external_council_timeout_s: int = 180
     plan_external_council_agents: str = "codex,claude,gemini"
     plan_heartbeat_interval_s: float = 1.0
+    plan_build_timeout_s: float = 240.0      # wall-clock cap for plan drafting; 0 disables
     plan_step_max_retries: int = 2
     plan_step_timeout_s: float = 240.0       # wall-clock cap for one autonomous plan step; 0 disables
     cli_refresh_per_second: float = 10.0

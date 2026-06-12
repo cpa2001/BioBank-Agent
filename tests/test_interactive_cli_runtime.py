@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from rich.console import Console
 
 from biobank_agent.cli.commands import CommandContext
 from biobank_agent.cli.commands.registry import SlashCommandRegistry, build_core_registry
-from biobank_agent.cli.interactive import InteractiveShell
+from biobank_agent.cli.interactive import InteractiveShell, PlanBuildTimeoutError, PlanStepTimeoutError
 from biobank_agent.core.events import AgentEvent, AgentEventType
 from biobank_agent.runtime import PlanState, PlanStatus, PlanStep, ProviderResponse, ToolCall
 
@@ -300,6 +301,261 @@ def test_failed_plan_continue_retries_from_failed_step(tmp_path):
     assert "Retrying plan from step" in output.getvalue()
 
 
+def test_planning_failure_diagnosis_without_active_plan(tmp_path):
+    shell, output = _shell(tmp_path)
+    shell.session.state.plan = None
+    shell.session.state.custom_data["plan_last_diagnosis"] = {
+        "status": "failed",
+        "step_id": "planning",
+        "step_title": "Plan generation",
+        "step_status": "failed",
+        "reason": "planner returned invalid JSON",
+        "objective": "complex task",
+        "blocked": True,
+        "repair_options": ["retry with a narrower task"],
+    }
+
+    shell.handle_message("what is the problem?")
+
+    assert "Plan Diagnosis" in output.getvalue()
+    assert "planner returned invalid JSON" in output.getvalue()
+
+
+def test_plan_timeout_errors_are_not_builtin_timeout_subclasses():
+    assert not issubclass(PlanBuildTimeoutError, TimeoutError)
+    assert not issubclass(PlanStepTimeoutError, TimeoutError)
+
+
+def test_plan_generation_timeout_saves_natural_language_diagnosis(tmp_path):
+    shell, output = _shell(tmp_path)
+    shell.settings.plan_build_timeout_s = 0.1
+
+    def slow_draft(_objective):
+        time.sleep(5)
+
+    shell._draft_plan_with_live_progress = slow_draft
+
+    result = shell._cmd_plan("complex WGS analysis")
+
+    assert result["status"] == "failed"
+    assert result["step_status"] == "timeout"
+    diagnosis = shell.session.state.custom_data["plan_last_diagnosis"]
+    assert diagnosis["step_id"] == "planning"
+    assert diagnosis["step_status"] == "timeout"
+    assert "plan_build_timeout_s=0.1s" in diagnosis["reason"]
+    assert "Planning timed out" in output.getvalue()
+
+    shell.handle_message("what is the problem?")
+
+    text = output.getvalue()
+    assert "Plan Diagnosis" in text
+    assert "Plan generation stalled" in text
+
+
+def test_plan_build_timeout_restores_approval_profile(tmp_path):
+    shell, _output = _shell(tmp_path)
+    shell.settings.plan_build_timeout_s = 0.1
+    runtime = shell._require_runtime()
+    runtime.set_approval_profile("yolo")  # the user's real profile (runtime normalizes it)
+    user_profile = runtime.config.approval_profile
+
+    def slow_draft_that_flips(_objective):
+        runtime.set_approval_profile("plan")  # drafting flips to the read-only "plan" profile
+        time.sleep(5)
+
+    shell._draft_plan_with_live_progress = slow_draft_that_flips
+    result = shell._cmd_plan("complex WGS analysis")
+
+    assert result["status"] == "failed"
+    # A timed-out build must NOT leave the runtime stuck in read-only plan mode.
+    assert runtime.config.approval_profile != "plan"
+    assert runtime.config.approval_profile == user_profile
+
+
+def test_failed_plan_build_does_not_widen_plan_permission(tmp_path):
+    shell, _output = _shell(tmp_path)
+    shell.settings.plan_build_timeout_s = 0.1
+    runtime = shell._require_runtime()
+    runtime.set_approval_profile("plan")  # the user is ALREADY in read-only plan mode
+
+    def slow_draft(_objective):
+        time.sleep(5)
+
+    shell._draft_plan_with_live_progress = slow_draft
+    shell._cmd_plan("complex WGS analysis")
+
+    # A failed draft must NOT escalate a user who was already in plan mode to a wider profile.
+    assert runtime.config.approval_profile == "plan"
+
+
+def test_plan_edit_respects_build_timeout_and_preserves_plan(tmp_path):
+    shell, _output = _shell(tmp_path)
+    shell.settings.plan_build_timeout_s = 0.1
+    runtime = shell._require_runtime()
+    runtime.set_approval_profile("yolo")
+    user_profile = runtime.config.approval_profile
+    shell.session.state.plan = PlanState(objective="vitiligo WGS analysis", title="WGS", steps=[], revision=1)
+    shell.session.state.pending_work = [{"step": "original-qc"}]
+
+    def slow_draft_that_mutates(_objective, refinement=""):
+        # the runtime mutates session.state (plan + pending_work) and flips to read-only "plan", then stalls
+        runtime.set_approval_profile("plan")
+        shell.session.state.plan.revision = 99
+        shell.session.state.plan.objective = "MUTATED"
+        shell.session.state.pending_work = [{"step": "half-mutated"}]
+        time.sleep(5)
+
+    shell._draft_plan_with_live_progress = slow_draft_that_mutates
+    result = shell._cmd_plan_edit("simplify the QC step")
+
+    # /plan-edit goes through the build-timeout guard (no hang) AND leaves no half-mutated state behind.
+    assert result["status"] == "failed"
+    assert result.get("step_status") == "timeout"
+    assert shell.session.state.plan.revision == 1
+    assert shell.session.state.plan.objective == "vitiligo WGS analysis"
+    assert shell.session.state.pending_work == [{"step": "original-qc"}]
+    assert runtime.config.approval_profile == user_profile  # profile restored, not left at "plan"
+
+
+def test_plan_generation_temporarily_caps_provider_request_timeout(tmp_path):
+    shell, _output = _shell(tmp_path)
+    shell.settings.plan_build_timeout_s = 1.5
+    plan = PlanState(objective="short task", title="Short", steps=[])
+
+    class TimeoutAwareProvider:
+        def __init__(self) -> None:
+            self.request_timeout_s = 60.0
+            self.max_retries = 3
+            self.observed_during_plan: float | None = None
+            self.observed_retries_during_plan: int | None = None
+
+        def set_llm_policy(self, *, request_timeout_s=None, max_retries=None):
+            previous = (self.request_timeout_s, self.max_retries)
+            if request_timeout_s is not None:
+                self.request_timeout_s = float(request_timeout_s)
+            if max_retries is not None:
+                self.max_retries = int(max_retries)
+            return previous
+
+    provider = TimeoutAwareProvider()
+    shell.runtime.provider_router.providers = {"fake-model": provider}
+
+    def draft(_objective):
+        provider.observed_during_plan = provider.request_timeout_s
+        provider.observed_retries_during_plan = provider.max_retries
+        return plan
+
+    shell._draft_plan_with_live_progress = draft
+    shell._run_plan_review_loop = lambda _plan, previous_mode: None
+
+    result = shell._cmd_plan("short task")
+
+    assert result["status"] == "draft"
+    assert provider.observed_during_plan == 1.5
+    assert provider.observed_retries_during_plan == 0
+    assert provider.request_timeout_s == 60.0
+    assert provider.max_retries == 3
+
+
+def test_wgs_preflight_ignores_tabular_gwas_summary_csv(tmp_path):
+    plan = PlanState(
+        objective="Read file all_traits_5e-11_gwas_results.csv and classify traits",
+        title="Tabular GWAS summary analysis",
+        steps=[],
+        audit_summary="Tabular-analysis fallback plan",
+    )
+    step = PlanStep(
+        id="load",
+        title="Load and profile the file",
+        purpose="Use python_exec to load all_traits_5e-11_gwas_results.csv as a table.",
+        tool_scope=["python_exec"],
+        file_scope=["all_traits_5e-11_gwas_results.csv"],
+    )
+
+    assert InteractiveShell._plan_step_mentions_wgs(plan, step) is False
+
+
+def test_wgs_preflight_detects_real_variant_inputs(tmp_path):
+    plan = PlanState(objective="Run WGS association", title="WGS", steps=[])
+    step = PlanStep(
+        id="assoc",
+        title="Run association",
+        purpose="Run VCF association with PCA covariates",
+        tool_scope=["vcf_association"],
+        file_scope=["cohort.vcf.gz"],
+    )
+
+    assert InteractiveShell._plan_step_mentions_wgs(plan, step) is True
+
+
+def test_wgs_preflight_does_not_block_non_variant_context_step_in_wgs_plan(tmp_path):
+    plan = PlanState(objective="Run WGS association for vitiligo", title="WGS analysis", steps=[])
+    step = PlanStep(
+        id="context",
+        title="Read phenotype table",
+        purpose="Inspect phenotype.tsv columns and summarize case/control labels.",
+        tool_scope=["python_exec"],
+        file_scope=["phenotype.tsv"],
+    )
+
+    assert InteractiveShell._plan_step_mentions_wgs(plan, step) is False
+
+
+def test_collect_artifact_index_from_step_outputs(tmp_path):
+    shell, _output = _shell(tmp_path)
+    plan = PlanState(
+        objective="collect outputs",
+        title="outputs",
+        steps=[PlanStep(id="s1", title="Make outputs")],
+    )
+    outputs = {
+        "s1": {
+            "tool_results": [
+                ("python_exec", {
+                    "report_dir": str(tmp_path / "reports" / "s1"),
+                    "output": str(tmp_path / "reports" / "s1" / "single.tsv"),
+                    "outputs": [str(tmp_path / "reports" / "s1" / "table.tsv")],
+                    "run": {"log_path": str(tmp_path / "logs" / "tool.log")},
+                })
+            ],
+            "text": "done",
+        }
+    }
+
+    artifacts = shell._collect_artifact_index(plan, outputs)
+
+    paths = {item["path"] for item in artifacts}
+    assert str(tmp_path / "reports" / "s1") in paths
+    assert str(tmp_path / "reports" / "s1" / "single.tsv") in paths
+    assert str(tmp_path / "reports" / "s1" / "table.tsv") in paths
+    assert str(tmp_path / "logs" / "tool.log") in paths
+
+
+def test_finalize_execution_persists_artifact_index(tmp_path):
+    shell, _output = _shell(tmp_path)
+    plan = PlanState(
+        objective="collect outputs",
+        title="outputs",
+        steps=[PlanStep(id="s1", title="Make outputs")],
+    )
+    outputs = {
+        "s1": {
+            "tool_results": [
+                ("python_exec", {"log_path": str(tmp_path / "logs" / "tool.log")})
+            ],
+            "text": "done",
+        }
+    }
+
+    result = shell._finalize_execution(plan, 1, 0, None, 1, outputs)
+
+    assert result["artifacts"]
+    assert shell.session.state.custom_data["last_artifact_index"] == result["artifacts"]
+    reloaded = shell.runtime.session_store.load(shell.session.session_id)
+    assert reloaded is not None
+    assert reloaded.state.custom_data["last_artifact_index"] == result["artifacts"]
+
+
 def test_required_slash_commands_smoke(tmp_path):
     shell, output = _shell(tmp_path)
 
@@ -313,6 +569,9 @@ def test_required_slash_commands_smoke(tmp_path):
         "/diff",
         "/permissions readonly",
         "/doctor",
+        "/tools",
+        "/skills",
+        "/artifacts",
         "/agent",
         "/subagents",
         "/review check report",
@@ -328,10 +587,71 @@ def test_required_slash_commands_smoke(tmp_path):
     assert "finish migration" in text
     assert "Plan:" in text
     assert "Doctor" in text
+    assert "Tool Registry" in text
+    assert "Skill Tree" in text
+    assert "No captured plan artifacts yet" in text
     assert "Audit" in text
+    assert "Command failed" not in text
     assert shell.exit_requested is True
     assert any(e["type"] == "command_started" for e in shell.session.events)
     assert any(e["type"] == "command_finished" for e in shell.session.events)
+
+
+def test_tools_command_returns_structured_payload(tmp_path):
+    shell, output = _shell(tmp_path)
+
+    result = shell._cmd_tools()
+
+    assert result["status"] == "ok"
+    assert result["total_tools"] >= 1
+    assert "tools" in result and any(row["name"] == "demo_tool" for row in result["tools"])
+    assert "Tool Registry" in output.getvalue()
+
+
+def test_skills_command_returns_structured_payload(tmp_path):
+    shell, output = _shell(tmp_path)
+
+    result = shell._cmd_skills()
+
+    assert result["status"] == "ok"
+    assert result["total_tools"] >= result["direct_tools"] >= 1
+    assert "domains" in result and result["domains"]
+    assert "Skill Tree" in output.getvalue()
+
+
+def test_artifacts_command_renders_last_index(tmp_path):
+    shell, output = _shell(tmp_path)
+    path = str(tmp_path / "reports" / "table.tsv")
+    shell.session.state.custom_data["last_artifact_index"] = [{
+        "step_id": "s1",
+        "step_title": "Make table",
+        "tool": "python_exec",
+        "kind": "output_path",
+        "path": path,
+    }]
+
+    result = shell._cmd_artifacts()
+
+    assert result["status"] == "ok"
+    assert result["count"] == 1
+    assert result["artifacts"][0]["path"] == path
+    assert "Output Artifacts" in output.getvalue()
+    assert path in output.getvalue()
+
+
+def test_doctor_uses_session_workspace_and_reports_root(tmp_path):
+    shell, output = _shell(tmp_path)
+    workspace = tmp_path / "analysis_workspace"
+    workspace.mkdir()
+    shell.session.cwd = str(workspace)
+
+    result = shell._cmd_doctor()
+
+    assert result["workspace"] == str(workspace)
+    assert result["reports_dir"].endswith(str(workspace / "reports"))
+    text = output.getvalue()
+    assert str(workspace) in text
+    assert str(Path.cwd()) not in result["workspace"]
 
 
 def test_agent_command_can_switch_active_role_and_records_event(tmp_path):
