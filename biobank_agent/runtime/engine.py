@@ -1136,6 +1136,7 @@ class AgentRuntime:
         tool_seq: list[str] = []
         err_seq: list[str] = []
         nudged = False
+        nudged_empty = False
 
         def _trailing_run(seq: list) -> int:
             if not seq:
@@ -1207,7 +1208,36 @@ class AgentRuntime:
             messages.append({"role": "assistant", "content": response.text, "tool_calls": [tc.to_dict() for tc in response.tool_calls]})
 
             if not response.tool_calls:
-                converged = True
+                # A tool-call-free response is a final answer only if it actually contains something,
+                # or the turn already did tool work. An empty response with no tools and no prior tool
+                # results is a degenerate/empty model turn (reasoning models can spend their whole
+                # budget on hidden reasoning and return no content). Treating that as "converged" would
+                # mark a plan step COMPLETED with zero output (field problem #7). Nudge once for a real
+                # answer; if it stays empty, end the turn un-converged so it fails honestly instead of
+                # passing as an output-less success.
+                if response.text.strip() or turn.tool_results:
+                    converged = True
+                    break
+                if not nudged_empty and round_index < max_rounds - 1:
+                    nudged_empty = True
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous response was empty. Provide a final written answer to the "
+                            "task, or call a tool to make progress — do not reply with an empty message."
+                        ),
+                    })
+                    self._record_event(
+                        session,
+                        AgentEvent.make(
+                            AgentEventType.ERROR,
+                            session_id=session.session_id,
+                            turn_id=turn.id,
+                            message="empty model response; nudged once for a final answer",
+                            round=round_index,
+                        ),
+                    )
+                    continue
                 break
 
             self._record_event(

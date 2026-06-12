@@ -4,6 +4,48 @@ All notable changes to Biobank Agent are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0-rc2] - 2026-06-12
+
+Hardening and interface-maturity pass on top of rc1, driven by end-to-end
+testing of the live `biobank` CLI against a configured LLM and an external
+coding-agent review of every change. Focus: a real output-loss correctness
+fix, a rounded-out field benchmark, and a deep polish of the interactive
+plan/execution UI toward the clarity of mature coding agents.
+
+### Added
+- Field-issues benchmark case `field_large_nested_outputs`: deeply-nested
+  output paths under arbitrary keys are surfaced while a large path-free blob
+  is ignored — exact-match assertion (11 cases total)
+  (`biobank_agent/eval/field_benchmark.py`).
+- Runtime regression tests pinning the empty-final-turn convergence semantics
+  (`tests/core/test_runtime_substrate.py`).
+
+### Changed
+- Plan review is now a single unified surface: one "Execution Plan" panel with
+  the objective, a compact meta line, a steps tree carrying each step's
+  dependencies and tool/file scope, a linear flow line (compact plans only),
+  and the risk/verification detail — replacing the prior fields-table +
+  steps-table + separate flowchart panel that presented the same steps three
+  times (`biobank_agent/cli/interactive.py`).
+- The plan-review choice "Approve and fix plan" is renamed "Revise plan" — it
+  collects feedback and regenerates the plan, it does not approve
+  (`biobank_agent/cli/interactive.py`).
+- The bottom status toolbar now shows the active model, plan step progress,
+  running background-job count, and last-run artifact count alongside activity,
+  permissions, and session, with prompt-toolkit-HTML-safe escaping of dynamic
+  values (`biobank_agent/cli/interactive.py`).
+- The live execution dashboard's active rows now show the running step and tool
+  identity (e.g. "step 3/7 · Run QC", "vcf_qc · stdout") instead of a generic
+  activity placeholder, by tagging step-start and streamed-output events with an
+  activity label (`biobank_agent/cli/interactive.py`).
+
+### Fixed
+- A model turn that returns no text and no tool calls — having done no tool
+  work — no longer "converges" as a COMPLETED plan step with zero output (field
+  problem #7). The runtime nudges once for a real answer and, if the response
+  is still empty, leaves the turn FAILED rather than passing an output-less
+  success (`biobank_agent/runtime/engine.py`).
+
 ## [3.1.0-rc1] - 2026-06-11
 
 The v3.1 release candidate adds a capability-acquisition layer on top of the

@@ -427,7 +427,6 @@ def test_dashboard_lazy_starts_only_after_clarification(tmp_path, monkeypatch):
         "_record_plan_review_graph",
         "_render_planning_progress",
         "_render_plan",
-        "_render_plan_flow",
     ):
         monkeypatch.setattr(shell, name, lambda *a, **k: None)
     monkeypatch.setattr(shell.runtime, "save_session", lambda *a, **k: None)

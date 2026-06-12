@@ -123,6 +123,25 @@ def _check_output_paths_reported(_case: TestCase) -> tuple[bool, str]:
     return ok, f"paths_surfaced={out['count']} message_lists_dir={'/w/reports/run1' in out['message']}"
 
 
+def _check_large_nested_outputs(_case: TestCase) -> tuple[bool, str]:
+    from biobank_agent.runtime.output_summary import summarize_output_paths
+
+    # Output paths buried several levels deep under arbitrary keys, alongside a large path-free blob
+    # that must NOT explode into the summary — surfacing nested paths while ignoring noise.
+    steps = [
+        {"result": {"deeply": {"nested": {"out_file": "/w/run/deep/result.parquet"}}}},
+        {"artifacts": {"plots": [{"path": "/w/run/figs/a.png"}, {"path": "/w/run/figs/b.png"}]}},
+        {"noise": {f"k{i}": f"value-{i}" for i in range(500)}},  # large, path-free — must be ignored
+        {"summary_path": "/w/run/summary.md"},
+    ]
+    out = summarize_output_paths(steps)
+    found = set(out.get("paths", []))
+    wanted = {"/w/run/deep/result.parquet", "/w/run/figs/a.png", "/w/run/figs/b.png", "/w/run/summary.md"}
+    # Exact match: every nested path is surfaced AND the large path-free blob contributes nothing.
+    ok = (found == wanted and out.get("count") == len(wanted))
+    return ok, f"nested_paths_found={out.get('count')} exact_match={found == wanted}"
+
+
 def _check_domain_ukb(_case: TestCase) -> tuple[bool, str]:
     from biobank_agent.skills.goal_intent_classifier import classify_goal_intent
 
@@ -167,6 +186,8 @@ _CASES: list[tuple[str, str, object, str]] = [
      "WGS results handed in as input are read, not mis-routed into re-running the WGS pipeline."),
     ("field_output_paths_reported", "problem_7_output_paths", _check_output_paths_reported,
      "A finished run reports where its outputs were written."),
+    ("field_large_nested_outputs", "problem_7_output_paths", _check_large_nested_outputs,
+     "Deeply-nested output paths under arbitrary keys are surfaced; a large path-free blob is ignored."),
     ("domain_ukb_report_routing", "domain_ukb", _check_domain_ukb,
      "A UK Biobank tabular report routes correctly (not into the multi-omics mechanism family)."),
     ("domain_wgs_association_routing", "domain_wgs", _check_domain_wgs,

@@ -20,7 +20,7 @@ def test_field_issues_benchmark_all_pass():
     result = EvalHarness().run(FieldIssuesBenchmark(), agent=None)
     failures = [(r.case_id, r.errors) for r in result.results if not r.passed]
     assert not failures, f"field-issue regressions: {failures}"
-    assert result.n_total == 10
+    assert result.n_total == 11
 
 
 def test_field_issues_covers_every_problem_and_domain():

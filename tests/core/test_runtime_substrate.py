@@ -274,6 +274,59 @@ def test_turn_completed_despite_recovered_tool_error(tmp_path):
     assert turn.status == RuntimeStatus.COMPLETED.value, "a converged turn must be COMPLETED despite a recovered tool error"
 
 
+def test_empty_final_response_does_not_complete_turn(tmp_path):
+    """A degenerate empty response (no text, no tool calls, no prior tool work) must NOT be treated
+    as a converged final answer — that would mark a plan step COMPLETED with zero output (field
+    problem #7: a finished run with no result). It fails honestly instead."""
+    provider = FakeProvider(
+        scripted_responses=[ProviderResponse(text="", tool_calls=[], provider="fake", model="fake-model")],
+        model="fake-model",
+    )
+    runtime = _runtime_with(tmp_path, ToolRegistry(), provider, max_rounds=1)
+    session = runtime.create_session(title="empty", cwd=str(tmp_path))
+    runtime.run_turn(session, "answer the question")
+    turn = session.turns[-1]
+    assert turn.status == RuntimeStatus.FAILED.value, "an empty, output-less turn must not be COMPLETED"
+
+
+def test_empty_response_is_nudged_then_recovers(tmp_path):
+    """An empty first response is nudged once for a real answer; if the model then answers, the turn
+    COMPLETES — graceful recovery rather than a silent, output-less success."""
+    provider = FakeProvider(
+        scripted_responses=[
+            ProviderResponse(text="", tool_calls=[], provider="fake", model="fake-model"),
+            ProviderResponse(text="here is the actual answer", provider="fake", model="fake-model"),
+        ],
+        model="fake-model",
+    )
+    runtime = _runtime_with(tmp_path, ToolRegistry(), provider, max_rounds=4)
+    session = runtime.create_session(title="nudge", cwd=str(tmp_path))
+    runtime.run_turn(session, "answer the question")
+    turn = session.turns[-1]
+    assert turn.status == RuntimeStatus.COMPLETED.value
+    assert any("empty model response" in str((e.get("payload") or {}).get("message", "")) for e in session.events), "a nudge must be recorded"
+
+
+def test_empty_final_after_tool_work_still_completes(tmp_path):
+    """A turn that did real tool work and then returns an empty final message still COMPLETES — the
+    tool results are real output, so it is not the output-less degenerate case."""
+    registry = ToolRegistry()
+    registry.register(_BoomTool("boom", {}))
+    provider = FakeProvider(
+        scripted_responses=[
+            ProviderResponse(text="", tool_calls=[ToolCall(id="c1", name="boom", args={})], provider="fake", model="fake-model"),
+            ProviderResponse(text="", tool_calls=[], provider="fake", model="fake-model"),
+        ],
+        model="fake-model",
+    )
+    runtime = _runtime_with(tmp_path, registry, provider, max_rounds=8)
+    session = runtime.create_session(title="toolwork", cwd=str(tmp_path))
+    runtime.run_turn(session, "use the tool then finish")
+    turn = session.turns[-1]
+    assert turn.tool_results, "the tool should have produced a result"
+    assert turn.status == RuntimeStatus.COMPLETED.value, "empty final after real tool work is still completed"
+
+
 def test_turn_fails_gracefully_on_provider_error(tmp_path):
     """A provider/LLM exception must NOT escape run_turn; the turn is FAILED and an
     ERROR event is recorded (previously the exception propagated uncaught)."""

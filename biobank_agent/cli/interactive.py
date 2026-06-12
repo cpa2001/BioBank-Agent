@@ -69,7 +69,7 @@ from biobank_agent.runtime.jobs import JobManager
 from biobank_agent.runtime.planner import RuntimePlanner
 from biobank_agent.runtime.replay import replay_trajectory
 from biobank_agent.runtime.researcher import RuntimeResearcher
-from biobank_agent.progress import PlanRunDashboard
+from biobank_agent.progress import PlanRunDashboard, _short_model
 
 
 class PlanStepTimeoutError(BaseException):
@@ -794,10 +794,8 @@ class InteractiveShell:
         session = self._require_session()
         if not arg:
             if session.state.plan:
-                # _render_plan already includes a Plan Steps table; the separate
-                # progress panel here was a redundant third steps view — dropped.
+                # One unified plan surface (steps + flow + detail), then the approval menu.
                 self._render_plan(session.state.plan)
-                self._render_plan_flow(session.state.plan)
                 if session.state.plan.status == PlanStatus.DRAFT:
                     self._render_plan_review_menu_notice()
                 return session.state.plan.to_dict()
@@ -993,7 +991,10 @@ class InteractiveShell:
                 view.record("Execution", actor=step.id, status="running",
                             message=f"step {position}/{total}: {step.title}",
                             metadata={"subagent": step.id, "current_step": step.id,
-                                      "total_steps": total, "completed_steps": done})
+                                      "total_steps": total, "completed_steps": done,
+                                      # the live active row reads "step 3/7 · Run QC…" — the step
+                                      # identity, not a generic stage-default verb.
+                                      "activity": f"step {position}/{total} · {step.title[:60]}"})
                 runtime.save_session(session)
 
                 # Stage 6: run the step with bounded autonomous recovery (retry →
@@ -2410,10 +2411,8 @@ class InteractiveShell:
         self._set_activity("plan review")
         # Concise post-plan output: the live planning dashboard already showed the
         # council activity (transient), so don't reprint a static activity summary
-        # or a "Plan Formulation Progress" preamble. Show the plan + the workflow
-        # diagram ONCE (the diagram is no longer reprinted at approval/execution).
+        # or a "Plan Formulation Progress" preamble. Show the unified plan surface ONCE.
         self._render_plan(plan)
-        self._render_plan_flow(plan)
         # Interactive terminals get the live arrow-key selector (drawn by the
         # review loop); only show the static notice when we cannot read keys.
         if not self._interactive_terminal():
@@ -2572,26 +2571,72 @@ class InteractiveShell:
         if verification:
             self.console.print(f"[dim]verification: {_rich_escape(str(verification))}[/]")
 
+    # Status glyphs for the unified plan surface — one consistent vocabulary with the live dashboard.
+    _PLAN_STEP_GLYPHS = {
+        "done": "[green]✓[/green]", "completed": "[green]✓[/green]", "success": "[green]✓[/green]",
+        "running": "[yellow]⟳[/yellow]", "failed": "[red]✗[/red]", "error": "[red]✗[/red]",
+        "skipped": "[dim]⊘[/dim]", "awaiting approval": "[blue]◆[/blue]",
+    }
+
+    def _plan_step_glyph(self, status: str) -> str:
+        return self._PLAN_STEP_GLYPHS.get(str(status or "").lower(), "[dim]○[/dim]")
+
     def _render_plan(self, plan) -> None:
-        table = Table(title=f"Plan: {plan.title}", box=box.SIMPLE)
-        table.add_column("Field", style="cyan", no_wrap=True)
-        table.add_column("Value")
-        table.add_row("status", plan.status.value)
-        table.add_row("revision", str(plan.revision))
-        table.add_row("objective", plan.objective)
-        table.add_row("risks", "\n".join(plan.risks) or "none")
-        table.add_row("verification", "\n".join(plan.verification_plan) or "none")
-        table.add_row("approvals", "\n".join(plan.required_approvals) or "none")
-        table.add_row("tools", ", ".join(plan.proposed_tool_scope) or "none")
-        table.add_row("files", "\n".join(plan.proposed_file_scope) or "none")
-        self.console.print(table)
-        steps = Table(title="Plan Steps", box=box.SIMPLE)
-        steps.add_column("ID", style="cyan")
-        steps.add_column("Title")
-        steps.add_column("Status")
-        for step in plan.steps:
-            steps.add_row(step.id, step.title, self._display_plan_step_status(plan, step.status))
-        self.console.print(steps)
+        """One unified, scannable plan surface: the objective, a compact meta line, the steps (with
+        their dependencies and tool/file scope folded in), a linear flow, and the risk/verification
+        detail — each shown ONCE. Replaces the old fields-table + steps-table + separate flowchart
+        panel, which presented the same steps three times."""
+        n = len(plan.steps)
+        tool_scope = ", ".join(plan.proposed_tool_scope) or "none"
+        meta = (f"[dim]{_rich_escape(plan.status.value)} · rev {plan.revision} · "
+                f"{n} step{'' if n == 1 else 's'} · tools: {_rich_escape(tool_scope)}[/dim]")
+        header = Group(
+            Text.from_markup(f"[bold]{_rich_escape(plan.objective or plan.title)}[/bold]"),
+            Text.from_markup(meta),
+        )
+
+        steps_tree = Tree("[bold]Steps[/bold]", guide_style="dim")
+        for index, step in enumerate(plan.steps, 1):
+            status = self._display_plan_step_status(plan, step.status)
+            node = steps_tree.add(
+                f"[dim]{index}.[/dim] {self._plan_step_glyph(status)} {_rich_escape(step.title)} "
+                f"[dim]({_rich_escape(step.id)}) · {_rich_escape(status)}[/dim]"
+            )
+            deps = ", ".join(step.dependencies) if step.dependencies else "start"
+            detail = f"[dim]after {_rich_escape(deps)}[/dim]"
+            if step.tool_scope:
+                detail += f" [dim]· tools: {_rich_escape(', '.join(step.tool_scope))}[/dim]"
+            node.add(Text.from_markup(detail))
+            if step.file_scope:
+                node.add(Text.from_markup(f"[dim]files: {_rich_escape(', '.join(step.file_scope)[:160])}[/dim]"))
+
+        body: list[Any] = [header, Text(""), steps_tree]
+        # A linear flow line is a helpful at-a-glance view for short plans, but redundant on long ones
+        # where the steps tree already conveys order + dependencies — so show it only for compact plans.
+        if plan.steps and len(plan.steps) <= 6:
+            linear = " → ".join(step.id for step in plan.steps)
+            body.append(Text.from_markup(f"\n[dim]flow:[/dim] {_rich_escape(linear)}"))
+
+        def _bullets(label: str, items: list[str]) -> Text | None:
+            kept = [str(x) for x in (items or []) if str(x).strip()]
+            if not kept:
+                return None
+            lines = "\n".join(f"  [dim]·[/dim] {_rich_escape(it)}" for it in kept)
+            return Text.from_markup(f"\n[bold]{label}[/bold]\n{lines}")
+
+        for section in (_bullets("Risks", plan.risks), _bullets("Verification", plan.verification_plan)):
+            if section is not None:
+                body.append(section)
+        if plan.required_approvals:
+            body.append(Text.from_markup(
+                f"\n[dim]approvals required: {_rich_escape(', '.join(plan.required_approvals))}[/dim]"))
+
+        self.console.print(Panel(
+            Group(*body),
+            title=f"[bold blue]Execution Plan — {_rich_escape(plan.title)}[/bold blue]",
+            border_style="blue",
+            padding=(1, 2),
+        ))
 
     def _render_plan_review_menu_notice(self) -> None:
         choices = self._plan_review_choices()
@@ -2735,19 +2780,6 @@ class InteractiveShell:
         bar = _text_progress_bar(done, total)
         current_text = f"Current: {current.get('label')} - {current.get('detail')}" if current else "Current: none"
         self.console.print(Panel(table, title=f"{bar} {done}/{total} steps", subtitle=current_text[:180]))
-
-    def _render_plan_flow(self, plan) -> None:
-        root = Tree(f"[bold]Plan Flowchart[/bold] {plan.title}")
-        for index, step in enumerate(plan.steps, 1):
-            deps = ", ".join(step.dependencies) if step.dependencies else "start"
-            status = self._format_status(self._display_plan_step_status(plan, step.status))
-            node = root.add(f"[cyan]{step.id}[/cyan] [{index}/{len(plan.steps)}] {step.title} - {status}")
-            node.add(f"[dim]depends on:[/] {deps}")
-            node.add(f"[dim]reads/tools:[/] {', '.join(step.tool_scope or []) or 'none'}")
-            if step.file_scope:
-                node.add(f"[dim]data/files:[/] {', '.join(step.file_scope)[:180]}")
-        linear = " -> ".join(step.id for step in plan.steps) if plan.steps else "(empty)"
-        self.console.print(Panel(root, title="Workflow Diagram", subtitle=f"linear view: {linear}"))
 
     @staticmethod
     def _display_plan_step_status(plan, status: str) -> str:
@@ -2966,7 +2998,7 @@ class InteractiveShell:
             ),
             PlanReviewChoice(
                 key="2",
-                label="Approve and fix plan",
+                label="Revise plan",
                 description="Add feedback or missing requirements, then regenerate the plan for another review.",
                 action="fix",
             ),
@@ -4554,7 +4586,10 @@ class InteractiveShell:
                     actor=str(request.call_id),
                     status="running",
                     message=f"{request.handler.name}: {text[:200]}",
-                    metadata={"subagent": str(request.call_id), "stream": stream},
+                    metadata={"subagent": str(request.call_id), "stream": stream,
+                              # so the live active row reads "<tool> · stdout" — what is running now,
+                              # not a generic "working" placeholder.
+                              "activity": f"{request.handler.name} · {stream[:40]}"},
                 )
             except Exception:
                 pass
@@ -5125,18 +5160,48 @@ class InteractiveShell:
             ]
         )
 
+    @staticmethod
+    def _toolbar_safe(text: Any) -> str:
+        """Escape a dynamic value for prompt_toolkit HTML (the toolbar markup language)."""
+        return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     def _bottom_toolbar_text(self) -> str:
         runtime = self.runtime
         session = self.session
         elapsed = max(0, int(time.time() - self._activity_started_at))
         permission = runtime.config.approval_profile if runtime is not None else "unknown"
         session_short = session.session_id[:8] if session is not None else "no-session"
-        plan_status = session.state.plan.status.value if session is not None and session.state.plan else "none"
-        return (
-            f"<b>{self._activity}</b> {elapsed}s  •  "
-            f"session {session_short}  •  permissions {permission}  •  plan {plan_status}  •  "
-            "Tab complete  /help commands"
-        )
+        parts = [f"<b>{self._toolbar_safe(self._activity)}</b> {elapsed}s"]
+        # The model currently doing the work (active role), so it is obvious which model is "thinking".
+        if runtime is not None:
+            try:
+                model = runtime.provider_router.model_for_role(runtime.config.active_role)
+                parts.append(f"model {self._toolbar_safe(_short_model(model))}")
+            except Exception:
+                pass
+        # Live plan progress — how far through the current plan's steps.
+        if session is not None and session.state.plan and session.state.plan.steps:
+            steps = session.state.plan.steps
+            done = sum(1 for s in steps if str(s.status).lower() in {"done", "completed", "success", "skipped"})
+            parts.append(f"step {min(done + 1, len(steps))}/{len(steps)}")
+        # Background jobs still running (run_job) — easy to forget without a count here.
+        jm = self.job_manager
+        if jm is not None:
+            try:
+                running = sum(1 for r in jm.list() if not getattr(r, "ended_at", None))
+                if running:
+                    parts.append(f"{running} job{'' if running == 1 else 's'}")
+            except Exception:
+                pass
+        # Artifacts produced by the last completed plan run.
+        if session is not None and session.state.custom_data:
+            arts = session.state.custom_data.get("last_artifact_index") or []
+            if arts:
+                parts.append(f"{len(arts)} artifact{'' if len(arts) == 1 else 's'}")
+        parts.append(f"perm {self._toolbar_safe(permission)}")
+        parts.append(f"session {self._toolbar_safe(session_short)}")
+        parts.append("Tab · /help")
+        return "  •  ".join(parts)
 
     def _set_activity(self, activity: str) -> None:
         text = str(activity or "idle")

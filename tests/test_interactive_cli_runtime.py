@@ -585,7 +585,7 @@ def test_required_slash_commands_smoke(tmp_path):
     assert "Runtime Status" in text
     assert "Goal" in text
     assert "finish migration" in text
-    assert "Plan:" in text
+    assert "Execution Plan" in text
     assert "Doctor" in text
     assert "Tool Registry" in text
     assert "Skill Tree" in text
@@ -784,25 +784,23 @@ def test_plan_goal_compact_and_resume_restore_structured_state(tmp_path):
     assert "Resumed session" in text
 
 
-def test_plan_command_prints_progress_and_flowchart(tmp_path):
+def test_plan_command_prints_unified_plan_surface(tmp_path):
     shell, output = _shell(tmp_path)
 
     shell.handle_line("/plan build a visible progress workflow")
 
     text = output.getvalue()
-    # Concision pass: the "Plan Formulation Progress" preamble and the static
-    # council-activity summary are no longer reprinted; the plan + the workflow
-    # diagram are shown once, followed by the review notice.
+    # The plan now renders as ONE unified surface (objective + steps + linear flow + detail),
+    # replacing the old fields-table + steps-table + separate flowchart panel.
     assert "Plan Formulation Progress" not in text
-    assert "Workflow Diagram" in text
-    assert "Plan Flowchart" in text
+    assert "Execution Plan" in text
+    assert "Steps" in text
     assert "Plan Review" in text
     assert "Awaiting Approval" in text
     assert "Approve and implement plan" in text
+    assert "Revise plan" in text  # the old "Approve and fix plan" was misleading — it regenerates
     assert "Non-interactive mode" in text
     assert "awaiting approval" in text
-    assert "context" in text
-    assert "execute" in text
     assert shell.session.state.plan.steps[0].status == "planned"
     assert any(ref.node_type == "plan" for ref in shell.session.action_graph_refs)
     assert sum(1 for ref in shell.session.action_graph_refs if ref.node_type == "plan_step") == 4
