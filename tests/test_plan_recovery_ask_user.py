@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 from rich.console import Console
 
-from biobank_agent.cli.interactive import InteractiveShell
+from biobank_agent.cli.interactive import InteractiveShell, PlanStepTimeoutError
 from biobank_agent.core.events import AgentEventType
 from biobank_agent.core.tools.native import build_native_tools
 
@@ -217,23 +217,43 @@ def test_recovery_stops_to_ask_user():
     assert shell.runtime.run_turn.call_count == 1  # no retries once blocked on user input
 
 
-def test_recovery_pauses_on_step_timeout():
+def test_step_timeout_auto_resumes_to_ok_when_next_attempt_succeeds():
+    """A stall (PlanStepTimeoutError) AUTO-RESUMES via the retry loop: the next attempt succeeds and the
+    step returns ok — no user pause on the first timeout. (A timeout must not stop a recoverable task.)"""
+    s = _session()
+    state = {"n": 0}
+
+    def script(session, instruction):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise PlanStepTimeoutError("went silent")  # first attempt stalls
+        session.events.append({"type": TCC})
+        session.turns.append(FakeTurn("completed", [FakeToolResult("vcf_qc", {"status": "ok"})]))
+
+    shell = _shell(s, script, max_retries=2)
+    with patch("biobank_agent.cli.interactive.time.sleep"):  # skip the retry backoff
+        status, reason, calls, q = shell._run_step_with_recovery(MagicMock(), _step(), 1, 9, MagicMock())
+    assert status == "ok"
+    assert shell.runtime.run_turn.call_count == 2  # stalled once, resumed and succeeded on the retry
+
+
+def test_step_timeout_escalates_to_needs_input_after_retries():
+    """A persistent stall auto-resumes up to the retry budget, THEN escalates to needs_input — not an
+    immediate pause on the first timeout."""
     s = _session()
 
     def script(session, instruction):
-        time.sleep(5)
+        raise PlanStepTimeoutError("went silent")  # every attempt stalls
 
     shell = _shell(s, script, max_retries=2)
-    shell.settings.plan_step_timeout_s = 0.1
-
-    status, reason, calls, q = shell._run_step_with_recovery(MagicMock(), _step(), 1, 9, MagicMock())
-
+    with patch("biobank_agent.cli.interactive.time.sleep"):
+        status, reason, calls, q = shell._run_step_with_recovery(MagicMock(), _step(), 1, 9, MagicMock())
     assert status == "needs_input"
     assert calls == 0
-    assert "plan_step_timeout_s=0.1s" in reason
-    assert "timed out" in q
+    assert "silent" in reason  # the new stall wording, not the old "plan_step_timeout_s=..."
+    assert "silent" in q
     assert s.state.custom_data["plan_last_diagnosis"]["step_status"] == "timeout"
-    assert shell.runtime.run_turn.call_count == 1
+    assert shell.runtime.run_turn.call_count == 3  # original + 2 auto-resume retries (not 1)
 
 
 # ── pending-answer routing ───────────────────────────────────

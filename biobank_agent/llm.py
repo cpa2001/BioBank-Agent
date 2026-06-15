@@ -280,11 +280,14 @@ class LLMClient:
         tools: Optional[list[dict]] = None,
         temperature: float = 0.1,
         max_tokens: int = 4096,
+        on_chunk: Optional[Any] = None,
     ) -> Generator[str, None, LLMResponse]:
         """Stream a chat completion, yielding text chunks.
 
         Returns the final LLMResponse (with tool_calls if any) at the end.
-        Tool calls are accumulated from streamed deltas.
+        Tool calls are accumulated from streamed deltas. ``on_chunk`` (if given) is called once per
+        RAW chunk — text, tool-call delta, or keepalive — so a caller can treat any transport activity
+        as liveness (a model streaming only tool-call tokens must not look "silent" to a watchdog).
         """
         kwargs = self._build_chat_kwargs(
             messages=messages,
@@ -302,6 +305,13 @@ class LLMClient:
             into the enclosing scope."""
             nonlocal usage
             for chunk in stream:
+                if on_chunk is not None:
+                    # Any raw chunk is liveness — refresh the caller's activity signal here (not only on
+                    # yielded text) so a tool-call-only stream still counts as progress.
+                    try:
+                        on_chunk()
+                    except Exception:
+                        pass
                 # The usage-only final chunk has empty ``choices`` but a
                 # populated ``usage`` — capture it regardless of the delta.
                 chunk_usage = getattr(chunk, "usage", None)

@@ -157,9 +157,21 @@ class Settings(BaseSettings):
     plan_external_council_timeout_s: int = 180
     plan_external_council_agents: str = "codex,claude,gemini"
     plan_heartbeat_interval_s: float = 1.0
-    plan_build_timeout_s: float = 240.0      # wall-clock cap for plan drafting; 0 disables
+    plan_build_timeout_s: float = 240.0      # max model SILENCE while drafting before it counts as stalled
     plan_step_max_retries: int = 2
-    plan_step_timeout_s: float = 240.0       # wall-clock cap for one autonomous plan step; 0 disables
+    # Per-step deadline measures model SILENCE, not wall-clock: while the model streams tokens or tools
+    # make progress, the step is never judged stalled (timeout exists to catch a hang, NOT to kill a
+    # producing task). Only this many seconds with NO activity trips it. 0 disables.
+    plan_step_timeout_s: float = 240.0
+    # Absolute per-step backstop regardless of activity (anti-runaway only). A healthy streaming/tool
+    # step is bounded by plan_step_timeout_s INACTIVITY; this ceiling just stops a step that keeps
+    # "making progress" yet runs unreasonably long. 0 disables.
+    plan_step_hard_ceiling_s: float = 3600.0
+    # Token-cost guards — the REAL anti-runaway limiter (a timeout must never stop a producing task).
+    # Counts completion tokens across a step / whole plan. On exhaustion the run stops GRACEFULLY
+    # (checkpoint + summary, no crash). 0 = unlimited (timeout watchdogs still apply).
+    token_budget_per_step: int = 0
+    token_budget_per_plan: int = 0
     cli_refresh_per_second: float = 10.0
     plan_research_setup_enabled: bool = True
     plan_clarification_enabled: bool = True

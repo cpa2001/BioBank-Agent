@@ -69,6 +69,9 @@ class RuntimeConfig:
     active_role: str = ProviderRole.PRIMARY_EXECUTOR.value
     approval_profile: str = "yolo"
     max_tool_rounds: int = 8
+    # Per-turn completion-token budget (0 = unlimited). run_turn stops GRACEFULLY when exceeded — the
+    # real cost guard that lets the inactivity watchdog stay lenient toward a genuinely-producing model.
+    token_budget_per_turn: int = 0
     # Multi-model plan debate (CONCAT/EVOCHAMBER-style). When >=2 distinct models
     # are configured, candidate drafts debate over bounded rounds with
     # confidence-based consensus pruning before the orchestrator synthesizes.
@@ -109,6 +112,7 @@ class RuntimeConfig:
             safety_reviewer_model=preferred[2] if len(preferred) > 2 else cls.safety_reviewer_model,
             active_role=ProviderRole.PRIMARY_EXECUTOR.value,
             max_tool_rounds=int(getattr(settings, "max_tool_rounds", cls.max_tool_rounds)),
+            token_budget_per_turn=int(getattr(settings, "token_budget_per_step", 0) or 0),
             enable_debate=bool(getattr(settings, "plan_debate_enabled", cls.enable_debate)),
             debate_rounds=int(getattr(settings, "debate_rounds", cls.debate_rounds)),
             consensus_threshold=float(getattr(settings, "plan_consensus_threshold", cls.consensus_threshold)),

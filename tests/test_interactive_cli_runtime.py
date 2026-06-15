@@ -917,6 +917,27 @@ def test_ctrlc_mid_execution_halts_cleanly(tmp_path):
     assert shell.session.state.plan.status.value == "paused"
 
 
+def test_step_timeout_auto_resumes_instead_of_pausing(tmp_path):
+    """A step that stalls (PlanStepTimeoutError) must AUTO-RESUME via the bounded retry loop — re-run
+    with full session context — instead of pausing for user input on the first stall. Only an exhausted
+    retry budget escalates to needs_input. (User requirement: a timeout must not stop a recoverable task.)"""
+    shell, _output = _shell(tmp_path)
+    shell.handle_line("/plan stall once then resume")
+    calls = {"n": 0}
+    real = shell.runtime.run_turn
+
+    def _spy(session, text):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PlanStepTimeoutError("went silent")  # first attempt stalls
+        return real(session, text)  # subsequent attempts succeed normally
+
+    shell.runtime.run_turn = _spy  # type: ignore[assignment]
+    shell.handle_line("/plan-approve")  # must auto-resume, NOT pause for input
+    assert calls["n"] >= 2, "the step must auto-retry after a stall instead of pausing immediately"
+    assert shell.session.state.plan.status.value == "completed"
+
+
 def test_execution_drives_view_start_record_stop(tmp_path, monkeypatch):
     """The execution loop must drive a live view (start -> record... -> stop) and
     ALWAYS stop it (the Live must be torn down)."""

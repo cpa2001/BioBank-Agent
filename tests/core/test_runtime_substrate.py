@@ -327,6 +327,40 @@ def test_empty_final_after_tool_work_still_completes(tmp_path):
     assert turn.status == RuntimeStatus.COMPLETED.value, "empty final after real tool work is still completed"
 
 
+def test_per_turn_token_budget_stops_turn_gracefully(tmp_path):
+    """When completion tokens cross token_budget_per_turn, run_turn stops the round loop CLEANLY
+    (records a budget event + sets turn_budget_stopped) instead of crashing or burning the whole
+    round budget — the cost guard that lets the inactivity watchdog stay lenient toward a model that
+    is genuinely producing output (a timeout must not stop a producing task; cost is what bounds it)."""
+    registry = ToolRegistry()
+    registry.register(_BoomTool("boom", {}))
+    # Each round calls a tool (so the loop would otherwise keep going) and reports 100 completion tokens.
+    provider = FakeProvider(
+        scripted_responses=[
+            ProviderResponse(text="", tool_calls=[ToolCall(id=f"c{i}", name="boom", args={"i": i})],
+                             usage={"completion_tokens": 100}, provider="fake", model="fake-model")
+            for i in range(6)
+        ],
+        model="fake-model",
+    )
+    config = RuntimeConfig(primary_model="fake-model", approval_profile="full_auto",
+                           max_tool_rounds=8, token_budget_per_turn=150)
+    runtime = AgentRuntime(
+        provider_router=ProviderRouter({"fake-model": provider}, config),
+        tool_registry=registry,
+        session_store=SessionStore(tmp_path / "sessions"),
+        action_graph=ActionGraph(tmp_path / "graph.db"),
+        config=config,
+    )
+    session = runtime.create_session(title="budget", cwd=str(tmp_path))
+    runtime.run_turn(session, "loop forever")  # must NOT raise
+    # 100 tokens/round, budget 150 -> stops after round 2 (200 >= 150), not all 8 rounds.
+    assert session.state.custom_data.get("turn_budget_stopped") is True
+    assert any("token budget reached" in str((e.get("payload") or {}).get("message", ""))
+               for e in session.events), "a clear budget-stop event must be recorded"
+    assert len(provider.scripted_responses) == 4, "stopped after 2 rounds; 4 scripted responses remain"
+
+
 def test_turn_fails_gracefully_on_provider_error(tmp_path):
     """A provider/LLM exception must NOT escape run_turn; the turn is FAILED and an
     ERROR event is recorded (previously the exception propagated uncaught)."""

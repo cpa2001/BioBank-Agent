@@ -1156,6 +1156,42 @@ class AgentRuntime:
             except Exception:
                 return f"{name}:{args!r}"
 
+        # Token-cost guard — the real anti-runaway limiter. A timeout must never stop a *producing*
+        # task, so cost is bounded by completion tokens, not wall-clock. 0 = unlimited.
+        try:
+            token_budget = max(0, int(getattr(self.config, "token_budget_per_turn", 0) or 0))
+        except (TypeError, ValueError):
+            token_budget = 0
+        completion_tokens_used = 0
+        budget_stopped = False
+
+        # Activate the provider's streaming path so each token refreshes the inactivity watchdog
+        # (mark_activity lives in the provider adapter) — this is what keeps a model that is actively
+        # producing from being judged "stalled" by the per-step deadline. An optional live sink (set by
+        # the CLI as runtime.stream_sink) also receives deltas for the UI; per-token events are NOT
+        # persisted here — response.deltas is recorded once after each call below.
+        _live_sink = getattr(self, "stream_sink", None)
+
+        def _stream_cb(chunk: str, _sink=_live_sink) -> None:
+            if callable(_sink):
+                try:
+                    _sink(chunk)
+                except Exception:
+                    pass
+
+        # Progress signal for the inactivity watchdog at NON-streaming boundaries (round start, before
+        # each tool runs) — set by the CLI to mark_activity(). Streaming chunks already refresh the
+        # watchdog via the provider's on_chunk hook; this covers the gaps between generations (e.g. a
+        # tool that runs a while without emitting output is given a fresh window at its start).
+        _activity = getattr(self, "activity_cb", None)
+
+        def _mark() -> None:
+            if callable(_activity):
+                try:
+                    _activity()
+                except Exception:
+                    pass
+
         for round_index in range(max_rounds):
             tool_schemas = _round_tool_schemas()
             request = ProviderRequest(
@@ -1166,6 +1202,7 @@ class AgentRuntime:
                 tools=tool_schemas,
                 model=self.provider_router.model_for_role(active_role),
                 metadata={"round": round_index},
+                stream_cb=_stream_cb,
             )
             self._record_event(
                 session,
@@ -1178,6 +1215,7 @@ class AgentRuntime:
                     round=round_index,
                 ),
             )
+            _mark()  # round boundary: a new generation is starting — not a stall
             try:
                 response = provider.complete(request)
             except Exception as exc:  # provider/LLM failure (retries already exhausted in the client)
@@ -1206,6 +1244,10 @@ class AgentRuntime:
             )
             turn.assistant_messages.append(assistant)
             messages.append({"role": "assistant", "content": response.text, "tool_calls": [tc.to_dict() for tc in response.tool_calls]})
+            try:
+                completion_tokens_used += int((response.usage or {}).get("completion_tokens", 0) or 0)
+            except (TypeError, ValueError):
+                pass
 
             if not response.tool_calls:
                 # A tool-call-free response is a final answer only if it actually contains something,
@@ -1282,6 +1324,7 @@ class AgentRuntime:
                             activate_skills=self._make_activate_skills(session),
                         )
                     context_factory = _request_context_factory
+                _mark()  # a tool is about to run — give it a fresh inactivity window
                 outcome = self.invoke_tool(
                     session,
                     tc.name,
@@ -1332,7 +1375,29 @@ class AgentRuntime:
                     ),
                 })
 
+            if token_budget and completion_tokens_used >= token_budget:
+                # Cost guard, not a crash: stop the round loop cleanly and record why. Any partial work
+                # and tool results are preserved; the recovery loop reads turn_budget_stopped and does
+                # NOT auto-retry (retrying would just burn more budget).
+                budget_stopped = True
+                self._record_event(
+                    session,
+                    AgentEvent.make(
+                        AgentEventType.ERROR,
+                        session_id=session.session_id,
+                        turn_id=turn.id,
+                        message=(
+                            f"per-turn token budget reached ({completion_tokens_used}/{token_budget} "
+                            f"completion tokens after {round_index + 1} round(s)); stopping turn gracefully"
+                        ),
+                        round=round_index,
+                    ),
+                )
+                break
+
         turn.completed_at = time.time()
+        if budget_stopped:
+            session.state.custom_data["turn_budget_stopped"] = True
         # Completed iff the model converged to a final answer and the provider did
         # not fail. Recovered tool errors do not fail the turn (they remain visible
         # as tool_call_completed events for audit / evolution feedback).

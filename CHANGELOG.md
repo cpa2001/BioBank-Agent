@@ -4,6 +4,52 @@ All notable changes to Biobank Agent are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0-rc3] - 2026-06-16
+
+Resilience pass: a timeout no longer kills a task that is making progress. The
+per-step deadline now measures genuine model SILENCE — a streaming model or a
+tool emitting output is never judged stalled — an absolute hard ceiling backstops
+runaway, a completion-token budget is the real cost guard, and a stalled step
+auto-resumes from session state instead of pausing for the user. Designed and
+reviewed with an external coding agent.
+
+### Added
+- Inactivity-based per-step timeout with a separate absolute hard ceiling
+  (`plan_step_hard_ceiling_s`); streamed tokens, tool output, and round/tool
+  boundaries all refresh the watchdog so a producing step is never killed
+  (`biobank_agent/cli/interactive.py`, `biobank_agent/runtime/engine.py`).
+- Token-cost guards `token_budget_per_step` / `token_budget_per_plan`: the
+  runtime stops a turn, and the plan loop stops the plan, GRACEFULLY (checkpoint
+  + diagnosis, never a crash) once the completion-token budget is spent
+  (`biobank_agent/config.py`, `biobank_agent/runtime/types.py`,
+  `biobank_agent/runtime/engine.py`, `biobank_agent/cli/interactive.py`).
+- `LLMClient.stream()` accepts an `on_chunk` hook fired per RAW chunk (text,
+  tool-call delta, or keepalive) so a tool-call-only stream still counts as
+  liveness (`biobank_agent/llm.py`).
+- Resilience tests: inactivity-vs-silence watchdog, hard-ceiling firing under
+  continuous activity, streaming-with-tools, graceful token-budget stop, and
+  step-timeout auto-resume/escalation (`tests/test_plan_timeout_semantics.py`,
+  `tests/core/test_runtime_substrate.py`, `tests/test_interactive_cli_runtime.py`,
+  `tests/test_plan_recovery_ask_user.py`).
+
+### Changed
+- Execution now streams WITH tools: `LLMProvider.complete` takes the streaming
+  path whenever a `stream_cb` is set (the client assembles tool_calls from the
+  deltas), so every token refreshes the inactivity watchdog; it falls back to a
+  non-streaming call only when a provider cannot stream
+  (`biobank_agent/cli/interactive.py`).
+- A stalled plan step AUTO-RESUMES through the bounded retry loop (re-run with
+  full session context) and escalates to a user prompt only after the retry
+  budget is spent — no longer pausing on the first timeout
+  (`biobank_agent/cli/interactive.py`).
+
+### Fixed
+- A healthy multi-round plan step (many tool rounds, model actively producing)
+  is no longer killed by the per-step wall-clock deadline: the deadline now
+  measures model silence, not cumulative wall-clock, and tool execution time is
+  bounded by the tool's own timeout
+  (`biobank_agent/cli/interactive.py`, `biobank_agent/runtime/engine.py`).
+
 ## [3.1.0-rc2] - 2026-06-12
 
 Hardening and interface-maturity pass on top of rc1, driven by end-to-end

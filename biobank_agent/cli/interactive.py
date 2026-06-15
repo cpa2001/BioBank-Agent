@@ -94,31 +94,47 @@ _ACTIVE_TIMEOUTS: list[dict] = []
 def mark_activity() -> None:
     """Signal forward progress so an INACTIVITY watchdog re-arms instead of firing. No-op when idle.
 
-    Only refreshes activity-based timeouts (plan drafting). Hard per-step deadlines are left untouched
-    so a real provider stall during a step still fires regardless of unrelated activity elsewhere."""
+    Refreshes every activity-based watchdog (plan drafting AND per-step execution). A step is judged
+    stalled only after real SILENCE — a streaming model or a tool emitting output keeps it alive — while
+    a separate absolute hard ceiling provides the anti-runaway backstop. Thread-safe enough for our use:
+    it only writes a monotonic timestamp the main-thread SIGALRM handler reads (a one-tick race is benign)."""
     if not _ACTIVE_TIMEOUTS:
         return
     now = time.monotonic()
-    for state in _ACTIVE_TIMEOUTS:
+    # Snapshot: the watchdog context manager appends/removes on the main thread while streamed tool
+    # output (reader threads) can call this — iterating the live list would risk "changed size during
+    # iteration". Writing a single timestamp is otherwise benign (a one-tick race never fires early).
+    for state in list(_ACTIVE_TIMEOUTS):
         if state.get("activity_based"):
             state["last_activity"] = now
 
 
 @contextmanager
 def _wall_clock_timeout(timeout_s: float, exc_type: type[BaseException], label: str,
-                        *, activity_based: bool = False):
+                        *, activity_based: bool = False, hard_ceiling_s: float = 0.0):
     if timeout_s <= 0 or threading.current_thread() is not threading.main_thread():
         yield
         return
 
-    state = {"last_activity": time.monotonic(), "activity_based": activity_based}
+    now0 = time.monotonic()
+    state = {"last_activity": now0, "activity_based": activity_based, "start": now0}
 
     def _handler(_signum, _frame):
         if activity_based:
-            idle = time.monotonic() - state["last_activity"]
+            now = time.monotonic()
+            # Absolute backstop: a step that keeps "making progress" yet runs unreasonably long is still
+            # stopped (anti-runaway), independent of the inactivity window. Catches a provider that emits
+            # keepalive/empty chunks forever (would otherwise refresh the watchdog and never time out).
+            if hard_ceiling_s > 0 and (now - state["start"]) >= hard_ceiling_s:
+                raise exc_type(f"{label} exceeded the {hard_ceiling_s:.0f}s hard ceiling")
+            idle = now - state["last_activity"]
             if idle < timeout_s:
-                # Progress since the last tick — re-arm for the remaining idle window instead of firing.
-                signal.setitimer(signal.ITIMER_REAL, max(0.05, timeout_s - idle))
+                # Progress since the last tick — re-arm for the remaining idle window (capped so the next
+                # fire still honors the hard ceiling) instead of firing now.
+                next_wait = max(0.05, timeout_s - idle)
+                if hard_ceiling_s > 0:
+                    next_wait = min(next_wait, max(0.05, hard_ceiling_s - (now - state["start"])))
+                signal.setitimer(signal.ITIMER_REAL, next_wait)
                 return
             raise exc_type(f"{label} stalled for {timeout_s:.0f}s with no model activity")
         # Hard deadline: a real provider stall must fire regardless of activity elsewhere.
@@ -141,9 +157,12 @@ def _wall_clock_timeout(timeout_s: float, exc_type: type[BaseException], label: 
             signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
-def _plan_step_wall_clock_timeout(timeout_s: float):
-    # Hard per-step deadline: a stalled provider during a step must fire regardless of other activity.
-    return _wall_clock_timeout(timeout_s, PlanStepTimeoutError, "plan step")
+def _plan_step_wall_clock_timeout(timeout_s: float, *, hard_ceiling_s: float = 0.0):
+    # Inactivity-based per-step deadline: while the model streams tokens or a tool emits output the step
+    # is NOT stalled — a timeout must catch a hang, never kill a producing task. Only true SILENCE longer
+    # than timeout_s trips it; hard_ceiling_s is a separate pure anti-runaway backstop.
+    return _wall_clock_timeout(timeout_s, PlanStepTimeoutError, "plan step",
+                               activity_based=True, hard_ceiling_s=hard_ceiling_s)
 
 
 def _plan_build_wall_clock_timeout(timeout_s: float):
@@ -160,25 +179,43 @@ class LLMProvider:
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
         stream_cb = getattr(request, "stream_cb", None)
-        # Stream only for plain-text calls (no tools). Tool-call turns keep the
-        # non-streaming path unchanged. The generator yields text deltas and
-        # returns the final LLMResponse (text/tool_calls/usage) on StopIteration.
-        if stream_cb is not None and not request.tools:
-            gen = self.llm.stream(messages=request.messages, tools=None)
+        # Stream whenever a stream_cb is set — INCLUDING tool-call turns. The client's stream()
+        # assembles tool_calls from deltas (llm.py:stream), giving the same result as chat() while every
+        # token calls mark_activity() below, so a producing model never trips the inactivity watchdog.
+        # (The chat-path empty-reasoning retry is no-tools-only, so a streamed tool turn loses nothing.)
+        if stream_cb is not None:
+            # on_chunk=mark_activity fires for EVERY raw chunk (text, tool-call delta, OR keepalive), so a
+            # model streaming only tool-call tokens still refreshes the inactivity watchdog (the hard
+            # ceiling backstops an endless keepalive). stream_cb gets the yielded text for the live UI.
+            gen = self.llm.stream(messages=request.messages, tools=request.tools or None, on_chunk=mark_activity)
             deltas: list[str] = []
             final = None
-            while True:
-                try:
-                    chunk = next(gen)
-                except StopIteration as stop:
-                    final = stop.value
-                    break
-                deltas.append(chunk)
-                mark_activity()  # a streaming token is progress — refresh the inactivity watchdog
-                try:
-                    stream_cb(chunk)
-                except Exception:
-                    pass  # a progress hook must never break generation
+            try:
+                while True:
+                    try:
+                        chunk = next(gen)
+                    except StopIteration as stop:
+                        final = stop.value
+                        break
+                    deltas.append(chunk)
+                    try:
+                        stream_cb(chunk)
+                    except Exception:
+                        pass  # a progress hook must never break generation
+            except Exception:
+                # Streaming unavailable for this provider/model. If nothing was emitted yet, fall back to a
+                # normal (non-streaming) call so a stream-incapable relay never fails the whole turn. If
+                # deltas already arrived we cannot safely restart — surface it to run_turn's retry loop.
+                if deltas:
+                    raise
+                response = self.llm.chat(messages=request.messages, tools=request.tools or None)
+                return ProviderResponse(
+                    text=response.text,
+                    tool_calls=[ToolCall(id=tc.id, name=tc.name, args=dict(tc.args or {})) for tc in response.tool_calls],
+                    usage=dict(response.usage or {}),
+                    provider=self.provider_name,
+                    model=request.model or self.llm.model,
+                )
             return ProviderResponse(
                 text=(final.text if final else "".join(deltas)),
                 tool_calls=[ToolCall(id=tc.id, name=tc.name, args=dict(tc.args or {})) for tc in (final.tool_calls if final else [])],
@@ -395,6 +432,9 @@ class InteractiveShell:
                 clock=time.time,
             ),
         )
+        # Let run_turn refresh the inactivity watchdog at non-streaming boundaries (round start, before
+        # each tool) so the per-step deadline measures genuine model silence, not time spent in a tool.
+        self.runtime.activity_cb = mark_activity
         initial_cwd = str(Path.cwd())
         if str(self.workspace or "").strip():
             candidate = Path(str(self.workspace)).expanduser()
@@ -966,6 +1006,13 @@ class InteractiveShell:
         # so _finalize_execution can surface it — otherwise the data the agent
         # produced is invisible (issue #7). Keyed by step id.
         step_outputs: dict[str, dict[str, Any]] = {}
+        # Per-plan token-cost guard — the anti-runaway limiter across the whole plan (a timeout never
+        # stops a producing task; cumulative cost is what bounds it). 0 = unlimited.
+        try:
+            plan_token_budget = max(0, int(getattr(self.settings, "token_budget_per_plan", 0) or 0))
+        except (TypeError, ValueError):
+            plan_token_budget = 0
+        tokens_at_start = self._session_completion_tokens(session)
         try:
             view.start()  # inside try so finally always tears the Live down,
             #              even if Ctrl-C lands during dashboard startup
@@ -1065,6 +1112,21 @@ class InteractiveShell:
                     s.to_dict() for s in plan.steps if s.status not in {"done", "completed", "skipped"}
                 ]
                 runtime.save_session(session)
+                if plan_token_budget and (self._session_completion_tokens(session) - tokens_at_start) >= plan_token_budget:
+                    spent = self._session_completion_tokens(session) - tokens_at_start
+                    reason = (
+                        f"Plan stopped at the per-plan token budget ({spent}/{plan_token_budget} completion "
+                        f"tokens); raise TOKEN_BUDGET_PER_PLAN or split the work, then /plan-resume."
+                    )
+                    plan.status = PlanStatus.PAUSED
+                    session.state.custom_data["plan_paused"] = True
+                    session.state.custom_data["plan_pause_reason"] = reason
+                    self._store_plan_diagnosis(plan, step, reason=reason)
+                    view.record("Execution", actor=step.id, status="warning",
+                                message=f"per-plan token budget reached after step {position}/{total}",
+                                metadata={"subagent": step.id})
+                    halted = (position, step, "paused", reason)
+                    break
         except KeyboardInterrupt:
             if current is not None and current.status == "running":
                 current.status = "cancelled"
@@ -1451,6 +1513,19 @@ class InteractiveShell:
                 lines.append(f"- Q: {q}\n  A: {a}")
         return "\n".join(lines) if len(lines) > 1 else ""
 
+    @staticmethod
+    def _session_completion_tokens(session) -> int:
+        """Sum completion tokens across every assistant message in the session — the basis for the
+        per-plan token-cost guard (a timeout must never stop a producing task; accumulated cost does)."""
+        total = 0
+        for turn in getattr(session, "turns", None) or []:
+            for msg in getattr(turn, "assistant_messages", None) or []:
+                try:
+                    total += int((getattr(msg, "usage", None) or {}).get("completion_tokens", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+        return total
+
     def _run_step_with_recovery(self, plan, step, position: int, total: int, view) -> tuple[str, str, int, str]:
         """Run one plan step with bounded autonomous recovery.
 
@@ -1471,6 +1546,10 @@ class InteractiveShell:
             step_timeout_s = max(0.0, float(getattr(self.settings, "plan_step_timeout_s", 240.0)))
         except (TypeError, ValueError):
             step_timeout_s = 240.0
+        try:
+            step_hard_ceiling_s = max(0.0, float(getattr(self.settings, "plan_step_hard_ceiling_s", 3600.0)))
+        except (TypeError, ValueError):
+            step_hard_ceiling_s = 3600.0
         answer_suffix = self._plan_answer_suffix(session)
         reason = ""
         attempt = 0
@@ -1485,21 +1564,25 @@ class InteractiveShell:
                 instruction = f"{instruction}\n\n{answer_suffix}"
             before = len(session.events)
             try:
-                with _plan_step_wall_clock_timeout(step_timeout_s):
-                    runtime.run_turn(session, instruction)  # autonomous agent; self-bounded by step_timeout_s
+                with _plan_step_wall_clock_timeout(step_timeout_s, hard_ceiling_s=step_hard_ceiling_s):
+                    runtime.run_turn(session, instruction)  # autonomous; bounded by INACTIVITY, not wall-clock
             except PlanStepTimeoutError:
-                # If the agent PAUSED to ask the user (pause_and_ask / ask_user) before the deadline,
-                # surface THAT question — a hard timeout must not swallow the agent's pause path.
+                # A deliberate pause (ask_user / pause_and_ask) before the deadline must surface as a
+                # question — a stall timeout must never mask the agent's own pause path.
                 paused_question = self._pending_ask_user_question(session)
                 if paused_question:
                     paused_calls = sum(1 for e in session.events[before:]
                                        if e.get("type") == AgentEventType.TOOL_CALL_COMPLETED.value)
                     return ("needs_input", f"The agent needs input: {paused_question}",
                             paused_calls, paused_question)
+                # Otherwise the step went SILENT past the inactivity window (a genuine hang — a producing
+                # model keeps it alive). AUTO-RESUME: fold it into the bounded retry loop (re-run the step
+                # with full session context + a change-approach nudge) instead of stopping to ask the user.
+                # Escalate to the user only once the retry budget is spent.
                 timeout_label = f"{step_timeout_s:g}"
                 reason = (
-                    f"Step {position}/{total} exceeded the configured "
-                    f"plan_step_timeout_s={timeout_label}s before producing a usable update."
+                    f"Step {position}/{total} went silent for {timeout_label}s "
+                    f"(no model or tool activity) before producing a usable update."
                 )
                 if session.turns:
                     turn = session.turns[-1]
@@ -1507,6 +1590,16 @@ class InteractiveShell:
                         turn.status = "failed"
                         turn.completed_at = time.time()
                 session.state.active_turn_id = None
+                if attempt < max_retries:
+                    attempt += 1
+                    view.record("Repair", actor=step.id, status="warning",
+                                message=f"step {position}/{total} stalled; auto-resume {attempt}/{max_retries}",
+                                metadata={"subagent": step.id, "current_step": step.id, "total_steps": total})
+                    try:
+                        time.sleep(min(4.0, float(2 ** (attempt - 1))))
+                    except Exception:
+                        pass
+                    continue
                 session.state.status = RuntimeStatus.PAUSED
                 session.state.custom_data["plan_last_diagnosis"] = {
                     "status": "paused",
@@ -1516,9 +1609,9 @@ class InteractiveShell:
                     "reason": reason,
                     "blocked": True,
                     "repair_options": [
-                        "Increase PLAN_STEP_TIMEOUT_S for slow model/tool calls, then run /plan-retry.",
-                        "For long bioinformatics commands, ask me to run the command as a background job and monitor it with /jobs or /job-tail.",
-                        "If this was just file inspection, retry once; provider latency may have caused the stall.",
+                        "Increase PLAN_STEP_TIMEOUT_S (the no-activity window) for very slow providers, then /plan-retry.",
+                        "For long bioinformatics commands, run them as a background job and monitor with /jobs or /job-tail.",
+                        "Check provider connectivity with /doctor; a persistent stall usually means an unreachable model.",
                     ],
                 }
                 try:
@@ -1526,13 +1619,22 @@ class InteractiveShell:
                 except Exception:
                     pass
                 question = (
-                    "This step timed out before producing output. Should I retry, "
-                    "increase PLAN_STEP_TIMEOUT_S, or convert the slow work to a background job?"
+                    "This step kept going silent across retries. Should I retry again, raise "
+                    "PLAN_STEP_TIMEOUT_S, or convert the slow work to a background job?"
                 )
                 return ("needs_input", reason, 0, question)
             new_events = session.events[before:]
             tool_calls = sum(1 for e in new_events
                              if e.get("type") == AgentEventType.TOOL_CALL_COMPLETED.value)
+            if session.state.custom_data.pop("turn_budget_stopped", False):
+                # The turn hit the per-turn token budget — a deliberate cost halt, not a transient
+                # failure. Don't auto-retry (that would just burn more budget); hand control to the user.
+                reason = (
+                    f"step {position}/{total} stopped at the per-turn token budget "
+                    f"(token_budget_per_step); raise it or split the step to continue."
+                )
+                return ("needs_input", reason, tool_calls,
+                        "This step hit the token budget. Raise TOKEN_BUDGET_PER_STEP (or split the step), then /plan-retry.")
             question = self._pending_ask_user_question(session)
             if question:
                 return ("needs_input", f"The agent needs input: {question}", tool_calls, question)

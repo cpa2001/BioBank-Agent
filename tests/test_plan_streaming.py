@@ -1,8 +1,9 @@
 """Phase C: live token streaming from the council into the dashboard.
 
-Pins: the provider streams plain-text calls token-by-token via ``stream_cb``
-(tool-call turns stay non-streaming); streamed usage is captured; the council
-forwards each delta on a dedicated ``delta`` channel (never as a recorded
+Pins: the provider streams calls token-by-token via ``stream_cb`` — INCLUDING
+tool-call turns, where the client assembles tool_calls from the streamed deltas
+so every token refreshes the inactivity watchdog; streamed usage is captured; the
+council forwards each delta on a dedicated ``delta`` channel (never as a recorded
 event); and streaming is opt-in via ``ctx.stream`` / ``build_plan(stream=...)``.
 """
 
@@ -59,17 +60,18 @@ def test_llmprovider_no_stream_cb_uses_plain_chat():
     assert llm.chat_calls == 1
 
 
-def test_llmprovider_with_tools_does_not_stream():
-    """Tool-call turns must keep the non-streaming path even if a stream_cb is
-    somehow present (streaming tool-call accumulation is out of scope)."""
+def test_llmprovider_with_tools_streams_too():
+    """Tool-call turns now ALSO take the streaming path when a stream_cb is set — the client assembles
+    tool_calls from the streamed deltas, so every token refreshes the inactivity watchdog. The plain
+    non-streaming chat() path is used only when there is no stream_cb (see the test below)."""
     llm = _FakeStreamLLM()
     provider = LLMProvider(llm)
     req = ProviderRequest(session_id="s", turn_id="t", messages=[{"role": "user", "content": "x"}],
                           tools=[{"type": "function", "function": {"name": "f"}}])
     req.stream_cb = lambda d: None
     resp = provider.complete(req)
-    assert resp.text == "non-streamed"
-    assert llm.chat_calls == 1
+    assert resp.text == "先做 QC，再跑 SAIGE"  # took the streaming path despite tools being present
+    assert llm.chat_calls == 0
 
 
 def test_stream_falls_back_when_usage_option_rejected_at_iteration():
