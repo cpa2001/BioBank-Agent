@@ -83,6 +83,24 @@ def test_hard_ceiling_fires_even_under_continuous_activity():
     assert "hard ceiling" in message
 
 
+def test_hard_ceiling_observed_even_when_window_exceeds_it():
+    """Even if the inactivity window is (mis)configured LARGER than the hard ceiling, the ceiling is
+    still enforced — the initial timer arms no later than the ceiling. Without that, the first fire
+    (and the ceiling check) would be delayed all the way to the window."""
+    fired = False
+    message = ""
+    try:
+        with _wall_clock_timeout(5.0, PlanStepTimeoutError, "test", activity_based=True, hard_ceiling_s=0.4):
+            for _ in range(40):
+                time.sleep(0.05)
+                mark_activity()  # window is 5s so inactivity never trips; the 0.4s ceiling must fire
+    except PlanStepTimeoutError as exc:
+        fired = True
+        message = str(exc)
+    assert fired, "hard ceiling must fire even when timeout_s > hard_ceiling_s"
+    assert "hard ceiling" in message
+
+
 # --------------------------------------------------------------------------- streaming with tools
 
 

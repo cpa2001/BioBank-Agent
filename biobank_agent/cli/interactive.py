@@ -142,7 +142,12 @@ def _wall_clock_timeout(timeout_s: float, exc_type: type[BaseException], label: 
 
     previous_handler = signal.getsignal(signal.SIGALRM)
     signal.signal(signal.SIGALRM, _handler)
-    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    # Arm no later than the hard ceiling, so the ceiling is still observed even if timeout_s (the
+    # inactivity window) is misconfigured LARGER than it — otherwise the first fire (and the ceiling
+    # check inside the handler) would be delayed all the way to timeout_s. The handler re-arms within
+    # the remaining window after each tick.
+    initial_arm = timeout_s if hard_ceiling_s <= 0 else min(timeout_s, hard_ceiling_s)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, initial_arm)
     _ACTIVE_TIMEOUTS.append(state)
     try:
         yield
