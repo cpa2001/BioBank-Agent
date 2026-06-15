@@ -1164,6 +1164,10 @@ class AgentRuntime:
             token_budget = 0
         completion_tokens_used = 0
         budget_stopped = False
+        # Clear any stale flag from a PRIOR turn so turn_budget_stopped reflects only THIS turn —
+        # otherwise a budget stop in a turn nobody consumes (e.g. a plain chat turn) would linger in
+        # custom_data and falsely pause a later plan step when _run_step_with_recovery pops it.
+        session.state.custom_data.pop("turn_budget_stopped", None)
 
         # Activate the provider's streaming path so each token refreshes the inactivity watchdog
         # (mark_activity lives in the provider adapter) — this is what keeps a model that is actively

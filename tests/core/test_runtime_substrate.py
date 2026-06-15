@@ -361,6 +361,22 @@ def test_per_turn_token_budget_stops_turn_gracefully(tmp_path):
     assert len(provider.scripted_responses) == 4, "stopped after 2 rounds; 4 scripted responses remain"
 
 
+def test_run_turn_clears_stale_budget_stop_flag(tmp_path):
+    """A turn_budget_stopped flag left behind by an earlier turn (e.g. a plain chat turn that nobody
+    consumes) must be cleared at the START of the next run_turn — otherwise it lingers and falsely
+    pauses a later plan step when _run_step_with_recovery pops it."""
+    provider = FakeProvider(
+        scripted_responses=[ProviderResponse(text="done", provider="fake", model="fake-model")],
+        model="fake-model",
+    )
+    runtime = _runtime_with(tmp_path, ToolRegistry(), provider, max_rounds=2)
+    session = runtime.create_session(title="stale", cwd=str(tmp_path))
+    session.state.custom_data["turn_budget_stopped"] = True  # stale flag from a prior turn
+    runtime.run_turn(session, "hello")  # no budget set -> normal completion, must clear the stale flag
+    assert not session.state.custom_data.get("turn_budget_stopped"), "stale budget-stop flag must be cleared"
+    assert session.turns[-1].status == RuntimeStatus.COMPLETED.value
+
+
 def test_turn_fails_gracefully_on_provider_error(tmp_path):
     """A provider/LLM exception must NOT escape run_turn; the turn is FAILED and an
     ERROR event is recorded (previously the exception propagated uncaught)."""
