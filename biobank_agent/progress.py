@@ -465,14 +465,16 @@ class PlanRunDashboard:
         rendered = [self._sanitize(ln, width) for ln in lines[-max_lines:]]
         return Text.from_markup("\n".join(f"[dim]{ln}[/dim]" for ln in rendered) or "[dim]…[/dim]")
 
-    def _transcript_renderable(self) -> Group:
+    def _transcript_renderable(self, max_lines: int = 3) -> Group:
         """Single active subagent → a flowing Codex-style transcript: a header line plus the live output
-        tail (what the model or its tool is producing right now)."""
+        tail (what the model or its tool is producing right now). ``max_lines`` is capped by the caller's
+        height budget so the transcript never overflows a short viewport."""
         now = time.time()
         frame = _SPINNER_FRAMES[int(now * 8) % len(_SPINNER_FRAMES)]
         _label, row = next(iter(self._active.items()))
         header = Text.from_markup(self._active_header_markup(row, now, frame=frame))
-        body = self._transcript_body(row.get("partial", ""), max_lines=3, width=self._panel_text_width(reserve=8))
+        body = self._transcript_body(row.get("partial", ""), max_lines=max(1, max_lines),
+                                     width=self._panel_text_width(reserve=8))
         return Group(header, body)
 
     def _active_tree_renderable(self, max_rows: int = 8) -> Tree:
@@ -482,11 +484,16 @@ class PlanRunDashboard:
         frame = _SPINNER_FRAMES[int(now * 8) % len(_SPINNER_FRAMES)]
         width = self._panel_text_width(reserve=12)
         tree = Tree("[bold]Active[/bold]", guide_style="dim")
-        rows = sorted(self._active.items(), key=lambda kv: kv[1].get("start_ts", now))[: max(1, max_rows)]
-        # Each tail child doubles a node's height; only show tails for a SMALL fan-out so a wide one
-        # (e.g. 8 parallel agents) stays a compact header-only list and never overflows the viewport.
-        show_tails = len(self._active) <= 6
-        for _label, row in rows:
+        active = sorted(self._active.items(), key=lambda kv: kv[1].get("start_ts", now))
+        n = len(active)
+        budget = max(2, int(max_rows))
+        # Height-safe budgeting: the Tree root costs 1 line; a node costs 1 (header) + 1 if it shows a
+        # live tail. Show tails ONLY when every node's header+tail fits the budget (a small fan-out on a
+        # tall enough panel); otherwise render nodes header-only so a fan-out shows every agent it can
+        # without overflowing the viewport (the wrap/refresh problem).
+        show_tails = n <= 6 and (1 + n * 2) <= budget
+        shown = active if show_tails else active[: max(1, budget - 1)]
+        for _label, row in shown:
             node = tree.add(Text.from_markup(self._active_header_markup(row, now, frame=frame)))
             partial = (row.get("partial") or "").strip()
             if show_tails and partial:
@@ -569,7 +576,9 @@ class PlanRunDashboard:
         active_count = len(self._active)
         if active_count == 1:
             sections.append(Text.from_markup("[bold]Now[/bold]"))
-            sections.append(self._transcript_renderable())
+            # Cap the transcript body to the active-row budget (header takes one line) so it never
+            # overflows a short viewport.
+            sections.append(self._transcript_renderable(max_lines=max(1, min(3, max_active - 1))))
             sections.append(Text(""))
         elif active_count >= 2:
             sections.append(self._active_tree_renderable(max_active))

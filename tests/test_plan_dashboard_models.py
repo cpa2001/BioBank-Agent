@@ -307,3 +307,17 @@ def test_multiple_active_renders_task_tree_with_live_tails():
     text = _render(d)
     assert "kimi" in text and "deepseek" in text  # both nodes present
     assert "先做QC" in text                         # the live tail rendered under a node
+
+
+def test_tree_is_height_bounded_for_small_budget():
+    """A fan-out with live tails must stay within the height budget: on a tight budget, tails are
+    dropped and nodes capped, so the rendered tree never overflows the viewport (wrap/refresh safety)."""
+    d = _dash()
+    for i in range(5):
+        d.record("Planning", status="running", metadata={"subagent": f"c{i}", "model": "kimi"})
+        d.note_partial(f"c{i}", "a streamed line that must NOT appear as a tail under a tight budget")
+    buf = StringIO()
+    Console(file=buf, force_terminal=True, width=100).print(d._active_tree_renderable(max_rows=3))
+    lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+    assert len(lines) <= 4  # root + up to (budget-1)=2 header-only nodes, no tails
+    assert "must NOT appear" not in buf.getvalue()
