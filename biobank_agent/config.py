@@ -193,6 +193,14 @@ class Settings(BaseSettings):
     external_skills_dir: Path = Path("./external_skills")
     enabled_external_corpora: list[str] = Field(default_factory=list)
 
+    # ── Plugin marketplaces (Claude-Code-style) ──────────────────
+    # Opt-in: consume third-party plugins from a marketplace repo (e.g. obra/superpowers). SKILL.md
+    # skills load as USABLE knowledge skills; plugin HOOKS (executable shell commands) are recorded but
+    # NEVER run without an explicit per-plugin opt-in (plugin_allow_hooks). Cloned under the memory dir.
+    # Default OFF — third-party plugin code is never executed on install.
+    plugins_enabled: bool = False
+    plugin_allow_hooks: bool = False
+
     # ── Adversarial-game council ─────────────────────────────────
     # Route planning through the proposer/red-team/referee game instead of the symmetric
     # debate. Default OFF; kept only if it beats symmetric on the council A/B set.
