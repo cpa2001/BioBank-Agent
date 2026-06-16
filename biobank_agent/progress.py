@@ -131,6 +131,14 @@ def _elapsed_str(seconds: float) -> str:
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
+def _short_tokens(n: int) -> str:
+    """Compact completion-token count for a live row header ('1.2k tok')."""
+    n = max(0, int(n))
+    if n >= 1000:
+        return f"{n / 1000:.1f}k tok"
+    return f"{n} tok"
+
+
 def _styled(text: Any, style: str) -> str:
     """Wrap ``text`` in a Rich style tag — but only when ``style`` is non-empty.
 
@@ -321,6 +329,10 @@ class PlanRunDashboard:
                 row["persona"] = metadata["persona"]
             if metadata.get("activity"):
                 row["activity"] = metadata["activity"]
+            if metadata.get("tool_uses") is not None:
+                row["tool_uses"] = metadata["tool_uses"]
+            if metadata.get("tokens") is not None:
+                row["tokens"] = metadata["tokens"]
             self._active[label] = row
 
     def record(
@@ -414,6 +426,74 @@ class PlanRunDashboard:
             table.add_row(f"[green]{frame}[/green]", f"[bold]{model}[/bold]", label, f"[dim]{timer}[/dim]")
         return table
 
+    def _active_header_markup(self, row: dict[str, Any], now: float, *, frame: str) -> str:
+        """One-line header for an active subagent: spinner · model · what-it-is-doing-now · metrics · timer."""
+        model = _rich_escape(_short_model(row.get("model", "")))
+        activity = _rich_escape(str(row.get("activity") or _STAGE_ACTIVITY.get(row.get("stage", ""), "working")))
+        parts = [f"[green]{frame}[/green]", f"[bold]{model}[/bold]", f"[cyan]{activity}[/cyan]"]
+        persona = row.get("persona")
+        if persona:
+            parts.append(f"[dim]· {_rich_escape(str(persona))}[/dim]")
+        tools = row.get("tool_uses")
+        if tools:
+            try:
+                n = int(tools)
+                parts.append(f"[dim]· {n} tool{'s' if n != 1 else ''}[/dim]")
+            except (TypeError, ValueError):
+                pass
+        tokens = row.get("tokens")
+        if tokens:
+            try:
+                parts.append(f"[dim]· {_short_tokens(int(tokens))}[/dim]")
+            except (TypeError, ValueError):
+                pass
+        parts.append(f"[dim]{_elapsed_str(now - row.get('start_ts', now))}[/dim]")
+        return " ".join(parts)
+
+    def _panel_text_width(self, *, reserve: int = 8) -> int:
+        """Usable inner width for transcript/tree text (panel padding/borders/tree-guides reserved)."""
+        width = getattr(getattr(self.console, "size", None), "width", 100) or 100
+        return max(20, int(width) - max(0, reserve))
+
+    def _transcript_body(self, partial: str, *, max_lines: int = 3, width: int = 100) -> Text:
+        """The live streamed tail as up to ``max_lines`` sanitised, cell-bounded lines — so a long or
+        wrapping stream can never destabilise the panel height (the wrap/refresh problem)."""
+        raw = (partial or "").strip()
+        if not raw:
+            return Text.from_markup("[dim]…[/dim]")
+        lines = [ln for ln in raw.splitlines() if ln.strip()] or [raw]
+        rendered = [self._sanitize(ln, width) for ln in lines[-max_lines:]]
+        return Text.from_markup("\n".join(f"[dim]{ln}[/dim]" for ln in rendered) or "[dim]…[/dim]")
+
+    def _transcript_renderable(self) -> Group:
+        """Single active subagent → a flowing Codex-style transcript: a header line plus the live output
+        tail (what the model or its tool is producing right now)."""
+        now = time.time()
+        frame = _SPINNER_FRAMES[int(now * 8) % len(_SPINNER_FRAMES)]
+        _label, row = next(iter(self._active.items()))
+        header = Text.from_markup(self._active_header_markup(row, now, frame=frame))
+        body = self._transcript_body(row.get("partial", ""), max_lines=3, width=self._panel_text_width(reserve=8))
+        return Group(header, body)
+
+    def _active_tree_renderable(self, max_rows: int = 8) -> Tree:
+        """2+ active subagents → a Claude-Code-style task tree: one node per subagent (spinner · model ·
+        activity · metrics · timer) plus a dim child showing its live output tail."""
+        now = time.time()
+        frame = _SPINNER_FRAMES[int(now * 8) % len(_SPINNER_FRAMES)]
+        width = self._panel_text_width(reserve=12)
+        tree = Tree("[bold]Active[/bold]", guide_style="dim")
+        rows = sorted(self._active.items(), key=lambda kv: kv[1].get("start_ts", now))[: max(1, max_rows)]
+        # Each tail child doubles a node's height; only show tails for a SMALL fan-out so a wide one
+        # (e.g. 8 parallel agents) stays a compact header-only list and never overflows the viewport.
+        show_tails = len(self._active) <= 6
+        for _label, row in rows:
+            node = tree.add(Text.from_markup(self._active_header_markup(row, now, frame=frame)))
+            partial = (row.get("partial") or "").strip()
+            if show_tails and partial:
+                last = partial.splitlines()[-1] if partial.splitlines() else partial
+                node.add(Text.from_markup(f"[dim]{self._sanitize(last, width)}[/dim]"))
+        return tree
+
     def _phases_renderable(self) -> Table:
         # Compact multi-column grid of the whole pipeline so each phase name
         # stays intact on one cell (no mid-word wrap) while keeping the panel
@@ -483,10 +563,16 @@ class PlanRunDashboard:
         max_recent = max(2, min(5, budget - max_active))
 
         sections: list[Any] = []
-        active = self._active_renderable(max_active)
-        if active is not None:
-            sections.append(Text.from_markup("[bold]Active models[/bold]"))
-            sections.append(active)
+        # Auto-switch: a single active subagent renders as a Codex-style streaming transcript (header +
+        # live output tail); a parallel fan-out renders as a Claude-Code-style task tree (one node each,
+        # each with its own live tail). Both surface the model/tool output the user wants to watch.
+        active_count = len(self._active)
+        if active_count == 1:
+            sections.append(Text.from_markup("[bold]Now[/bold]"))
+            sections.append(self._transcript_renderable())
+            sections.append(Text(""))
+        elif active_count >= 2:
+            sections.append(self._active_tree_renderable(max_active))
             sections.append(Text(""))
         sections.append(self._phases_renderable())
         sections.append(Text(""))

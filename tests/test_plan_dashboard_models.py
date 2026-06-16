@@ -274,3 +274,36 @@ def test_council_run_parallel_emits_role_and_persona():
     done = [m for (_s, st, m) in events if st in ("success", "error") and m.get("subagent") == "candidate-1"]
     assert dispatch and dispatch[0].get("role") == "planner" and dispatch[0].get("persona") == "biostatistician"
     assert done and done[0].get("role") == "planner" and "elapsed_s" in done[0]
+
+
+def test_single_active_renders_streaming_transcript():
+    """One active subagent renders as a Codex-style transcript: the live streamed partial is now
+    VISIBLE in the panel (it used to be captured in the row but never rendered)."""
+    d = _dash()
+    d.record("Execution", status="running",
+             metadata={"subagent": "step-1", "model": "kimi", "activity": "step 1/3 · QC"})
+    d.note_partial("step-1", "loading VCF and computing call rates")
+    text = _render(d)
+    assert "loading VCF and computing call rates" in text  # the live content is shown, not just a spinner
+    assert "step 1/3" in text                              # the activity header
+
+
+def test_active_header_shows_tool_and_token_metrics():
+    """Claude-Code-style metrics: a row carrying tool_uses/tokens renders them in its header."""
+    d = _dash()
+    d.record("Execution", status="running",
+             metadata={"subagent": "step-1", "model": "kimi", "activity": "running",
+                       "tool_uses": 3, "tokens": 12500})
+    text = _render(d)
+    assert "3 tool" in text and "12.5k tok" in text
+
+
+def test_multiple_active_renders_task_tree_with_live_tails():
+    """A parallel fan-out (2+ active) renders as a task tree, each node carrying its own live output tail."""
+    d = _dash()
+    d.record("Planning", status="running", metadata={"subagent": "c1", "model": "kimi", "activity": "drafting"})
+    d.record("Planning", status="running", metadata={"subagent": "c2", "model": "deepseek", "activity": "drafting"})
+    d.note_partial("c1", "candidate one proposes 先做QC")
+    text = _render(d)
+    assert "kimi" in text and "deepseek" in text  # both nodes present
+    assert "先做QC" in text                         # the live tail rendered under a node

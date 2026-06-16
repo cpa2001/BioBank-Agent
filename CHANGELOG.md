@@ -10,8 +10,10 @@ Resilience pass: a timeout no longer kills a task that is making progress. The
 per-step deadline now measures genuine model SILENCE — a streaming model or a
 tool emitting output is never judged stalled — an absolute hard ceiling backstops
 runaway, a completion-token budget is the real cost guard, and a stalled step
-auto-resumes from session state instead of pausing for the user. Designed and
-reviewed with an external coding agent.
+auto-resumes from session state instead of pausing for the user. It also lands a
+live execution view — a Codex-style streaming transcript for a single track and a
+Claude-Code-style task tree for a parallel fan-out — so the user watches what the
+agent is producing in real time. Designed and reviewed with an external coding agent.
 
 ### Added
 - Inactivity-based per-step timeout with a separate absolute hard ceiling
@@ -31,6 +33,17 @@ reviewed with an external coding agent.
   step-timeout auto-resume/escalation (`tests/test_plan_timeout_semantics.py`,
   `tests/core/test_runtime_substrate.py`, `tests/test_interactive_cli_runtime.py`,
   `tests/test_plan_recovery_ask_user.py`).
+- Live execution view: the dashboard now renders the streamed model/tool output
+  (the `partial` buffer that was captured but never shown) as a Codex-style
+  transcript for a single active subagent, and a Claude-Code-style task tree
+  (per-node spinner · model · activity · metrics · timer + a live output tail) for
+  a parallel fan-out — auto-switching by active count, with cell-bounded,
+  height-capped rendering that fixes wrap/refresh overflow
+  (`biobank_agent/progress.py`).
+- Execution-UI tests: transcript renders live content, the tree renders parallel
+  nodes with tails, header token/tool metrics, and model tokens streaming into the
+  running step's transcript (`tests/test_plan_dashboard_models.py`,
+  `tests/test_interactive_cli_runtime.py`).
 
 ### Changed
 - Execution now streams WITH tools: `LLMProvider.complete` takes the streaming
@@ -42,6 +55,11 @@ reviewed with an external coding agent.
   full session context) and escalates to a user prompt only after the retry
   budget is spent — no longer pausing on the first timeout
   (`biobank_agent/cli/interactive.py`).
+- During execution the runtime streams the model's tokens into the running step's
+  live transcript (`runtime.stream_sink`), and tool output is routed into that same
+  step row (one row per step instead of a lingering row per tool call) while also
+  refreshing the inactivity watchdog on the TTY path
+  (`biobank_agent/cli/interactive.py`, `biobank_agent/runtime/engine.py`).
 
 ### Fixed
 - A healthy multi-round plan step (many tool rounds, model actively producing)

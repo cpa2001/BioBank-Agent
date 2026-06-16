@@ -938,6 +938,44 @@ def test_step_timeout_auto_resumes_instead_of_pausing(tmp_path):
     assert shell.session.state.plan.status.value == "completed"
 
 
+def test_execution_streams_model_tokens_into_step_transcript(tmp_path, monkeypatch):
+    """During autonomous execution, the model's streamed tokens are routed into the RUNNING step's
+    transcript row (runtime.stream_sink -> view.note_partial), so the user watches live output."""
+    shell, _ = _shell(tmp_path)
+    shell.handle_line("/plan stream into transcript")
+
+    class _StreamingFake:
+        model = "fake-model"
+
+        def complete(self, request):
+            cb = getattr(request, "stream_cb", None)
+            if cb is not None:
+                cb("computing ")
+                cb("call rates")
+            return ProviderResponse(text="computing call rates", provider="fake", model="fake-model")
+
+    shell.runtime.provider_router.providers["fake-model"] = _StreamingFake()
+
+    partials: list[tuple[str, str]] = []
+
+    class _SpyView:
+        def start(self, *a, **k):
+            pass
+
+        def record(self, *a, **k):
+            pass
+
+        def note_partial(self, label, text, **k):
+            partials.append((label, text))
+
+        def stop(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(shell, "_make_execution_view", lambda: _SpyView())
+    shell.handle_line("/plan-approve")
+    assert any("computing" in t for (_label, t) in partials), "model tokens must stream into the step transcript"
+
+
 def test_execution_drives_view_start_record_stop(tmp_path, monkeypatch):
     """The execution loop must drive a live view (start -> record... -> stop) and
     ALWAYS stop it (the Live must be torn down)."""

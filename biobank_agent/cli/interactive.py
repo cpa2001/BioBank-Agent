@@ -385,6 +385,9 @@ class InteractiveShell:
     # The live execution view during _execute_plan_autonomously, so streamed
     # subprocess lines (ctx.emit_line) can surface on it in real time (issue #2).
     _active_exec_view: Any = None
+    # Label of the plan step currently executing, so streamed model tokens + tool output route into that
+    # step's live transcript row (Phase 2 execution UI).
+    _active_exec_step_label: Any = None
     # Background job manager for run_job / job_* tools and /jobs (issue #1).
     job_manager: Any = None
 
@@ -1004,6 +1007,19 @@ class InteractiveShell:
 
         view = self._make_execution_view()
         self._active_exec_view = view  # so streamed subprocess lines surface live (#2)
+        # Live transcript: route the executing model's streamed tokens into the RUNNING step's row so the
+        # user watches what it is producing right now, not just a spinner. _active_exec_step_label tracks
+        # which step is running; the sink is torn down in the finally.
+        self._active_exec_step_label = None
+        if hasattr(view, "note_partial"):
+            def _exec_stream_sink(chunk: str) -> None:
+                label = getattr(self, "_active_exec_step_label", None)
+                if label:
+                    try:
+                        view.note_partial(label, chunk)
+                    except Exception:
+                        pass
+            runtime.stream_sink = _exec_stream_sink
         done = failed = unverified = 0
         halted: "tuple[int, Any] | None" = None
         current = None
@@ -1040,10 +1056,14 @@ class InteractiveShell:
                     halted = (position, step, "paused", reason)
                     break
                 step.status = "running"
+                self._active_exec_step_label = step.id  # model stream + tool output flow into this row
                 view.record("Execution", actor=step.id, status="running",
                             message=f"step {position}/{total}: {step.title}",
                             metadata={"subagent": step.id, "current_step": step.id,
                                       "total_steps": total, "completed_steps": done,
+                                      # cumulative completion tokens so far — a live cost meter on the
+                                      # step header (grows step to step), per the user's anti-runaway intent.
+                                      "tokens": self._session_completion_tokens(session),
                                       # the live active row reads "step 3/7 · Run QC…" — the step
                                       # identity, not a generic stage-default verb.
                                       "activity": f"step {position}/{total} · {step.title[:60]}"})
@@ -1143,6 +1163,11 @@ class InteractiveShell:
             return {"status": "cancelled", "done": done, "failed": failed}
         finally:
             self._active_exec_view = None
+            self._active_exec_step_label = None
+            try:
+                runtime.stream_sink = None  # stop routing model tokens once execution ends
+            except Exception:
+                pass
             view.stop()  # idempotent — the Live must always be torn down
 
         if halted and len(halted) > 2 and halted[2] == "paused":
@@ -4678,24 +4703,36 @@ class InteractiveShell:
             if not text:
                 return
             view = getattr(self, "_active_exec_view", None)
-            if view is None or not hasattr(view, "record"):
+            if view is None:
                 return
+            mark_activity()  # tool output is progress — refresh the inactivity watchdog (TTY path too)
             _line_state["count"] += 1
             if _line_state["count"] > 2000:  # hard cap; full output is in the log
                 return
+            step_label = getattr(self, "_active_exec_step_label", None)
+            # Append tool output to the running step's live transcript so a step reads as ONE flowing
+            # transcript (model reasoning + tool output interleaved) and keeps a single active row per
+            # step instead of a lingering row per tool call. Buffer is bounded inside note_partial.
+            if step_label and hasattr(view, "note_partial"):
+                try:
+                    view.note_partial(step_label, f"\n[{request.handler.name}] {text[:200]}")
+                except Exception:
+                    pass
             now = time.monotonic()
             if stream != "stderr" and (now - _line_state["last"]) < 0.25:
-                return  # throttle stdout; always show stderr
+                return  # throttle the milestone record; always show stderr
             _line_state["last"] = now
+            if not hasattr(view, "record"):
+                return
+            target = step_label or str(request.call_id)
             try:
                 view.record(
                     "Output",
-                    actor=str(request.call_id),
+                    actor=target,
                     status="running",
                     message=f"{request.handler.name}: {text[:200]}",
-                    metadata={"subagent": str(request.call_id), "stream": stream,
-                              # so the live active row reads "<tool> · stdout" — what is running now,
-                              # not a generic "working" placeholder.
+                    metadata={"subagent": target, "stream": stream,
+                              # the live row reads "<tool> · stdout" — what is running now, not a verb.
                               "activity": f"{request.handler.name} · {stream[:40]}"},
                 )
             except Exception:
