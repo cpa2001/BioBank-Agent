@@ -1131,7 +1131,10 @@ class InteractiveShell:
                     step.status = "failed"
                     failed += 1
                     reason = reason or f"step {position}/{total} did not converge"
-                    self._store_plan_diagnosis(plan, step, reason=reason)
+                    # Difficulty trigger: retries are spent, so (when opted in) consult external coding
+                    # agents in parallel and fold their fix plan into the diagnosis before handing back.
+                    escalation = self._maybe_escalate_step_failure(plan, step, reason, view=view)
+                    self._store_plan_diagnosis(plan, step, reason=reason, preflight=(escalation or None))
                     view.record("Repair", actor=step.id, status="failed",
                                 message=f"step {position}/{total} failed after retries: {step.title}",
                                 metadata={"subagent": step.id})
@@ -1949,6 +1952,52 @@ class InteractiveShell:
                 ],
             }
         return {"blocked": False, "wgs": snapshot}
+
+    def _maybe_escalate_step_failure(self, plan, step, reason: str, *, view=None) -> dict[str, Any]:
+        """Consult external coding agents (parallel, plan mode) about a step that failed after retries.
+
+        Gated OFF by default (``external_escalation_enabled``). Returns a preflight-style dict carrying the
+        agents' advice + repair options to fold into the diagnosis, or ``{}`` when disabled / no advice.
+        Never raises — an escalation failure must not disturb the plan halt.
+        """
+        if not bool(getattr(self.settings, "external_escalation_enabled", False)):
+            return {}
+        try:
+            from biobank_agent.runtime import external_orchestration as extorch
+
+            agents = getattr(self.settings, "external_escalation_agents", "codex,claude")
+            timeout_s = float(getattr(self.settings, "external_escalation_timeout_s", 180) or 180)
+            prompt = (
+                "A biobank-analysis plan step failed after automatic retries. Diagnose the most likely "
+                "cause and give a concise, concrete fix plan (specific commands / edits / paths). Do not "
+                "execute anything.\n\n"
+                f"Step: {getattr(step, 'title', '')}\n"
+                f"Purpose: {getattr(step, 'purpose', '')}\n"
+                f"Failure: {reason}\n"
+            )
+            if view is not None:
+                view.record("Escalation", actor=getattr(step, "id", ""), status="running",
+                            message=f"consulting external agents ({agents}) for a fix plan",
+                            metadata={"subagent": getattr(step, "id", "")})
+            results = extorch.consult_external_agents(agents, prompt, plan_mode=True, timeout_s=timeout_s)
+            advices = [f"[{r.name}] {r.text.strip()[:1500]}" for r in results if r.ok and r.text.strip()]
+            if not advices:
+                return {}
+            if view is not None:
+                view.record("Escalation", actor=getattr(step, "id", ""), status="success",
+                            message=f"external advice attached to diagnosis ({len(advices)} agent(s))",
+                            metadata={"subagent": getattr(step, "id", "")})
+            return {
+                "external_advice": "\n\n".join(advices),
+                "external_agents": [r.name for r in results if r.ok and r.text.strip()],
+                "repair_options": [
+                    "External agents proposed a fix plan (see the diagnosis) — apply the relevant steps, then /plan-retry.",
+                    "Or use /plan-use key=value to supply a missing path/option, then /plan-resume.",
+                    "Run /doctor for dependency and data-readiness details.",
+                ],
+            }
+        except Exception:  # escalation is best-effort; never break the halt
+            return {}
 
     def _store_plan_diagnosis(self, plan, step, *, reason: str, preflight: dict[str, Any] | None = None) -> None:
         session = self._require_session()

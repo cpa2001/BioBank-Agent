@@ -18,8 +18,11 @@ Claude-Code-style plugins from a marketplace to gain their skills, while plugin
 hooks and other third-party code stay inert until explicitly opted in. And it
 adds self-evolution auto-capture: the agent mines its own repeated successful
 skill sequences and proposes them as review-only wrapper skills that can only
-land on a review branch, never on main and never in core. Designed and reviewed
-with an external coding agent.
+land on a review branch, never on main and never in core. Finally it adds
+external-agent orchestration: consult codex/claude/gemini in parallel (in plan
+mode), auto-escalate a step that has exhausted its retries, spawn depth-bounded
+biobank child sessions, and run a workflow DAG with fan-out/fan-in — all
+default-OFF. Designed and reviewed with an external coding agent.
 
 ### Added
 - Inactivity-based per-step timeout with a separate absolute hard ceiling
@@ -85,6 +88,23 @@ with an external coding agent.
   validation, the generated skill applying to a review branch (never the live tree)
   through the real apply gate, and the trajectory→learner bridge
   (`tests/test_sequence_skill.py`, `tests/core/test_evolution_layer.py`).
+- External-agent orchestration + workflow (all default-OFF):
+  `runtime/external_orchestration.py` fans codex/claude/gemini out concurrently
+  (reusing the council thread-pool's timeout/cancel/partial-harvest) with a
+  prompt-level plan mode; `runtime/workflow.py` runs a dependency DAG, executing
+  each topological level in parallel with fan-in of upstream results and isolating
+  failures; `runtime/subruntime.py` spawns depth-bounded biobank child sessions
+  (a structural recursion guard, not prompt-only); and a plan step that exhausts
+  its retries can auto-escalate — consulting external agents in plan mode and
+  folding their fix plan into the diagnosis (`biobank_agent/cli/interactive.py`,
+  gated by `external_escalation_enabled` / `biobank_subagent_enabled` in
+  `biobank_agent/config.py`). Runners/detectors are injected throughout, so every
+  seam is offline-testable.
+- Orchestration tests: parallel fan-out order/failure-isolation/plan-mode, the
+  workflow DAG (levels, fan-in, failure skipping, cycle rejection), the subagent
+  depth guard, and gated difficulty-escalation folding advice into the diagnosis
+  (`tests/test_external_orchestration.py`, `tests/test_workflow.py`,
+  `tests/test_subruntime.py`, `tests/test_external_escalation.py`).
 
 ### Changed
 - Execution now streams WITH tools: `LLMProvider.complete` takes the streaming
