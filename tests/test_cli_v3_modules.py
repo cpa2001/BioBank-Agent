@@ -73,11 +73,13 @@ def test_cli_package_exposes_importable_command_modules():
 
 
 def test_command_registry_discovers_split_builtin_modules():
-    from biobank_agent.cli.commands import mcp, memory, plan, reproducibility, research, runtime, session
+    from biobank_agent.cli.commands import mcp, memory, plan, plugin, reproducibility, research, runtime, session
     from biobank_agent.cli.commands.registry import BUILTIN_COMMAND_MODULES, iter_registered_commands
 
-    assert BUILTIN_COMMAND_MODULES == ("session", "runtime", "plan", "research", "mcp", "reproducibility", "memory")
-    modules = [session, runtime, plan, research, mcp, reproducibility, memory]
+    assert BUILTIN_COMMAND_MODULES == (
+        "session", "runtime", "plan", "research", "mcp", "reproducibility", "memory", "plugin",
+    )
+    modules = [session, runtime, plan, research, mcp, reproducibility, memory, plugin]
     expected = {command.name for module in modules for command in module.commands()}
     discovered = {command.name for command in iter_registered_commands()}
 

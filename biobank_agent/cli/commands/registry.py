@@ -23,6 +23,7 @@ BUILTIN_COMMAND_MODULES = (
     "mcp",
     "reproducibility",
     "memory",
+    "plugin",
 )
 EXTRA_COMMAND_MODULES_ENV = "BIOBANK_CLI_COMMAND_MODULES"
 

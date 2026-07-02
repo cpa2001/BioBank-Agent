@@ -118,3 +118,68 @@ def test_install_plugin_not_found(tmp_path):
     mp = discover_marketplace(_make_marketplace(tmp_path))
     result = install_plugin(mp, "nope")
     assert result["status"] == "not_found" and "superpowers" in result["available"]
+
+
+# --------------------------------------------------------------------------- live: add/clone
+
+
+def test_resolve_marketplace_spec_local_git_and_shorthand(tmp_path):
+    from biobank_agent.runtime.plugins import resolve_marketplace_spec
+
+    repo = _make_marketplace(tmp_path)
+    assert resolve_marketplace_spec(str(repo)) == ("local", str(repo.resolve()))
+    assert resolve_marketplace_spec("obra/superpowers") == ("git", "https://github.com/obra/superpowers.git")
+    assert resolve_marketplace_spec("https://example.com/x.git") == ("git", "https://example.com/x.git")
+
+
+def test_add_marketplace_local_dir_does_not_clone(tmp_path):
+    from biobank_agent.runtime.plugins import add_marketplace
+
+    repo = _make_marketplace(tmp_path)
+    mp = add_marketplace(str(repo), tmp_path / "plugins_home")
+    assert mp.name == "demo-market" and [p.name for p in mp.plugins] == ["superpowers"]
+    assert not (tmp_path / "plugins_home").exists()  # a local dir is used in place, never cloned
+
+
+def test_clone_marketplace_uses_injected_runner(tmp_path):
+    from biobank_agent.runtime.plugins import clone_marketplace
+
+    calls: list[list[str]] = []
+
+    def fake_runner(argv, cwd=""):
+        calls.append(argv)
+        if argv[:2] == ["git", "clone"]:
+            (Path(argv[-1]) / ".git").mkdir(parents=True, exist_ok=True)  # simulate a clone
+            return 0, "Cloning into..."
+        if argv[:2] == ["git", "rev-parse"]:
+            return 0, "abc1234\n"
+        return 0, ""
+
+    sha = clone_marketplace("https://example/x.git", tmp_path / "dest", runner=fake_runner)
+    assert sha == "abc1234"
+    assert any(a[:2] == ["git", "clone"] for a in calls)
+
+
+def test_cmd_plugin_add_list_and_usage(tmp_path):
+    """The /plugin command: add a (local) marketplace, list it, and show usage on no args. Install logic
+    is exercised by the unit tests above with injected deps (no global-registry pollution here)."""
+    from io import StringIO
+    from types import SimpleNamespace
+
+    from rich.console import Console
+
+    from biobank_agent.cli.interactive import InteractiveShell
+
+    repo = _make_marketplace(tmp_path)
+    out = StringIO()
+    shell = InteractiveShell(
+        settings=SimpleNamespace(memory_dir=str(tmp_path / "mem"), plugin_allow_hooks=False),
+        console=Console(file=out, force_terminal=False, width=100),
+    )
+    added = shell._cmd_plugin(f"marketplace add {repo}")
+    assert added["status"] == "added" and "superpowers" in added["plugins"]
+    listed = shell._cmd_plugin("list")
+    assert listed["status"] == "listed" and "demo-market" in listed["marketplaces"]
+    assert "superpowers" in out.getvalue()
+    assert shell._cmd_plugin("")["status"] == "usage"
+    assert shell._cmd_plugin("install nope")["status"] == "not_found"

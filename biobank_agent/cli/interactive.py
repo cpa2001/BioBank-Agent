@@ -388,6 +388,8 @@ class InteractiveShell:
     # Label of the plan step currently executing, so streamed model tokens + tool output route into that
     # step's live transcript row (Phase 2 execution UI).
     _active_exec_step_label: Any = None
+    # Added plugin marketplaces (name -> Marketplace) for the /plugin command (Phase 3).
+    _plugin_marketplaces: dict = field(default_factory=dict)
     # Background job manager for run_job / job_* tools and /jobs (issue #1).
     job_manager: Any = None
 
@@ -669,6 +671,7 @@ class InteractiveShell:
             "diff": self._cmd_diff,
             "permissions": self._cmd_permissions,
             "doctor": self._cmd_doctor,
+            "plugin": self._cmd_plugin,
             "agent": self._cmd_agent,
             "subagents": self._cmd_subagents,
             "review": self._cmd_review,
@@ -4029,6 +4032,93 @@ class InteractiveShell:
             table.add_row(key, value)
         self.console.print(table)
         return {**dict(checks), "wgs": wgs}
+
+    def _cmd_plugin(self, arg: str = "") -> dict[str, Any]:
+        """`/plugin marketplace add <repo>` | `/plugin install <name> [--allow-hooks]` | `/plugin list`.
+
+        Consume Claude-Code-style plugins. SKILL.md skills install as USABLE knowledge skills; plugin
+        hooks (executable shell commands) are recorded but NEVER run without an explicit per-plugin
+        opt-in (``--allow-hooks`` / ``plugin_allow_hooks``). Third-party plugin code never runs on add."""
+        from biobank_agent.runtime import plugins as plugmod
+
+        parts = shlex.split(arg) if arg else []
+        if not parts:
+            self.console.print(
+                "[dim]Usage:[/] /plugin marketplace add <owner/repo|url|path>  ·  "
+                "/plugin install <name> [--allow-hooks]  ·  /plugin list"
+            )
+            return {"status": "usage"}
+        sub = parts[0].lower()
+        plugins_dir = Path(self.settings.memory_dir).expanduser() / "plugins"
+        try:
+            if sub == "marketplace" and len(parts) >= 2 and parts[1].lower() == "add":
+                spec = parts[2] if len(parts) >= 3 else ""
+                if not spec:
+                    self.console.print("[yellow]Usage: /plugin marketplace add <owner/repo|url|path>[/]")
+                    return {"status": "usage"}
+                with self.console.status(f"[cyan]Adding marketplace[/] {_rich_escape(spec)}…", spinner="dots"):
+                    mp = plugmod.add_marketplace(spec, plugins_dir)
+                self._plugin_marketplaces[mp.name] = mp
+                table = Table(title=f"Marketplace: {mp.name}", box=box.SIMPLE)
+                table.add_column("Plugin", style="cyan")
+                table.add_column("Version")
+                table.add_column("Description")
+                for p in mp.plugins:
+                    table.add_row(p.name, p.version or "-", (p.description or "")[:60])
+                self.console.print(table)
+                self.console.print("[dim]Install one with[/] /plugin install <name>")
+                return {"status": "added", "marketplace": mp.name, "plugins": [p.name for p in mp.plugins]}
+
+            if sub == "install":
+                name = next((p for p in parts[1:] if not p.startswith("-")), "")
+                allow_hooks = ("--allow-hooks" in parts) or bool(getattr(self.settings, "plugin_allow_hooks", False))
+                if not name:
+                    self.console.print("[yellow]Usage: /plugin install <name> [--allow-hooks][/]")
+                    return {"status": "usage"}
+                mp = next((m for m in self._plugin_marketplaces.values() if m.plugin(name)), None)
+                if mp is None:
+                    self.console.print(
+                        f"[red]No added marketplace provides plugin {name!r}.[/] "
+                        "Run /plugin marketplace add <repo> first."
+                    )
+                    return {"status": "not_found", "plugin": name}
+                result = plugmod.install_plugin(mp, name, allow_hooks=allow_hooks)
+                n = result.get("skill_count", 0)
+                self.console.print(
+                    f"[green]Installed[/] {_rich_escape(name)}: {n} skill(s) now available"
+                    + (" (trust=external)" if n else "") + "."
+                )
+                hd = result.get("hooks_discovered", 0)
+                if hd:
+                    state = "ENABLED" if result.get("hooks_enabled") else "gated (not run)"
+                    self.console.print(f"[dim]{hd} hook(s) discovered — {state}.[/]")
+                    if not result.get("hooks_enabled"):
+                        for h in result.get("hooks", [])[:5]:
+                            self.console.print(
+                                f"  [dim]· {_rich_escape(str(h.get('event', '')))}: "
+                                f"{_rich_escape(str(h.get('command', ''))[:80])}[/]"
+                            )
+                return result
+
+            if sub == "list":
+                if not self._plugin_marketplaces:
+                    self.console.print("[dim]No marketplaces added. Use /plugin marketplace add <repo>.[/]")
+                    return {"status": "empty"}
+                for mp in self._plugin_marketplaces.values():
+                    self.console.print(f"[bold]{_rich_escape(mp.name)}[/] [dim]{_rich_escape(mp.source_url)}[/]")
+                    for p in mp.plugins:
+                        self.console.print(
+                            f"  [cyan]{_rich_escape(p.name)}[/] [dim]{_rich_escape((p.description or '')[:60])}[/]"
+                        )
+                return {"status": "listed", "marketplaces": list(self._plugin_marketplaces)}
+
+            self.console.print(
+                "[yellow]Usage: /plugin marketplace add <repo> | /plugin install <name> | /plugin list[/]"
+            )
+            return {"status": "usage"}
+        except Exception as exc:
+            self.console.print(f"[red]Plugin command failed:[/] {_rich_escape(str(exc))}")
+            return {"status": "error", "error": str(exc)}
 
     def _cmd_agent(self, *_args: Any) -> None:
         session = self._require_session()

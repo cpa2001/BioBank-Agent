@@ -18,6 +18,8 @@ pinned clone + the real registry (and the gated hook registry).
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -221,16 +223,84 @@ def install_plugin(
     }
 
 
+# --------------------------------------------------------------------------- live: clone + add
+
+# (argv, cwd) -> (returncode, combined_output). Injectable so the clone path is testable offline.
+GitRunner = Callable[[list[str], str], "tuple[int, str]"]
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "_", str(text).strip().lower()).strip("_") or "marketplace"
+
+
+def resolve_marketplace_spec(spec: str) -> tuple[str, str]:
+    """Classify a marketplace spec: ``('local', abspath)`` if it is an existing marketplace directory,
+    else ``('git', url)`` — accepting a git URL or an ``owner/repo`` shorthand (→ a github.com URL)."""
+    s = str(spec or "").strip()
+    if not s:
+        raise ValueError("empty marketplace spec")
+    p = Path(s).expanduser()
+    if (p / MARKETPLACE_MANIFEST).exists():
+        return ("local", str(p.resolve()))
+    if s.startswith(("http://", "https://", "git@", "ssh://", "file://")):
+        return ("git", s)
+    if re.match(r"^[\w.-]+/[\w.-]+$", s):  # owner/repo
+        return ("git", f"https://github.com/{s}.git")
+    return ("git", s)
+
+
+def _default_git_runner(argv: list[str], cwd: str = "") -> tuple[int, str]:
+    proc = subprocess.run(argv, cwd=cwd or None, capture_output=True, text=True, timeout=300, check=False)
+    return proc.returncode, ((proc.stdout or "") + (proc.stderr or ""))
+
+
+def clone_marketplace(url: str, dest: str | Path, *, ref: str = "", runner: GitRunner | None = None) -> str:
+    """Shallow-clone a marketplace repo to ``dest`` (checking out ``ref`` if given) and return the
+    resolved commit SHA (``''`` if unknown). ``runner`` is injectable for offline tests. Never clobbers
+    a pre-existing non-git directory."""
+    run = runner or _default_git_runner
+    dest = Path(dest)
+    if not (dest / ".git").exists():
+        if dest.exists() and any(dest.iterdir()):
+            raise ValueError(f"destination exists and is not a git clone: {dest}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        rc, out = run(["git", "clone", "--depth", "1", str(url), str(dest)], "")
+        if rc != 0:
+            raise RuntimeError(f"git clone failed: {out[-500:]}")
+    if ref:
+        run(["git", "fetch", "--depth", "1", "origin", str(ref)], str(dest))
+        rc, out = run(["git", "checkout", str(ref)], str(dest))
+        if rc != 0:
+            raise RuntimeError(f"git checkout {ref} failed: {out[-300:]}")
+    rc, sha = run(["git", "rev-parse", "HEAD"], str(dest))
+    return sha.strip() if rc == 0 else ""
+
+
+def add_marketplace(spec: str, plugins_dir: str | Path, *, ref: str = "", runner: GitRunner | None = None) -> Marketplace:
+    """Resolve a marketplace spec (an existing local dir, or a git repo cloned under ``plugins_dir``)
+    and return the parsed :class:`Marketplace`. Third-party plugin code is never executed here."""
+    kind, value = resolve_marketplace_spec(spec)
+    if kind == "local":
+        return discover_marketplace(value, source_url=value)
+    dest = Path(plugins_dir).expanduser() / _slug(spec)
+    commit = clone_marketplace(value, dest, ref=ref, runner=runner)
+    return discover_marketplace(dest, source_url=value, commit=commit)
+
+
 __all__ = [
     "MARKETPLACE_MANIFEST",
     "PLUGIN_MANIFEST",
     "PluginManifest",
     "Marketplace",
     "PluginHook",
+    "GitRunner",
     "parse_marketplace",
     "discover_marketplace",
     "plugin_root",
     "discover_plugin_hooks",
     "install_plugin_skills",
     "install_plugin",
+    "resolve_marketplace_spec",
+    "clone_marketplace",
+    "add_marketplace",
 ]
