@@ -8,6 +8,7 @@ helper directly (the heavy plan loop is covered elsewhere), with the consult fun
 from __future__ import annotations
 
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 
 from rich.console import Console
@@ -37,10 +38,11 @@ def test_escalation_disabled_is_a_no_op(tmp_path):
 def test_escalation_enabled_folds_external_advice(tmp_path, monkeypatch):
     calls: dict = {}
 
-    def fake_consult(agents, prompt, *, plan_mode=False, **kw):
+    def fake_consult(agents, prompt, *, plan_mode=False, cwd="", **kw):
         calls["plan_mode"] = plan_mode
         calls["agents"] = agents
         calls["prompt"] = prompt
+        calls["cwd"] = cwd
         return [
             ExternalAgentResult("codex", ok=True, text="1. Check the VCF path is inside the workspace."),
             ExternalAgentResult("claude", ok=False, error="not installed"),  # failures ignored
@@ -52,6 +54,9 @@ def test_escalation_enabled_folds_external_advice(tmp_path, monkeypatch):
     out = shell._maybe_escalate_step_failure(None, _STEP, "VCF not found")
 
     assert calls["plan_mode"] is True  # agents are asked to plan, not execute
+    # SECURITY: the untrusted CLIs run in an isolated throwaway dir, NOT the live workspace.
+    assert calls["cwd"] and calls["cwd"] != str(tmp_path) and "escalation" in calls["cwd"]
+    assert not Path(calls["cwd"]).exists()  # sandbox is cleaned up after the consult
     assert "VCF not found" in calls["prompt"] and "Run VCF QC" in calls["prompt"]
     assert "Check the VCF path" in out["external_advice"]
     assert out["external_agents"] == ["codex"]  # only the successful agent

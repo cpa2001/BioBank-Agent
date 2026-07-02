@@ -49,15 +49,20 @@ def spawn_biobank_subagent(
     parent_session: Any,
     task: str,
     *,
+    enabled: bool = False,
     title: str = "subtask",
     max_depth: int = 2,
     run_turn: Optional[Callable[[Any, str], Any]] = None,
 ) -> SubagentResult:
     """Run ``task`` in a fresh child :class:`AgentSession` under ``runtime``, one level deeper.
 
-    Refuses to spawn beyond ``max_depth`` so nested subagents cannot recurse without bound. Never raises:
-    a depth-limit hit or a child-turn error is returned as ``ok=False`` with a reason.
+    Self-gated: ``enabled`` must be opted in (callers pass ``settings.biobank_subagent_enabled``), so the
+    library boundary — not just call sites — enforces the default-OFF posture. Refuses to spawn beyond
+    ``max_depth`` so nested subagents cannot recurse without bound. Never raises: a disabled gate, a
+    depth-limit hit, or a child-turn error is returned as ``ok=False`` with a reason.
     """
+    if not enabled:
+        return SubagentResult(ok=False, error="biobank subagent spawning is disabled (biobank_subagent_enabled)")
     depth = current_depth(parent_session) + 1
     if depth > max_depth:
         return SubagentResult(ok=False, depth=depth, error=f"subagent depth {depth} exceeds max_depth {max_depth}")

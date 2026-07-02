@@ -67,10 +67,12 @@ def _index_and_validate(steps: Sequence[WorkflowStep]) -> dict[str, WorkflowStep
         for dep in step.dependencies:
             if dep not in by_id:
                 raise ValueError(f"step {step.id!r} depends on unknown step {dep!r}")
-    # Kahn cycle check: if not every node can be emitted, there is a cycle.
+    # Kahn cycle check: if not every node can be emitted, there is a cycle. Count UNIQUE dependency
+    # edges — a duplicate dep (e.g. ("a", "a")) is acyclic and must not be miscounted as a cycle, since
+    # the decrement below fires once per predecessor node.
     indegree = {sid: 0 for sid in by_id}
     for step in steps:
-        for _dep in step.dependencies:
+        for _dep in set(step.dependencies):
             indegree[step.id] += 1
     ready = [sid for sid, d in indegree.items() if d == 0]
     emitted = 0
@@ -94,7 +96,13 @@ def run_workflow(
     timeout_s: float = 240.0,
     emit: Optional[Callable[..., None]] = None,
 ) -> WorkflowResult:
-    """Run a workflow DAG, executing each ready level concurrently. Never raises on step failure."""
+    """Run a workflow DAG, executing each ready level concurrently. Never raises on step failure.
+
+    ``timeout_s`` bounds how long the runner WAITS for a level, after which unfinished steps are recorded
+    as timed out and the run advances. It cannot force-kill a worker thread (a Python limitation), so a
+    step's ``run`` callable must be self-bounding — e.g. an external-agent step relies on the subprocess
+    timeout; a long compute step should enforce its own deadline — or its thread may linger past the run.
+    """
     by_id = _index_and_validate(steps)
     result = WorkflowResult()
     remaining = dict(by_id)

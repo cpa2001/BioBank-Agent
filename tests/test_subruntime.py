@@ -38,10 +38,17 @@ class _FakeRuntime:
         return session  # real run_turn returns the (mutated) session
 
 
+def test_spawning_is_disabled_by_default():
+    rt = _FakeRuntime()
+    result = spawn_biobank_subagent(rt, _session("root"), "task")  # no enabled= → gated off
+    assert not result.ok and "disabled" in result.error
+    assert rt.created == []  # no child session created
+
+
 def test_child_runs_one_level_deeper_and_is_stamped():
     rt = _FakeRuntime()
     parent = _session("root")  # depth 0
-    result = spawn_biobank_subagent(rt, parent, "do subtask", max_depth=2)
+    result = spawn_biobank_subagent(rt, parent, "do subtask", enabled=True, max_depth=2)
 
     assert result.ok and result.depth == 1
     assert result.text == "done:subtask"
@@ -52,11 +59,11 @@ def test_depth_guard_bounds_nested_spawns():
     rt = _FakeRuntime()
     parent = _session("root")
 
-    r1 = spawn_biobank_subagent(rt, parent, "d1", max_depth=2)
+    r1 = spawn_biobank_subagent(rt, parent, "d1", enabled=True, max_depth=2)
     child1 = rt.created[-1]
-    r2 = spawn_biobank_subagent(rt, child1, "d2", max_depth=2)
+    r2 = spawn_biobank_subagent(rt, child1, "d2", enabled=True, max_depth=2)
     child2 = rt.created[-1]
-    r3 = spawn_biobank_subagent(rt, child2, "d3", max_depth=2)  # would be depth 3
+    r3 = spawn_biobank_subagent(rt, child2, "d3", enabled=True, max_depth=2)  # would be depth 3
 
     assert r1.depth == 1 and r1.ok
     assert r2.depth == 2 and r2.ok
@@ -68,11 +75,11 @@ def test_child_turn_error_is_isolated():
         def run_turn(self, session, task):
             raise RuntimeError("child blew up")
 
-    result = spawn_biobank_subagent(_Boom(), _session("root"), "x", max_depth=2)
+    result = spawn_biobank_subagent(_Boom(), _session("root"), "x", enabled=True, max_depth=2)
     assert not result.ok and "child blew up" in result.error
 
 
 def test_missing_run_turn_is_reported_not_raised():
     rt = SimpleNamespace(create_session=lambda *, title, cwd: _session(title, cwd))
-    result = spawn_biobank_subagent(rt, _session("root"), "x", max_depth=2, run_turn=None)
+    result = spawn_biobank_subagent(rt, _session("root"), "x", enabled=True, max_depth=2, run_turn=None)
     assert not result.ok and "run_turn" in result.error

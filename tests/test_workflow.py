@@ -83,6 +83,15 @@ def test_unknown_dependency_and_duplicate_id_are_rejected():
         run_workflow([WorkflowStep("a", _const(0)), WorkflowStep("a", _const(1))])
 
 
+def test_duplicate_dependency_edge_is_not_a_false_cycle():
+    # ("a", "a") is a redundant edge, not a cycle — it must run, not raise.
+    result = run_workflow([
+        WorkflowStep("a", _const(1)),
+        WorkflowStep("b", lambda up: up["a"] + 1, dependencies=("a", "a")),
+    ])
+    assert result.ok and result.result("b") == 2
+
+
 def test_empty_workflow_is_not_ok():
     result = run_workflow([])
     assert result.steps == {} and not result.ok

@@ -1979,7 +1979,16 @@ class InteractiveShell:
                 view.record("Escalation", actor=getattr(step, "id", ""), status="running",
                             message=f"consulting external agents ({agents}) for a fix plan",
                             metadata={"subagent": getattr(step, "id", "")})
-            results = extorch.consult_external_agents(agents, prompt, plan_mode=True, timeout_s=timeout_s)
+            # SECURITY: run the (untrusted) external CLIs in a throwaway empty dir, never the live
+            # workspace — plan mode is a prompt-level ask, so a noncompliant agent must not be able to
+            # edit the repo. All context it needs is already in the prompt.
+            import shutil
+            import tempfile
+            sandbox = tempfile.mkdtemp(prefix="biobank_escalation_")
+            try:
+                results = extorch.consult_external_agents(agents, prompt, plan_mode=True, cwd=sandbox, timeout_s=timeout_s)
+            finally:
+                shutil.rmtree(sandbox, ignore_errors=True)
             advices = [f"[{r.name}] {r.text.strip()[:1500]}" for r in results if r.ok and r.text.strip()]
             if not advices:
                 return {}
@@ -2032,6 +2041,11 @@ class InteractiveShell:
             "blocked": plan.status == PlanStatus.PAUSED or bool(session.state.custom_data.get("plan_paused")),
             "repair_options": saved.get("repair_options") or self._default_plan_repair_options(plan, current),
         }
+        # Preserve any external-agent escalation advice so /plan-diagnose does not drop it on rebuild.
+        external_advice = (saved.get("preflight") or {}).get("external_advice") or saved.get("external_advice")
+        if external_advice:
+            diagnosis["external_advice"] = external_advice
+            diagnosis["external_agents"] = (saved.get("preflight") or {}).get("external_agents") or []
         if current is not None and self._plan_step_mentions_wgs(plan, current):
             diagnosis["wgs"] = self._wgs_readiness_snapshot()
         return diagnosis
@@ -2059,6 +2073,10 @@ class InteractiveShell:
             missing = ", ".join(str(x) for x in (wgs.get("missing_for_standard_workflow") or []) if x)
             if missing:
                 table.add_row("standard missing", missing)
+        advice = str(diagnosis.get("external_advice") or "").strip()
+        if advice:
+            agents = ", ".join(str(a) for a in (diagnosis.get("external_agents") or []) if a)
+            table.add_row(f"external advice{f' ({agents})' if agents else ''}", advice[:1600])
         options = diagnosis.get("repair_options") or []
         if options:
             table.add_row("next actions", "\n".join(f"- {item}" for item in options))
