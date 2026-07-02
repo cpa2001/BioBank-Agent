@@ -17,9 +17,12 @@ from biobank_agent.data.indexer import (
     DataCatalog,
     convert_to_parquet,
     index_directory,
-    infer_schema,
-    locate_data_for_step,
 )
+# Alias the indexer library functions so they do NOT shadow the same-named @skill wrappers in this
+# module's namespace: the lazy registry resolves a skill via getattr(module, skill_name), so a skill
+# function MUST be the module attribute of that exact name (see registry.SkillRegistry.execute).
+from biobank_agent.data.indexer import infer_schema as _index_infer_schema
+from biobank_agent.data.indexer import locate_data_for_step as _index_locate
 from biobank_agent.registry import skill
 
 
@@ -93,11 +96,11 @@ def index_data_lake(root: str, formats: str = "", max_files: int = 100000, outpu
     parameters={"path": {"type": "string", "description": "Data file to inspect."}},
     required=["path"],
 )
-def infer_schema_skill(path: str, *, ctx=None) -> dict:
+def infer_schema(path: str, *, ctx=None) -> dict:
     p = Path(path).expanduser()
     if not p.exists():
         return {"status": "ERROR", "error": f"path not found: {path}"}
-    df = infer_schema(p, sample_rows=_sample_rows(ctx) if ctx else 200, mem_cap_mb=_mem_cap(ctx) if ctx else 512)
+    df = _index_infer_schema(p, sample_rows=_sample_rows(ctx) if ctx else 200, mem_cap_mb=_mem_cap(ctx) if ctx else 512)
     return {
         "status": "ERROR" if df.error else "OK",
         "path": df.path,
@@ -148,7 +151,7 @@ def convert_format(src: str, dst: str, overwrite: bool = False, *, ctx=None) -> 
     },
     required=["catalog_path"],
 )
-def locate_step_data(catalog_path: str, columns: str = "", keywords: str = "", formats: str = "", top_k: int = 5, *, ctx=None) -> dict:
+def locate_data_for_step(catalog_path: str, columns: str = "", keywords: str = "", formats: str = "", top_k: int = 5, *, ctx=None) -> dict:
     cp = Path(catalog_path).expanduser()
     if not cp.exists():
         return {"status": "ERROR", "error": f"catalog not found: {catalog_path}"}
@@ -156,7 +159,7 @@ def locate_step_data(catalog_path: str, columns: str = "", keywords: str = "", f
         catalog = DataCatalog.from_dict(json.loads(cp.read_text(encoding="utf-8")))
     except Exception as exc:
         return {"status": "ERROR", "error": f"unreadable catalog: {exc}"}
-    hits = locate_data_for_step(
+    hits = _index_locate(
         catalog,
         columns=_split_csv(columns) or None,
         keywords=_split_csv(keywords) or None,
