@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -198,11 +199,30 @@ def _json_safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def matcher_matches(matcher: str, tool: str) -> bool:
+    """Whether a Claude-Code hook ``matcher`` scopes to ``tool`` (regex over the tool name).
+
+    Empty or ``*`` matches everything. A tool-scoped matcher on a non-tool event (no ``tool`` in the
+    payload) does not apply and matches. A malformed regex falls back to an exact-name compare rather
+    than silently matching everything.
+    """
+    m = str(matcher or "").strip()
+    if not m or m == "*":
+        return True
+    if not tool:
+        return True
+    try:
+        return re.search(m, str(tool)) is not None
+    except re.error:
+        return m == str(tool)
+
+
 def make_command_hook(
     command: str,
     *,
     event: str,
     plugin: str = "",
+    matcher: str = "",
     timeout_s: float = 30.0,
     runner: Callable[[str, str], "tuple[int, str]"] | None = None,
 ) -> Callable[..., dict[str, Any]]:
@@ -211,7 +231,9 @@ def make_command_hook(
     The returned callable executes third-party shell and is therefore only ever
     invoked by :meth:`HookRegistry.emit` when the owning plugin is opted in. The
     emit payload is passed to the command as JSON on stdin (Claude-Code hook
-    convention). ``runner`` is injectable so tests never spawn a real shell.
+    convention). ``matcher`` scopes the hook to matching tools (see
+    :func:`matcher_matches`) so a ``PreToolUse`` hook fires only for its declared
+    tools, not every tool. ``runner`` is injectable so tests never spawn a real shell.
     """
 
     def _default_runner(cmd: str, stdin: str) -> "tuple[int, str]":
@@ -229,9 +251,11 @@ def make_command_hook(
     run = runner or _default_runner
 
     def _command_hook(**payload: Any) -> dict[str, Any]:
+        if not matcher_matches(matcher, str(payload.get("tool", ""))):
+            return {"command": command, "matched": False, "skipped": "matcher"}
         stdin = json.dumps({"event": event, "plugin": plugin, **_json_safe_payload(payload)}, default=str)
         code, output = run(command, stdin)
-        return {"command": command, "returncode": code, "output": output}
+        return {"command": command, "returncode": code, "output": output, "matched": True}
 
     _command_hook.__name__ = f"cmd_hook:{plugin}:{event}"
     return _command_hook
@@ -284,6 +308,7 @@ __all__ = [
     "HookOutcome",
     "HookRegistry",
     "make_command_hook",
+    "matcher_matches",
     "default_registry",
     "hook",
     "emit_hook",

@@ -113,7 +113,7 @@ def test_command_hook_serialises_payload_and_drops_session_object():
     ch = make_command_hook("run.sh", event=PRE_TOOL, plugin="sp", runner=fake_runner)
     result = ch(tool="shell_exec", session=_Sess(), args={"cmd": "ls"})
 
-    assert result == {"command": "run.sh", "returncode": 0, "output": "ran"}
+    assert result == {"command": "run.sh", "returncode": 0, "output": "ran", "matched": True}
     assert captured["cmd"] == "run.sh"
     assert '"session_id": "sess-123"' in captured["stdin"]
     assert '"tool": "shell_exec"' in captured["stdin"]
@@ -125,6 +125,34 @@ def test_map_plugin_event_normalises_claude_code_names():
     assert map_plugin_event("Stop") == ON_COMPLETE
     assert map_plugin_event("pre_tool") == PRE_TOOL  # already a lifecycle name
     assert map_plugin_event("SomethingCustom") == "SomethingCustom"
+
+
+def test_matcher_matches_semantics():
+    from biobank_agent.runtime.hooks import matcher_matches
+
+    assert matcher_matches("", "Bash")            # empty → all
+    assert matcher_matches("*", "Bash")           # star → all
+    assert matcher_matches("Bash", "Bash")
+    assert matcher_matches("Edit|Write", "Write")  # regex alternation
+    assert not matcher_matches("shell_exec", "prevalence")
+    assert matcher_matches("shell_exec", "")       # non-tool event: matcher not applicable → run
+
+
+def test_command_hook_matcher_scopes_execution_to_matching_tools():
+    calls: list[str] = []
+
+    def runner(cmd: str, stdin: str):
+        calls.append(cmd)
+        return 0, "ok"
+
+    ch = make_command_hook("run.sh", event=PRE_TOOL, plugin="sp", matcher="shell_exec", runner=runner)
+
+    matched = ch(tool="shell_exec")
+    assert matched.get("matched") is True and calls == ["run.sh"]
+
+    calls.clear()
+    skipped = ch(tool="prevalence")  # matcher scopes to shell_exec — must NOT run on prevalence
+    assert skipped.get("matched") is False and skipped.get("skipped") == "matcher" and calls == []
 
 
 def test_default_registry_backs_module_level_api():

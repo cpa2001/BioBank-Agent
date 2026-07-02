@@ -218,3 +218,27 @@ def test_register_plugin_hooks_binds_gated_external_hooks(tmp_path):
     outcomes = registry.emit(ON_TURN_START, allow_external=False, allowed_plugins=set())
     assert outcomes and all(o.status == "skipped" for o in outcomes)
     default_registry().clear()
+
+
+def test_reinstalling_a_plugin_does_not_duplicate_hooks(tmp_path):
+    """Re-running install for the same plugin must not accumulate duplicate lifecycle hooks."""
+    from io import StringIO
+    from types import SimpleNamespace
+
+    from rich.console import Console
+
+    from biobank_agent.cli.interactive import InteractiveShell
+    from biobank_agent.runtime.hooks import ON_TURN_START, default_registry
+
+    default_registry().clear()
+    shell = InteractiveShell(
+        settings=SimpleNamespace(memory_dir=str(tmp_path / "mem"), plugin_allow_hooks=False),
+        console=Console(file=StringIO(), force_terminal=False, width=100),
+    )
+    records = [{"event": "SessionStart", "matcher": "", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/run.sh"}]
+    shell._register_plugin_hooks("superpowers", records, allow_hooks=False)
+    shell._register_plugin_hooks("superpowers", records, allow_hooks=False)  # reinstall
+
+    registry = getattr(getattr(shell, "runtime", None), "hooks", None) or default_registry()
+    assert len(registry.handles(ON_TURN_START)) == 1  # one, not two
+    default_registry().clear()

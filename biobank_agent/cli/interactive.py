@@ -4130,10 +4130,16 @@ class InteractiveShell:
 
         Each hook is registered as ``trust="external"`` owned by ``plugin`` and never runs until the
         plugin is opted in. ``allow_hooks`` opts this plugin in for the session. Returns hooks bound.
+
+        A hook's ``matcher`` scopes it to matching tools so it fires only for its declared tools, not
+        every tool. Note: Claude-Code ``async`` semantics are not honoured — command hooks run inline
+        (bounded by the command-hook timeout), which is acceptable for a gated, opt-in surface.
         """
         from biobank_agent.runtime import hooks as hookmod
 
         registry = getattr(getattr(self, "runtime", None), "hooks", None) or hookmod.default_registry()
+        # Re-installing a plugin must not accumulate duplicate hooks: drop this plugin's prior hooks first.
+        registry.unregister_plugin(plugin)
         bound = 0
         for record in hooks or []:
             command = str(record.get("command", "")).strip()
@@ -4142,7 +4148,9 @@ class InteractiveShell:
             event = hookmod.map_plugin_event(record.get("event", "")) or hookmod.PRE_TOOL
             registry.register(
                 event,
-                hookmod.make_command_hook(command, event=event, plugin=plugin),
+                hookmod.make_command_hook(
+                    command, event=event, plugin=plugin, matcher=str(record.get("matcher", "")).strip()
+                ),
                 trust=hookmod.TRUST_EXTERNAL,
                 plugin=plugin,
             )
