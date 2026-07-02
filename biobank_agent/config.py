@@ -209,6 +209,16 @@ class Settings(BaseSettings):
     self_evolve_autocapture_enabled: bool = False
     self_evolve_autocapture_min_count: int = 3
 
+    # ── External-agent orchestration + workflow (Phase 5) ────────
+    # Opt-in. When a plan step exhausts its retries, consult external coding agents in parallel (plan
+    # mode) and fold their advice into the failure diagnosis. Spawn biobank child sessions for subtasks,
+    # depth-bounded so a subagent cannot recurse without limit. All default OFF.
+    external_escalation_enabled: bool = False
+    external_escalation_agents: str = "codex,claude"
+    external_escalation_timeout_s: int = 180
+    biobank_subagent_enabled: bool = False
+    biobank_subagent_max_depth: int = 2
+
     # ── Adversarial-game council ─────────────────────────────────
     # Route planning through the proposer/red-team/referee game instead of the symmetric
     # debate. Default OFF; kept only if it beats symmetric on the council A/B set.
