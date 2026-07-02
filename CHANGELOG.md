@@ -13,7 +13,10 @@ runaway, a completion-token budget is the real cost guard, and a stalled step
 auto-resumes from session state instead of pausing for the user. It also lands a
 live execution view — a Codex-style streaming transcript for a single track and a
 Claude-Code-style task tree for a parallel fan-out — so the user watches what the
-agent is producing in real time. Designed and reviewed with an external coding agent.
+agent is producing in real time. It also opens a gated plugin subsystem: install
+Claude-Code-style plugins from a marketplace to gain their skills, while plugin
+hooks and other third-party code stay inert until explicitly opted in. Designed
+and reviewed with an external coding agent.
 
 ### Added
 - Inactivity-based per-step timeout with a separate absolute hard ceiling
@@ -44,6 +47,25 @@ agent is producing in real time. Designed and reviewed with an external coding a
   nodes with tails, header token/tool metrics, and model tokens streaming into the
   running step's transcript (`tests/test_plan_dashboard_models.py`,
   `tests/test_interactive_cli_runtime.py`).
+- Gated plugin subsystem: `biobank_agent/runtime/plugins.py` parses a Claude-Code
+  `.claude-plugin/marketplace.json`, and the `/plugin` command (`marketplace add`
+  / `install` / `list`) resolves a local dir, `owner/repo` shorthand, or git URL,
+  shallow-clones under the memory dir, and installs a plugin's SKILL.md skills as
+  USABLE knowledge skills. Third-party plugin code is never executed on install
+  (`biobank_agent/cli/commands/plugin.py`, `biobank_agent/cli/interactive.py`,
+  `biobank_agent/config.py` `plugins_enabled`).
+- General lifecycle hook registry (`biobank_agent/runtime/hooks.py`): a `hook(event)`
+  decorator + `emit_hook(event, …)` over `on_turn_start` / `pre_tool` / `post_tool`
+  / `on_step` / `on_error` / `on_complete`, emitted from `run_turn`, `invoke_tool`,
+  and the plan-step executor. Built-in hooks always run; plugin/user hooks are
+  `trust="external"` and NEVER execute without a per-plugin opt-in
+  (`--allow-hooks` / `plugin_allow_hooks`). Every hook runs behind a broad except,
+  so a raising hook can never fail a turn (`biobank_agent/runtime/engine.py`,
+  `biobank_agent/cli/interactive.py`, `biobank_agent/runtime/types.py`).
+- Plugin/hook tests: marketplace parse/clone (injected runner), SKILL.md install
+  vs gated hooks, `/plugin` command flow, hook firing/gating/defensiveness, and
+  the runtime emitting lifecycle hooks around a real turn
+  (`tests/test_plugin_consumer.py`, `tests/test_hook_registry.py`).
 
 ### Changed
 - Execution now streams WITH tools: `LLMProvider.complete` takes the streaming

@@ -19,6 +19,7 @@ from biobank_agent.core.tools.protocol import ToolContext
 from biobank_agent.core.tools.scheduler import ToolOutcome, ToolRequest, ToolScheduler, ToolState
 from biobank_agent.core.memory.action_graph import ActionGraph as GraphStore
 
+from .hooks import HookRegistry, default_registry
 from .types import (
     ActionGraphNode,
     ApprovalRequest,
@@ -248,6 +249,7 @@ class AgentRuntime:
         approval_policy: ApprovalPolicy | None = None,
         tool_context_factory: Any | None = None,
         planner: Any | None = None,
+        hooks: "HookRegistry | None" = None,
     ) -> None:
         self.provider_router = provider_router
         self.tool_registry = tool_registry
@@ -261,6 +263,11 @@ class AgentRuntime:
         # Optional council-backed planner. When injected, build_plan delegates to
         # it and FAILS LOUDLY on error instead of returning the static template.
         self.planner = planner
+        # Lifecycle hook registry. Built-in hooks always run; plugin/user hooks are gated behind the
+        # per-plugin allowlist unless plugin_allow_hooks opts in globally.
+        self.hooks = hooks if hooks is not None else default_registry()
+        self._hooks_allow_external = bool(getattr(self.config, "plugin_allow_hooks", False))
+        self._hooks_allowed_plugins: set[str] = set()
 
     def set_approval_profile(self, profile_name: str) -> None:
         profile = builtin_profile(profile_name)
@@ -268,6 +275,23 @@ class AgentRuntime:
         self.provider_router.config.approval_profile = profile.name
         self.approval_policy = ApprovalPolicy(profile)
         self._scheduler.policy = self.approval_policy
+
+    def emit_hook(self, event: str, **payload: Any) -> list:
+        """Fire a lifecycle hook with this runtime's gate applied. Never raises."""
+        try:
+            return self.hooks.emit(
+                event,
+                allow_external=self._hooks_allow_external,
+                allowed_plugins=self._hooks_allowed_plugins,
+                **payload,
+            )
+        except Exception:
+            return []
+
+    def allow_plugin_hooks(self, plugin: str) -> None:
+        """Opt one plugin's external hooks in for this runtime (per-plugin gate)."""
+        if plugin:
+            self._hooks_allowed_plugins.add(str(plugin))
 
     def invoke_tool(
         self,
@@ -338,6 +362,14 @@ class AgentRuntime:
                 tool=tool_name,
             ),
         )
+        self.emit_hook(
+            "pre_tool",
+            session=session,
+            tool=tool_name,
+            args=dict(call_args),
+            turn_id=resolved_turn_id,
+            call_id=call_id,
+        )
 
         runtime_context_factory = context_factory
         if runtime_context_factory is None:
@@ -388,6 +420,16 @@ class AgentRuntime:
                 state=outcome.state.value,
                 result=result.to_dict(),
             ),
+        )
+        self.emit_hook(
+            "post_tool",
+            session=session,
+            tool=tool_name,
+            args=dict(call_args),
+            result=result.to_dict(),
+            state=outcome.state.value,
+            turn_id=resolved_turn_id,
+            call_id=call_id,
         )
         self.create_checkpoint(session, "tool_call", summary=f"{tool_name}: {outcome.state.value}")
         if _tool_may_change_files(handler, tool_name):
@@ -1087,6 +1129,7 @@ class AgentRuntime:
         self.create_checkpoint(session, "user_turn", summary=user_text[:240])
         self._record_event(session, AgentEvent.make(AgentEventType.SESSION_STARTED, session_id=session.session_id, title=session.title, cwd=session.cwd))
         self._record_event(session, AgentEvent.make(AgentEventType.USER_TURN_STARTED, session_id=session.session_id, turn_id=turn.id, text=user_text))
+        self.emit_hook("on_turn_start", session=session, turn_id=turn.id, text=user_text)
         try:
             active_role = ProviderRole(str(self.config.active_role or ProviderRole.PRIMARY_EXECUTOR.value))
         except Exception:
@@ -1234,6 +1277,7 @@ class AgentRuntime:
                         round=round_index,
                     ),
                 )
+                self.emit_hook("on_error", session=session, turn_id=turn.id, message=f"provider error: {provider_error}", round=round_index)
                 break
             for chunk in response.deltas:
                 self._record_event(session, AgentEvent.make(AgentEventType.MODEL_DELTA, session_id=session.session_id, turn_id=turn.id, text=chunk, model=response.model, provider=response.provider, round=round_index))
@@ -1410,6 +1454,7 @@ class AgentRuntime:
         session.state.active_turn_id = None
         session.state.status = RuntimeStatus.COMPLETED if turn.status == RuntimeStatus.COMPLETED.value else RuntimeStatus.FAILED
         self._record_event(session, AgentEvent.make(AgentEventType.USER_TURN_COMPLETED, session_id=session.session_id, turn_id=turn.id, status=turn.status))
+        self.emit_hook("on_complete", session=session, turn_id=turn.id, status=turn.status)
         self.create_checkpoint(session, "completion" if turn.status == RuntimeStatus.COMPLETED.value else "error", summary=turn.status)
         self.save_session(session)
         return session

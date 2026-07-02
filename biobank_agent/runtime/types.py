@@ -94,6 +94,9 @@ class RuntimeConfig:
     external_council_agents: str = "codex,claude,gemini"
     external_council_policy: str = "requested"  # requested | always | never
     external_council_timeout_s: int = 180
+    # Opt-in gate for third-party plugin hooks. When false, hooks contributed by installed plugins are
+    # registered but never executed by the runtime hook registry (per-plugin opt-in is still possible).
+    plugin_allow_hooks: bool = False
     schema_version: int = SCHEMA_VERSION
 
     @classmethod
@@ -123,6 +126,7 @@ class RuntimeConfig:
             external_council_agents=str(getattr(settings, "plan_external_council_agents", cls.external_council_agents)),
             external_council_policy=str(getattr(settings, "plan_external_council_policy", cls.external_council_policy)),
             external_council_timeout_s=int(getattr(settings, "plan_external_council_timeout_s", cls.external_council_timeout_s)),
+            plugin_allow_hooks=bool(getattr(settings, "plugin_allow_hooks", cls.plugin_allow_hooks)),
         )
 
     def model_for_role(self, role: ProviderRole | str) -> str:

@@ -1060,6 +1060,7 @@ class InteractiveShell:
                     break
                 step.status = "running"
                 self._active_exec_step_label = step.id  # model stream + tool output flow into this row
+                runtime.emit_hook("on_step", session=session, step=step.id, title=step.title, position=position, total=total)
                 view.record("Execution", actor=step.id, status="running",
                             message=f"step {position}/{total}: {step.title}",
                             metadata={"subagent": step.id, "current_step": step.id,
@@ -4083,6 +4084,10 @@ class InteractiveShell:
                     )
                     return {"status": "not_found", "plugin": name}
                 result = plugmod.install_plugin(mp, name, allow_hooks=allow_hooks)
+                # Register the plugin's hooks into the shared lifecycle registry as GATED external
+                # hooks. They never execute unless this plugin is opted in (--allow-hooks /
+                # plugin_allow_hooks); registration only makes them visible and individually enable-able.
+                self._register_plugin_hooks(name, result.get("hooks", []), allow_hooks=allow_hooks)
                 n = result.get("skill_count", 0)
                 self.console.print(
                     f"[green]Installed[/] {_rich_escape(name)}: {n} skill(s) now available"
@@ -4119,6 +4124,34 @@ class InteractiveShell:
         except Exception as exc:
             self.console.print(f"[red]Plugin command failed:[/] {_rich_escape(str(exc))}")
             return {"status": "error", "error": str(exc)}
+
+    def _register_plugin_hooks(self, plugin: str, hooks: list, *, allow_hooks: bool) -> int:
+        """Bind a plugin's discovered command-hooks to the runtime lifecycle registry, gated.
+
+        Each hook is registered as ``trust="external"`` owned by ``plugin`` and never runs until the
+        plugin is opted in. ``allow_hooks`` opts this plugin in for the session. Returns hooks bound.
+        """
+        from biobank_agent.runtime import hooks as hookmod
+
+        registry = getattr(getattr(self, "runtime", None), "hooks", None) or hookmod.default_registry()
+        bound = 0
+        for record in hooks or []:
+            command = str(record.get("command", "")).strip()
+            if not command:
+                continue
+            event = hookmod.map_plugin_event(record.get("event", "")) or hookmod.PRE_TOOL
+            registry.register(
+                event,
+                hookmod.make_command_hook(command, event=event, plugin=plugin),
+                trust=hookmod.TRUST_EXTERNAL,
+                plugin=plugin,
+            )
+            bound += 1
+        if allow_hooks:
+            runtime = getattr(self, "runtime", None)
+            if runtime is not None and hasattr(runtime, "allow_plugin_hooks"):
+                runtime.allow_plugin_hooks(plugin)
+        return bound
 
     def _cmd_agent(self, *_args: Any) -> None:
         session = self._require_session()

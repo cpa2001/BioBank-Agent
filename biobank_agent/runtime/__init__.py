@@ -6,6 +6,7 @@ from .audit import RuntimeAuditReport, audit_session, write_audit_report
 from .engine import AgentRuntime, AgentSession, FakeProvider, ProviderRouter, SessionStore
 from .evolution import EvolutionProposal, LearningReport, collect_feedback, learn_from_session, propose_improvements, reject_persistent_apply, write_learning_report
 from .harness import HARNESS_SCHEMA_VERSION, HarnessExpectations, HarnessRunReport, HarnessStep, HarnessTask, RuntimeHarnessRunner, StaticHarnessTool, write_harness_report
+from .hooks import HookOutcome, HookRegistry, default_registry, emit_hook, hook, make_command_hook
 from .patch_generation import (
     PatchGenerationResult,
     enrich_proposals_with_patches,
@@ -44,6 +45,12 @@ __all__ = [
     "AgentRuntime",
     "AgentSession",
     "FakeProvider",
+    "HookOutcome",
+    "HookRegistry",
+    "default_registry",
+    "emit_hook",
+    "hook",
+    "make_command_hook",
     "HARNESS_SCHEMA_VERSION",
     "HarnessExpectations",
     "HarnessRunReport",

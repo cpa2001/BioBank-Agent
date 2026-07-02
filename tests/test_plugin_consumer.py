@@ -183,3 +183,38 @@ def test_cmd_plugin_add_list_and_usage(tmp_path):
     assert "superpowers" in out.getvalue()
     assert shell._cmd_plugin("")["status"] == "usage"
     assert shell._cmd_plugin("install nope")["status"] == "not_found"
+
+
+def test_register_plugin_hooks_binds_gated_external_hooks(tmp_path):
+    """`_register_plugin_hooks` binds a plugin's discovered command-hooks into the runtime lifecycle
+    registry as gated external hooks: they map to a lifecycle event, are owned by the plugin, and never
+    execute (only "skipped") until the plugin is opted in."""
+    from io import StringIO
+    from types import SimpleNamespace
+
+    from rich.console import Console
+
+    from biobank_agent.cli.interactive import InteractiveShell
+    from biobank_agent.runtime.hooks import ON_TURN_START, TRUST_EXTERNAL, default_registry
+
+    default_registry().clear()
+    shell = InteractiveShell(
+        settings=SimpleNamespace(memory_dir=str(tmp_path / "mem"), plugin_allow_hooks=False),
+        console=Console(file=StringIO(), force_terminal=False, width=100),
+    )
+    # SessionStart is a Claude-Code event name; it must map onto our on_turn_start lifecycle event.
+    bound = shell._register_plugin_hooks(
+        "superpowers",
+        [{"event": "SessionStart", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/run.sh"}],
+        allow_hooks=False,
+    )
+    assert bound == 1
+
+    registry = getattr(getattr(shell, "runtime", None), "hooks", None) or default_registry()
+    handles = registry.handles(ON_TURN_START)
+    assert handles and handles[0].plugin == "superpowers" and handles[0].trust == TRUST_EXTERNAL
+
+    # Gated: firing the event without opt-in reports "skipped" and never runs the shell command.
+    outcomes = registry.emit(ON_TURN_START, allow_external=False, allowed_plugins=set())
+    assert outcomes and all(o.status == "skipped" for o in outcomes)
+    default_registry().clear()
