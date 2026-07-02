@@ -22,7 +22,11 @@ land on a review branch, never on main and never in core. Finally it adds
 external-agent orchestration: consult codex/claude/gemini in parallel (in plan
 mode), auto-escalate a step that has exhausted its retries, spawn depth-bounded
 biobank child sessions, and run a workflow DAG with fan-out/fan-in — all
-default-OFF. Designed and reviewed with an external coding agent.
+default-OFF. And it adds a data-lake engine that self-indexes a large folder,
+infers each file's schema from a bounded sample, converts to columnar Parquet,
+and locates the cheapest files holding the columns the next step needs — all
+out-of-core (never a whole-file read), designed for 10TB-scale folders and
+validated on synthetic fixtures. Designed and reviewed with an external coding agent.
 
 ### Added
 - Inactivity-based per-step timeout with a separate absolute hard ceiling
@@ -105,6 +109,20 @@ default-OFF. Designed and reviewed with an external coding agent.
   depth guard, and gated difficulty-escalation folding advice into the diagnosis
   (`tests/test_external_orchestration.py`, `tests/test_workflow.py`,
   `tests/test_subruntime.py`, `tests/test_external_escalation.py`).
+- Data-lake engine (`biobank_agent/data/indexer.py`): `index_directory` walks a
+  folder (bounded, hidden-skipping) and records each data file's format, size, and
+  SAMPLED schema (DuckDB `read_csv_auto(sample_size=N)` / `read_parquet` metadata /
+  header sniff) under a DuckDB memory cap — never a whole-file read; the catalog
+  persists as JSON. `convert_to_parquet` row-streams a delimited file to columnar
+  SNAPPY via DuckDB `COPY` (atomic write); `locate_data_for_step` ranks catalog
+  files by column/keyword coverage, cheapest first. Four skills expose these
+  (`index_data_lake`, `infer_schema`, `convert_format`, `locate_data_for_step` in
+  `biobank_agent/skills/data_engine.py`) — registry 101 → 105 (README updated) —
+  with new `data_engine_*` settings (`biobank_agent/config.py`).
+- Data-engine tests: format classification, sampled CSV/TSV/Parquet schema +
+  defensive broken-file handling, directory indexing (hidden/non-data skipped,
+  format filter, catalog round-trip), locate ranking, out-of-core conversion, and
+  the four skills (`tests/test_data_indexer.py`, `tests/test_data_engine_skills.py`).
 
 ### Changed
 - Execution now streams WITH tools: `LLMProvider.complete` takes the streaming

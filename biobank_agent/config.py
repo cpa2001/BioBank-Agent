@@ -219,6 +219,14 @@ class Settings(BaseSettings):
     biobank_subagent_enabled: bool = False
     biobank_subagent_max_depth: int = 2
 
+    # ── Data-lake engine (Phase 6) ───────────────────────────────
+    # Bounded, out-of-core indexing/conversion of large data folders. Schema is inferred from a sample
+    # (never a full read) under a DuckDB memory cap; catalogs persist as JSON. Designed for 10TB-scale
+    # folders, validated on synthetic fixtures.
+    data_engine_mem_cap_mb: int = 512
+    data_engine_sample_rows: int = 200
+    data_index_dir: str = ""  # where index catalogs are written; empty → reports_dir
+
     # ── Adversarial-game council ─────────────────────────────────
     # Route planning through the proposer/red-team/referee game instead of the symmetric
     # debate. Default OFF; kept only if it beats symmetric on the council A/B set.
