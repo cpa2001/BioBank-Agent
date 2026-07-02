@@ -144,6 +144,37 @@ def test_scheduled_pattern_mining_writes_history_artifacts(tmp_path):
     assert latest["n_patterns"] == 1
 
 
+def test_tool_learner_mines_repeated_success_sequences():
+    learner = ToolLearner()
+    for _ in range(3):
+        for name in ("cohort_summary", "train_model", "evaluate_model"):
+            learner.record(name, {"icd10_code": "E11"}, {"summary": "ok"}, elapsed_s=0.1)
+    # a failure must break a run so a failed pipeline is never counted as a successful sequence
+    learner.record("cohort_summary", {}, {"summary": "ok"}, 0.1)
+    learner.record("train_model", {}, {"error": "boom"}, 0.1)
+
+    sequences = learner.mine_success_sequences(min_count=3, n_values=(2, 3))
+    grams = {s.sequence: s.count for s in sequences}
+    assert grams.get(("cohort_summary", "train_model", "evaluate_model")) == 3
+    assert grams.get(("cohort_summary", "train_model")) == 3
+    # threshold is respected
+    assert learner.mine_success_sequences(min_count=4) == []
+
+
+def test_pattern_mining_surfaces_success_sequences(tmp_path):
+    learner = ToolLearner()
+    for _ in range(3):
+        for name in ("cohort_summary", "train_model", "evaluate_model"):
+            learner.record(name, {}, {"summary": "ok"}, 0.1)
+
+    run = run_pattern_mining(learner, output_dir=tmp_path, min_count=3)
+
+    assert run.n_sequences >= 1
+    latest = json.loads(Path(run.artifacts["latest_json"]).read_text(encoding="utf-8"))
+    assert latest["n_sequences"] == run.n_sequences
+    assert any(s["sequence"][:2] == ["cohort_summary", "train_model"] for s in latest["sequences"])
+
+
 # ── Patch classifier ───────────────────────────────────────
 
 

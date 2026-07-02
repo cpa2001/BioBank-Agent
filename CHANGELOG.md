@@ -15,8 +15,11 @@ live execution view — a Codex-style streaming transcript for a single track an
 Claude-Code-style task tree for a parallel fan-out — so the user watches what the
 agent is producing in real time. It also opens a gated plugin subsystem: install
 Claude-Code-style plugins from a marketplace to gain their skills, while plugin
-hooks and other third-party code stay inert until explicitly opted in. Designed
-and reviewed with an external coding agent.
+hooks and other third-party code stay inert until explicitly opted in. And it
+adds self-evolution auto-capture: the agent mines its own repeated successful
+skill sequences and proposes them as review-only wrapper skills that can only
+land on a review branch, never on main and never in core. Designed and reviewed
+with an external coding agent.
 
 ### Added
 - Inactivity-based per-step timeout with a separate absolute hard ceiling
@@ -66,6 +69,22 @@ and reviewed with an external coding agent.
   vs gated hooks, `/plugin` command flow, hook firing/gating/defensiveness, and
   the runtime emitting lifecycle hooks around a real turn
   (`tests/test_plugin_consumer.py`, `tests/test_hook_registry.py`).
+- Self-evolution auto-capture of frequent successful sequences into skills:
+  `ToolLearner.mine_success_sequences` mines repeated runs of consecutive
+  successful calls (n-grams, failure-broken), `run_pattern_mining` surfaces them,
+  and `runtime/sequence_skill.py` deterministically synthesises a self-contained,
+  AST-validated recipe skill (no LLM, no shell-out) and proposes it review-only.
+  Routed through `apply_proposal(force_review_branch=True)` it lands on a review
+  branch under the allow-listed `custom_skills/` — never on `main`, never in core.
+  `learner_from_trajectory` bridges the durable `trajectory.jsonl` into mining;
+  the whole chain is gated OFF behind `self_evolve_autocapture_enabled`
+  (`biobank_agent/tool_learner.py`, `biobank_agent/core/evolution/pattern_mining.py`,
+  `biobank_agent/runtime/sequence_skill.py`, `biobank_agent/config.py`).
+- Self-evolution tests: success-sequence mining (threshold, failure-broken runs),
+  `run_pattern_mining` surfacing sequences, deterministic skill synthesis + safety
+  validation, the generated skill applying to a review branch (never the live tree)
+  through the real apply gate, and the trajectory→learner bridge
+  (`tests/test_sequence_skill.py`, `tests/core/test_evolution_layer.py`).
 
 ### Changed
 - Execution now streams WITH tools: `LLMProvider.complete` takes the streaming

@@ -201,6 +201,14 @@ class Settings(BaseSettings):
     plugins_enabled: bool = False
     plugin_allow_hooks: bool = False
 
+    # ── Self-evolution: auto-capture frequent sequences into skills ──
+    # Opt-in: mine repeated SUCCESSFUL tool/skill sequences and propose them as review-only wrapper
+    # skills. Default OFF — capture is surfaced through /evolve for review and lands only on a review
+    # branch under custom_skills/ (never core, never auto-promoted). min_count is the recurrence
+    # threshold for a sequence to become a candidate.
+    self_evolve_autocapture_enabled: bool = False
+    self_evolve_autocapture_min_count: int = 3
+
     # ── Adversarial-game council ─────────────────────────────────
     # Route planning through the proposer/red-team/referee game instead of the symmetric
     # debate. Default OFF; kept only if it beats symmetric on the council A/B set.

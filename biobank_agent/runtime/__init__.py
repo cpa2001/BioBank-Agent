@@ -15,6 +15,11 @@ from .patch_generation import (
 )
 from .replay import ReplayReport, replay_trajectory
 from .self_evolve import DEFAULT_APPLY_ALLOW_PATHS, EvolutionApplyResult, apply_patch_transactionally, apply_proposal
+from .sequence_skill import (
+    propose_skill_from_sequence,
+    propose_skills_from_sequences,
+    synthesize_sequence_skill,
+)
 from .types import (
     ActionGraphNode,
     ApprovalRequest,
@@ -96,6 +101,9 @@ __all__ = [
     "generate_patch_for_proposal",
     "learn_from_session",
     "propose_improvements",
+    "propose_skill_from_sequence",
+    "propose_skills_from_sequences",
+    "synthesize_sequence_skill",
     "reject_persistent_apply",
     "replay_trajectory",
     "StaticHarnessTool",

@@ -18,6 +18,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
 from .core.evolution.patch_classifier import classify
@@ -62,6 +63,24 @@ class FailurePattern:
     count: int
     examples: list[dict] = field(default_factory=list)
     suggested_action: str = ""
+
+
+@dataclass
+class SequencePattern:
+    """A frequently-repeated run of consecutive SUCCESSFUL skill calls.
+
+    Raw material for auto-capturing a reusable wrapper skill: ``sequence`` is the
+    ordered tuple of skill names, ``count`` how often it recurred, ``length`` its
+    n-gram size, and ``examples`` a few observed arg lists for parameterisation.
+    """
+    sequence: tuple[str, ...]
+    count: int
+    length: int
+    examples: list[dict] = field(default_factory=list)
+
+    @property
+    def slug(self) -> str:
+        return "_then_".join(self.sequence)
 
 
 class ToolLearner:
@@ -244,6 +263,59 @@ class ToolLearner:
         patterns.sort(key=lambda p: (-p.count, p.skill_name, p.error_signature))
         return patterns
 
+    def mine_success_sequences(
+        self,
+        min_count: int = 3,
+        n_values: tuple[int, ...] = (2, 3),
+    ) -> list["SequencePattern"]:
+        """Mine repeated runs of consecutive SUCCESSFUL skill calls from recent history.
+
+        A failure breaks a run, so only genuinely end-to-end successful sub-pipelines are counted.
+        Deterministic and local (like :meth:`mine_failure_patterns`): it gives the self-evolution
+        pipeline an auditable set of candidate sequences to wrap into a skill before any code is written.
+        Note: ``_history`` is a flat cross-task log, so adjacency is best-effort until a per-session
+        learner (see ``learner_from_trajectory``) supplies cleaner boundaries.
+        """
+        runs: list[list[dict]] = []
+        current: list[dict] = []
+        for item in self._history:
+            if item.get("success"):
+                current.append(item)
+            else:
+                if len(current) >= min(n_values):
+                    runs.append(current)
+                current = []
+        if len(current) >= min(n_values):
+            runs.append(current)
+
+        counters: dict[int, Counter] = {n: Counter() for n in n_values}
+        examples: dict[tuple[str, ...], list[dict]] = defaultdict(list)
+        for run in runs:
+            names = [str(i.get("skill", "")) for i in run]
+            for n in n_values:
+                for idx in range(len(names) - n + 1):
+                    gram = tuple(names[idx:idx + n])
+                    if "" in gram:
+                        continue
+                    counters[n][gram] += 1
+                    if len(examples[gram]) < 3:
+                        examples[gram].append(
+                            {"skills": list(gram),
+                             "args": [run[idx + j].get("args", {}) for j in range(n)]}
+                        )
+
+        patterns: list[SequencePattern] = []
+        for n in n_values:
+            for gram, count in counters[n].items():
+                if count < min_count:
+                    continue
+                patterns.append(SequencePattern(
+                    sequence=gram, count=count, length=n, examples=examples[gram][:3],
+                ))
+        # Most frequent first, then longer sequences (a better wrapper), then name for determinism.
+        patterns.sort(key=lambda p: (-p.count, -p.length, p.sequence))
+        return patterns
+
     def suggest_workflow(self, query: str) -> list[str]:
         """Suggest a reusable workflow skeleton for a broad user query."""
         q = (query or "").lower()
@@ -362,3 +434,39 @@ class ToolLearner:
             "",
         ]
         return target_path, "\n".join(diff_lines)
+
+
+def learner_from_trajectory(path: "str | Path", *, memory: "Optional[LongTermMemory]" = None) -> ToolLearner:
+    """Reconstruct a :class:`ToolLearner` from a runtime ``trajectory.jsonl`` (the durable v3 log).
+
+    The runtime engine records tool calls to ``trajectory.jsonl`` rather than feeding ``ToolLearner``
+    directly; this bridges the two so success-sequence mining can run over a persisted session. Each
+    ``tool_call_completed`` event contributes one recorded call in order, with success taken from the
+    event ``state`` (``failed``/``error`` — or a non-empty result error — count as a failure).
+    """
+    learner = ToolLearner(memory=memory)
+    p = Path(path)
+    if not p.exists():
+        return learner
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        event = record.get("event") if isinstance(record, dict) else None
+        event = event if isinstance(event, dict) else record
+        if str(event.get("type", "")) != "tool_call_completed":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        tool = str(payload.get("tool") or result.get("name") or "")
+        if not tool:
+            continue
+        state = str(payload.get("state") or "").lower()
+        error = str(result.get("error") or "")
+        failed = state in {"failed", "error"} or bool(error)
+        learner.record(tool, {}, {"error": error or "failed"} if failed else {"summary": "ok"})
+    return learner

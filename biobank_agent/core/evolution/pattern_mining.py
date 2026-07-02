@@ -25,6 +25,9 @@ class EvolutionPatternRun:
     patterns: list[dict[str, Any]]
     proposals: list[dict[str, Any]]
     artifacts: dict[str, str] = field(default_factory=dict)
+    # Repeated runs of consecutive SUCCESSFUL calls — candidates for auto-captured wrapper skills
+    # (self-evolution). Additive: absent from a learner that predates success-sequence mining.
+    sequences: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def n_patterns(self) -> int:
@@ -34,10 +37,15 @@ class EvolutionPatternRun:
     def n_proposals(self) -> int:
         return len(self.proposals)
 
+    @property
+    def n_sequences(self) -> int:
+        return len(self.sequences)
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["n_patterns"] = self.n_patterns
         data["n_proposals"] = self.n_proposals
+        data["n_sequences"] = self.n_sequences
         return data
 
 
@@ -57,6 +65,13 @@ def run_pattern_mining(
         _proposal_to_dict(proposal)
         for proposal in (learner.auto_propose_skill_improvement(min_count=min_count) or [])
     ]
+    # Success-sequence mining is additive and duck-typed: a learner without it simply yields none, so the
+    # failure-mining status semantics are unchanged (sequences are opportunities surfaced for review).
+    sequence_miner = getattr(learner, "mine_success_sequences", None)
+    sequences = (
+        [_sequence_to_dict(seq) for seq in (sequence_miner(min_count=min_count) or [])]
+        if callable(sequence_miner) else []
+    )
     result = EvolutionPatternRun(
         status="NEEDS_REVIEW" if patterns else "PASS",
         timestamp=datetime.now().strftime("%Y%m%d_%H%M%S"),
@@ -64,6 +79,7 @@ def run_pattern_mining(
         min_count=int(min_count),
         patterns=patterns,
         proposals=proposals,
+        sequences=sequences,
     )
     if write_artifacts:
         _write_artifacts(result, Path(output_dir))
@@ -109,6 +125,15 @@ def _pattern_to_dict(pattern: Any) -> dict[str, Any]:
         "count": int(getattr(pattern, "count", 0) or 0),
         "suggested_action": str(getattr(pattern, "suggested_action", "")),
         "examples": _jsonable(getattr(pattern, "examples", []) or []),
+    }
+
+
+def _sequence_to_dict(sequence: Any) -> dict[str, Any]:
+    return {
+        "sequence": [str(s) for s in getattr(sequence, "sequence", ()) or ()],
+        "count": int(getattr(sequence, "count", 0) or 0),
+        "length": int(getattr(sequence, "length", 0) or 0),
+        "examples": _jsonable(getattr(sequence, "examples", []) or []),
     }
 
 
@@ -180,6 +205,12 @@ def _render_markdown(result: EvolutionPatternRun) -> str:
                 f"- Suggested action: {proposal.get('suggested_action', '')}",
                 "",
             ])
+    if result.sequences:
+        lines.extend(["", "## Frequent Successful Sequences (auto-capture candidates)", ""])
+        for idx, seq in enumerate(result.sequences, start=1):
+            steps = " → ".join(seq.get("sequence", []))
+            lines.append(f"{idx}. `{steps}` (observed {seq.get('count', 0)}x)")
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
