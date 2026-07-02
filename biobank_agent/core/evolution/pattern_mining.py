@@ -55,8 +55,14 @@ def run_pattern_mining(
     output_dir: str | Path = "reports/eval/evolution",
     min_count: int = 3,
     write_artifacts: bool = True,
+    mine_sequences: bool = False,
 ) -> EvolutionPatternRun:
-    """Mine repeated failure patterns and optionally write audit artifacts."""
+    """Mine repeated failure patterns and optionally write audit artifacts.
+
+    ``mine_sequences`` also surfaces frequent SUCCESSFUL sequences (self-evolution auto-capture
+    candidates). It defaults OFF so the feature stays gated: a caller passes
+    ``mine_sequences=settings.self_evolve_autocapture_enabled``.
+    """
     patterns = [
         _pattern_to_dict(pattern)
         for pattern in (learner.mine_failure_patterns(min_count=min_count) or [])
@@ -65,12 +71,11 @@ def run_pattern_mining(
         _proposal_to_dict(proposal)
         for proposal in (learner.auto_propose_skill_improvement(min_count=min_count) or [])
     ]
-    # Success-sequence mining is additive and duck-typed: a learner without it simply yields none, so the
-    # failure-mining status semantics are unchanged (sequences are opportunities surfaced for review).
+    # Gated + duck-typed: only when explicitly enabled AND the learner supports it.
     sequence_miner = getattr(learner, "mine_success_sequences", None)
     sequences = (
         [_sequence_to_dict(seq) for seq in (sequence_miner(min_count=min_count) or [])]
-        if callable(sequence_miner) else []
+        if mine_sequences and callable(sequence_miner) else []
     )
     result = EvolutionPatternRun(
         status="NEEDS_REVIEW" if patterns else "PASS",

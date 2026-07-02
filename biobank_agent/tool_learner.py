@@ -467,6 +467,8 @@ def learner_from_trajectory(path: "str | Path", *, memory: "Optional[LongTermMem
             continue
         state = str(payload.get("state") or "").lower()
         error = str(result.get("error") or "")
-        failed = state in {"failed", "error"} or bool(error)
+        # A non-success terminal state (failure, cancellation, or timeout) must break a "successful"
+        # run, so a cancelled/timed-out call never slips into a mined success sequence.
+        failed = state in {"failed", "error", "cancelled", "canceled", "timeout", "timed_out"} or bool(error)
         learner.record(tool, {}, {"error": error or "failed"} if failed else {"summary": "ok"})
     return learner

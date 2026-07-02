@@ -464,11 +464,25 @@ def apply_patch_transactionally(
         return EvolutionApplyResult(status="error", target_path=target_path, error=str(exc), summary=summary)
 
 
+# Proposals that must NEVER auto-merge, whatever the caller passes: a proposal that declares itself
+# review-only, or an agent-synthesized skill captured from a tool sequence. Enforcing this here (not just
+# at the call site) means the generic /evolve apply path cannot accidentally fast-forward such a change
+# onto the live branch.
+_REVIEW_ONLY_APPLY_MODES = {"review_only"}
+_REVIEW_ONLY_CATEGORIES = {"skill_from_sequence"}
+
+
 def apply_proposal(proposal, *, repo_root: str | Path, allow_paths: tuple[str, ...] = DEFAULT_APPLY_ALLOW_PATHS, force_review_branch: bool = False) -> EvolutionApplyResult:
     """Apply an EvolutionProposal that carries a concrete patch + tests.
 
     ``force_review_branch=True`` (agent-synthesized/ingested skills) keeps the verified change on a
-    review branch instead of auto-merging, regardless of allow-listing."""
+    review branch instead of auto-merging, regardless of allow-listing. A proposal that declares
+    ``apply_mode="review_only"`` (or an auto-captured ``skill_from_sequence``) ENFORCES this on its own,
+    so no caller can auto-merge it onto the live branch."""
+    review_only = (
+        str(getattr(proposal, "apply_mode", "")) in _REVIEW_ONLY_APPLY_MODES
+        or str(getattr(proposal, "category", "")) in _REVIEW_ONLY_CATEGORIES
+    )
     return apply_patch_transactionally(
         repo_root=repo_root,
         target_path=getattr(proposal, "target_path", "") or "",
@@ -476,7 +490,7 @@ def apply_proposal(proposal, *, repo_root: str | Path, allow_paths: tuple[str, .
         test_commands=list(getattr(proposal, "test_commands", []) or []),
         summary=getattr(proposal, "summary", "") or getattr(proposal, "proposal_id", ""),
         allow_paths=allow_paths,
-        force_review_branch=force_review_branch,
+        force_review_branch=force_review_branch or review_only,
     )
 
 

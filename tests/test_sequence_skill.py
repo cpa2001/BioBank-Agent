@@ -87,6 +87,47 @@ def test_proposals_collapse_rotations_and_respect_top_k():
     assert all(p.diff and p.test_commands and p.target_path.startswith("custom_skills/") for p in props)
 
 
+def test_skills_dir_outside_allow_list_is_refused():
+    import pytest
+
+    for bad in ("biobank_agent/core", "biobank_agent/runtime", "tests", "/etc"):
+        with pytest.raises(ValueError):
+            synthesize_sequence_skill(("a", "b"), count=3, skills_dir=bad)
+
+
+def test_distinct_orderings_of_same_skill_set_are_not_collapsed():
+    # a→b→c and b→a→c share a skill set but are NOT cyclic rotations, so both must be proposed.
+    patterns = [
+        SequencePattern(sequence=("a", "b", "c"), count=6, length=3),
+        SequencePattern(sequence=("b", "a", "c"), count=5, length=3),
+    ]
+    props = propose_skills_from_sequences(patterns, top_k=5)
+    assert len(props) == 2
+
+
+def test_long_sequence_names_stay_unique_after_truncation():
+    a = tuple(f"averylongskillname{i}" for i in range(12))
+    b = a[:-1] + ("averylongskillnameZZZ",)  # differs only at the end, past the 80-char cut
+    from biobank_agent.runtime.sequence_skill import sequence_skill_name
+
+    na, nb = sequence_skill_name(a), sequence_skill_name(b)
+    assert len(na) <= 80 and len(nb) <= 80 and na != nb
+
+
+def test_example_args_are_coerced_to_inert_data():
+    class Evil:
+        def __repr__(self):
+            return 'print("ran")'
+
+    built = synthesize_sequence_skill(("a", "b"), count=2, examples=[{"args": [Evil()]}])
+    ok, _ = SkillGenerator.validate_code(built["code"])
+    assert ok
+    ns: dict = {}
+    exec(compile(built["code"], built["target_path"], "exec"), ns)
+    # the crafted repr became a JSON string, not an executable call
+    assert ns[built["name"]]()["example_args"] == ['print("ran")']
+
+
 def test_autocaptured_skill_applies_to_review_branch_never_live_tree(tmp_path):
     repo = _init_repo(tmp_path)
     proposal = propose_skill_from_sequence(SequencePattern(sequence=("cohort_summary", "train_model"), count=4, length=2))
@@ -97,6 +138,19 @@ def test_autocaptured_skill_applies_to_review_branch_never_live_tree(tmp_path):
     assert result.tests_passed  # the generated skill's inline test ran and passed in the worktree
     assert "evolve/" in _branches(repo)  # parked for human review
     assert not (repo / proposal.target_path).exists()  # never auto-merged onto main
+
+
+def test_sequence_proposal_never_auto_merges_even_without_force_flag(tmp_path):
+    # The High-severity fix: apply_proposal enforces review-only from the proposal itself, so the generic
+    # apply path (no force_review_branch) still cannot fast-forward a captured skill onto the live branch.
+    repo = _init_repo(tmp_path)
+    proposal = propose_skill_from_sequence(SequencePattern(sequence=("cohort_summary", "train_model"), count=4, length=2))
+
+    result = apply_proposal(proposal, repo_root=repo)  # NOTE: no force_review_branch
+
+    assert result.status == "review_branch", result.error
+    assert "evolve/" in _branches(repo)
+    assert not (repo / proposal.target_path).exists()
 
 
 def test_learner_from_trajectory_rebuilds_successful_sequences(tmp_path):
@@ -118,3 +172,19 @@ def test_learner_from_trajectory_rebuilds_successful_sequences(tmp_path):
     assert seqs.get(("cohort_summary", "train_model", "evaluate_model")) == 3
     # missing file yields an empty learner, not an error
     assert isinstance(learner_from_trajectory(tmp_path / "nope.jsonl"), ToolLearner)
+
+
+def test_learner_from_trajectory_treats_cancelled_as_failure(tmp_path):
+    import json
+
+    events = [
+        {"event": {"type": "tool_call_completed", "payload": {"tool": "a", "state": "completed", "result": {}}}},
+        {"event": {"type": "tool_call_completed", "payload": {"tool": "b", "state": "cancelled", "result": {}}}},
+        {"event": {"type": "tool_call_completed", "payload": {"tool": "c", "state": "completed", "result": {}}}},
+    ]
+    traj = tmp_path / "trajectory.jsonl"
+    traj.write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
+
+    learner = learner_from_trajectory(traj)
+    # b is cancelled → it breaks the run, so no (a, b, c) success sequence spans the cancellation.
+    assert learner.mine_success_sequences(min_count=1, n_values=(2, 3)) == []

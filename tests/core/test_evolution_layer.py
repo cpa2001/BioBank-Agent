@@ -161,14 +161,18 @@ def test_tool_learner_mines_repeated_success_sequences():
     assert learner.mine_success_sequences(min_count=4) == []
 
 
-def test_pattern_mining_surfaces_success_sequences(tmp_path):
+def test_pattern_mining_surfaces_success_sequences_only_when_enabled(tmp_path):
     learner = ToolLearner()
     for _ in range(3):
         for name in ("cohort_summary", "train_model", "evaluate_model"):
             learner.record(name, {}, {"summary": "ok"}, 0.1)
 
-    run = run_pattern_mining(learner, output_dir=tmp_path, min_count=3)
+    # Gated OFF by default: sequences are not surfaced.
+    off = run_pattern_mining(learner, output_dir=tmp_path, min_count=3)
+    assert off.n_sequences == 0
 
+    # Opted in: sequences surface into the run and its artifacts.
+    run = run_pattern_mining(learner, output_dir=tmp_path, min_count=3, mine_sequences=True)
     assert run.n_sequences >= 1
     latest = json.loads(Path(run.artifacts["latest_json"]).read_text(encoding="utf-8"))
     assert latest["n_sequences"] == run.n_sequences
