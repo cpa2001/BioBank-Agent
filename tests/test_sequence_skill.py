@@ -61,6 +61,19 @@ def test_synthesized_skill_passes_safety_validation_and_lands_in_custom_skills()
     assert "subprocess" not in built["code"] and "shell_exec" not in built["code"]
 
 
+def test_crafted_skill_name_cannot_break_out_of_the_generated_file():
+    # A step name with quotes/newlines/code must not escape into executable code: it may appear only as
+    # inert data inside a repr'd string literal, the name is reduced to an identifier, and nothing runs.
+    built = synthesize_sequence_skill(('a"""\nimport os\nos.system("x")', "b"), count=1)
+    assert built["name"].startswith("pipeline_") and built["name"].replace("_", "").isalnum()
+    ok, msg = SkillGenerator.validate_code(built["code"])
+    assert ok, msg  # the AST safety gate accepts it — the payload is safe
+    ns: dict = {}
+    exec(compile(built["code"], built["target_path"], "exec"), ns)  # execs cleanly, no injected import runs
+    assert "os" not in ns  # the crafted `import os` stayed data, never executed
+    assert ns[built["name"]]()["status"] == "success"
+
+
 def test_proposals_collapse_rotations_and_respect_top_k():
     patterns = [
         SequencePattern(sequence=("a", "b", "c"), count=6, length=3),

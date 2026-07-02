@@ -44,7 +44,11 @@ def render_sequence_skill(
     name = sequence_skill_name(sequence)
     steps = [str(s) for s in sequence]
     example_args: list[Any] = list((examples or [{}])[0].get("args", []) or []) if examples else []
-    desc = f"Auto-captured pipeline recipe: {' then '.join(steps)} (observed {int(count)}x)."
+    # The executable payload embeds steps/args via repr (safe); the human-facing description is the only
+    # place a name is interpolated into a string literal, so strip it to alnum/underscore to close any
+    # quote/newline break-out (validate_code is the backstop, but this fails safe up front).
+    safe_steps = [re.sub(r"[^A-Za-z0-9_]+", "", s) or "step" for s in steps]
+    desc = f"Auto-captured pipeline recipe: {' then '.join(safe_steps)} (observed {int(count)}x)."
     return f'''"""Auto-generated pipeline recipe skill (self-evolution, review-only).
 
 Captured from {int(count)} repeated successful runs of the sequence below. Calling it returns the
