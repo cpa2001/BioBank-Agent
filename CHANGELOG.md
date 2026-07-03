@@ -123,6 +123,15 @@ validated on synthetic fixtures. Designed and reviewed with an external coding a
   defensive broken-file handling, directory indexing (hidden/non-data skipped,
   format filter, catalog round-trip), locate ranking, out-of-core conversion, and
   the four skills (`tests/test_data_indexer.py`, `tests/test_data_engine_skills.py`).
+- 50-round end-to-end + self-repair harness (`tests/test_e2e_selfrepair_harness.py`):
+  a parametrized scenario table across three families — shell-lifecycle self-repair
+  (drive `/plan` + `/plan-approve` with injected stalls / Ctrl-C; assert the plan
+  completes or pauses cleanly with a bounded repair budget, never raising out of
+  the shell), engine resilience (boom provider → graceful FAILED, recovered tool
+  error → COMPLETED, no-progress loop → bounded stop, token budget → graceful
+  halt), and cross-subsystem E2E (data-lake index/locate/convert, workflow DAG
+  failure isolation, subagent depth guard, gated plugin hooks). Offline and
+  deterministic; proves the agent completes or self-repairs and never crashes.
 
 ### Changed
 - Execution now streams WITH tools: `LLMProvider.complete` takes the streaming
